@@ -218,6 +218,7 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.families.stats_cache, {})
         self.assertNotIn("9", self.families.items)
         self.assertNotIn("9", self.families.presence)
+        self.assertNotIn("9", self.families.delivery_locks)
         self.assertNotIn("9", self.families.last_family_check)
         with self.assertRaises(TokenRejected):
             await self.families.owner_token(account)
@@ -286,6 +287,36 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
                 released.set()
                 await request
         self.assertNotIn(ALICE, self.families.stats_cache)
+
+    async def test_logout_during_observation_cannot_restore_snapshot_or_pending_alerts(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        await self.db.update_family("9", notify_chat=-100)
+        started, released = asyncio.Event(), asyncio.Event()
+        observe = self.db.observe_family
+
+        async def delayed_observe(*args):
+            started.set()
+            await released.wait()
+            await observe(*args)
+
+        current = snapshot([{"appid": 620, "name": "Portal 2", "owners": [ALICE]}])
+        with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)),
+            patch.object(self.db, "observe_family", side_effect=delayed_observe),
+        ):
+            check = asyncio.create_task(self.families.refresh("9"))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await self.families.leave(1)
+            finally:
+                released.set()
+                await check
+        self.assertNotIn("9", self.families.items)
+        self.assertNotIn("9", self.families.presence)
+        self.assertNotIn("9", self.families.last_family_check)
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+        self.bot.send_message.assert_not_awaited()
 
     async def test_status_time_advances_only_after_a_successful_steam_snapshot(self):
         with (

@@ -10,12 +10,14 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message
 from aiogram_dialog import DIALOG_EVENT_NAME, DialogManager, ShowMode, StartMode, setup_dialogs
+from aiogram_dialog.api.entities import DialogUpdateEvent
 from aiogram_dialog.api.exceptions import OutdatedIntent, UnknownIntent
 from aiogram_dialog.utils import remove_intent_id
 
 from . import charts
 from .config import poll_seconds, required
 from .db import Db, PgStorage
+from .dialogs import deny_action
 from .dialogs.admin import admin_dialog
 from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
@@ -27,6 +29,24 @@ from .login import Logins
 from .states import Admin, FamilyView, Menu
 
 router = Router()
+log = logging.getLogger(__name__)
+
+
+class GroupMigrationMiddleware(BaseMiddleware):
+    """Handle service notices before dialog middleware, which requires a sender."""
+
+    async def __call__(self, handler, message: Message, data: dict):
+        if (
+            message
+            and message.chat.type != "private"
+            and (message.migrate_to_chat_id is not None or message.migrate_from_chat_id is not None)
+        ):
+            await data["db"].migrate_chat(
+                message.migrate_from_chat_id or message.chat.id,
+                message.migrate_to_chat_id or message.chat.id,
+            )
+            return None
+        return await handler(message, data)
 
 
 class AccountMiddleware(BaseMiddleware):
@@ -42,14 +62,19 @@ class AccountMiddleware(BaseMiddleware):
         )
         if chat is None or source.from_user is None:
             return None
-        if chat.type != "private" and not (isinstance(source, Message) and (source.text or "").startswith("/link")):
+        private = chat.type == "private" or isinstance(source, DialogUpdateEvent) and chat.id == source.from_user.id
+        if not private and not (isinstance(source, Message) and (source.text or "").startswith("/link")):
             return None
         language = await data["db"].language(source.from_user.id)
         data["has_language"] = language is not None
         data["lang"] = language or ("ru" if (source.from_user.language_code or "").startswith("ru") else DEFAULT)
         account = await data["db"].account(source.from_user.id)
         user = source.from_user
-        if account and (account["tg_username"], account["tg_name"]) != (user.username, user.full_name):
+        if (
+            account
+            and isinstance(source, (Message, CallbackQuery))
+            and (account["tg_username"], account["tg_name"]) != (user.username, user.full_name)
+        ):
             await data["db"].set_telegram_profile(user.id, user.username, user.full_name)  # kept current for links
         data["account"] = account
         data["family"] = data["families"].get(account["family_id"]) if account else None
@@ -88,10 +113,13 @@ class AccessMiddleware(BaseMiddleware):
             FamilyView.purchases,
         )
         if user_role != "owner":
-            denied |= state.group is Admin or state in owner_states
-            denied |= state == Menu.settings and callback in ("requests_on", "requests_off", "group_alerts")
-            denied |= state == FamilyView.info and callback == "manage"
-            denied |= state == FamilyView.member and callback == "remove"
+            owner_action = state.group is Admin or state in owner_states
+            owner_action |= state == Menu.settings and callback in ("requests_on", "requests_off", "group_alerts")
+            owner_action |= state == FamilyView.info and callback == "manage"
+            owner_action |= state == FamilyView.member and callback == "remove"
+            if owner_action:
+                await deny_action(manager)
+                return None
         if denied:
             await manager.start(Menu.main, mode=StartMode.RESET_STACK)
             await manager.answer_callback()
@@ -150,8 +178,21 @@ async def stale_button(event: ErrorEvent, dialog_manager: DialogManager, lang: s
     await dialog_manager.start(Menu.main, mode=StartMode.RESET_STACK, show_mode=ShowMode.SEND)
 
 
+@router.errors(F.update.event_type == DIALOG_EVENT_NAME)
+async def background_dialog_failed(event: ErrorEvent):
+    update = event.update.event
+    log.error(
+        "Background dialog delivery failed for user %s in chat %s",
+        update.from_user.id,
+        update.chat.id,
+        exc_info=event.exception,
+    )
+    return True
+
+
 def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, **dialog_options) -> Dispatcher:
     dp = Dispatcher(storage=storage or PgStorage(db), db=db, families=families, logins=logins)
+    dp.message.outer_middleware(GroupMigrationMiddleware())
     dp.include_routers(router, inline_router, menu_dialog, games_dialog, family_dialog, admin_dialog)
     setup_dialogs(dp, **dialog_options)
     for observer in (dp.message, dp.callback_query, dp.observers[DIALOG_EVENT_NAME]):
@@ -159,6 +200,16 @@ def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, 
         observer.middleware(AccessMiddleware())
     router.errors.middleware(AccountMiddleware())
     return dp
+
+
+def background_finished(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        log.error("Background task %s failed", task.get_name(), exc_info=error)
+    else:
+        log.error("Background task %s stopped unexpectedly", task.get_name())
 
 
 async def main() -> None:
@@ -172,14 +223,18 @@ async def main() -> None:
         dp = create_dispatcher(db, families, logins)
         families.bot_username = (await bot.me()).username
         loops = [
-            asyncio.create_task(families.refresh_loop(poll_seconds())),
-            asyncio.create_task(families.presence_loop()),
+            asyncio.create_task(families.refresh_loop(poll_seconds()), name="family-refresh"),
+            asyncio.create_task(families.presence_loop(), name="family-presence"),
+            asyncio.create_task(families.delivery_loop(), name="family-delivery"),
         ]
+        for loop in loops:
+            loop.add_done_callback(background_finished)
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         finally:
             for loop in loops:
                 loop.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
             await logins.close()
             await db.pool.close()
 

@@ -1,0 +1,29 @@
+{
+  "response": {
+    "apps": [
+      {
+        "appid": 101,
+        "name": "Included game",
+        "owner_steamids": ["a", "b"],
+        "exclude_reason": 0
+      },
+      {
+        "appid": 102,
+        "name": "Excluded game",
+        "owner_steamids": ["a", "b"],
+        "exclude_reason": 1
+      },
+      {
+        "appid": 103,
+        "name": "Implicitly included game",
+        "owner_steamids": ["a", "b"]
+      },
+      {
+        "appid": 104,
+        "name": "Unknown exclusion game",
+        "owner_steamids": ["a", "b"],
+        "exclude_reason": 999
+      }
+    ]
+  }
+}

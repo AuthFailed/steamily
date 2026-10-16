@@ -4,9 +4,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.methods import SendMessage
+from aiogram_dialog import StartMode
+
 from bot.db import SteamAlreadyLinked
 from bot.dialogs.menu import login_getter
 from bot.login import Logins
+from bot.states import Menu
 from bot.steam import NoFamily
 
 ALICE = "76561198000000001"
@@ -325,6 +330,57 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
         await self.run_login(AsyncMock(return_value=TOKEN))
         self.manager.update.assert_awaited_with({"login": "no_family"})
         self.manager.start.assert_not_called()
+
+    async def test_owner_delivery_failure_keeps_successful_login(self):
+        self.families.db.account.return_value = {"status": "pending"}
+        self.families.db.family = AsyncMock(return_value={"owner_telegram_id": 2})
+        self.families.db.notify_requests = AsyncMock(return_value=True)
+        self.families.db.language = AsyncMock(return_value="en")
+        self.families.register.return_value = MagicMock(family_id="9")
+        self.families.register.return_value.name.return_value = "Alice"
+        errors = (
+            TelegramForbiddenError(method=SendMessage(chat_id=2, text="request"), message="bot was blocked"),
+            TimeoutError("owner unreachable"),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                self.families.register.reset_mock()
+                self.manager.reset_mock()
+                self.begin.reset_mock()
+                self.logins.bot.send_message.reset_mock()
+                self.logins.bot.send_message.side_effect = error
+                self.clock.return_value += 15
+                poll = AsyncMock(return_value=TOKEN)
+
+                with self.assertLogs("bot.login", level="ERROR") as logs:
+                    data = await self.run_login(poll)
+
+                self.families.register.assert_awaited_once_with(1, TOKEN, ALICE)
+                self.begin.assert_awaited_once()
+                poll.assert_awaited_once()
+                self.logins.bot.send_message.assert_awaited_once()
+                self.manager.start.assert_awaited_once_with(Menu.main, mode=StartMode.RESET_STACK)
+                self.manager.update.assert_not_awaited()
+                self.assertFalse(any("Steam login failed" in line for line in logs.output))
+                self.assertFalse(self.logins.tasks)
+                self.assertFalse(Path(data["qr"]).exists())
+
+    async def test_menu_delivery_failure_does_not_report_login_failure(self):
+        for error in (RuntimeError("menu unavailable"), TimeoutError("menu timeout")):
+            with self.subTest(error=type(error).__name__):
+                self.families.register.reset_mock()
+                self.manager.reset_mock()
+                self.manager.start.side_effect = error
+                self.clock.return_value += 15
+
+                with self.assertLogs("bot.login", level="ERROR") as logs:
+                    data = await self.run_login(AsyncMock(return_value=TOKEN))
+
+                self.families.register.assert_awaited_once_with(1, TOKEN, ALICE)
+                self.manager.update.assert_not_awaited()
+                self.assertFalse(any("Steam login failed" in line for line in logs.output))
+                self.assertFalse(self.logins.tasks)
+                self.assertFalse(Path(data["qr"]).exists())
 
     async def test_already_linked_is_shown_and_login_resources_are_cleaned(self):
         self.families.register.side_effect = SteamAlreadyLinked()

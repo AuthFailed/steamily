@@ -34,8 +34,8 @@ TEXTS = {
         "<b>Retention and deletion</b>\nUse /delete or Settings → Log out to erase your account, token, Telegram "
         "profile link, preferences, saved dialogs and personal runtime caches, and cancel pending login. "
         "Administrative removal follows the same rules. You need a fresh Steam login to return.\n"
-        "Shared family snapshots, seen member/game ownership history and alert settings remain while another "
-        "account is registered; Steam may supply your family data again through them. The last account's "
+        "Shared family snapshots, seen member/game ownership history, pending alerts and alert settings remain "
+        "while another account is registered; Steam may supply your family data again through them. The last account's "
         "removal deletes the family record and caches. Public store metadata stays without account identifiers.\n"
         "Other users' open member screens may keep selected IDs until those dialogs close or reset, "
         "or their viewer logs out; these cannot restore your account.\n"
@@ -225,15 +225,50 @@ TEXTS = {
         "genre_desc": "Pick a genre. The number shows how many family games have it.",
         "btn_any_genre": "Any genre",
         "players_title": "Players",
-        "players_desc": "Pick who is going to play. Everyone needs their own copy, so only games with at least "
-        "that many copies in the family stay in the list.",
+        "players_desc": "Pick who is going to play. Everyone needs an owned or shareable copy. "
+        "Excluded games require each player to own a copy. Availability right now is not checked.",
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "This game is no longer in the family library.",
         "price_unknown": "Price unknown",
         "multiplayer": "👥 Multiplayer",
         "singleplayer": "👤 Single-player",
-        "copies_line": "📦 Copies: {n}{owners}",
+        "copies_line": "📦 Owned copies: {n}{owners}",
+        "shareable_copies_line": "🤝 Shareable copies: {n}",
+        "access_owned": "🔑 Your access: own copy",
+        "access_borrowed": "🔑 Your access: family sharing",
+        "access_unavailable": "🔒 Your access: unavailable through family sharing",
+        "sharing_excluded": "⚠️ Not shareable: {reason}",
+        "availability_unknown": "⏳ Available now: unknown",
+        "sharing_reason_unknown": "Steam restriction (code {code})",
+        "sharing_reason_1": "excluded by the publisher",
+        "sharing_reason_2": "license excluded from sharing",
+        "sharing_reason_3": "free game",
+        "sharing_reason_4": "private license",
+        "sharing_reason_6": "app type not eligible for sharing",
+        "sharing_reason_7": "nonrefundable DLC",
+        "sharing_reason_8": "unreleased app",
+        "sharing_reason_9": "parent app excluded from sharing",
+        "sharing_reason_10": "package excluded by the publisher",
+        "sharing_reason_11": "special package",
+        "sharing_reason_12": "developer package",
+        "sharing_reason_13": "free weekend package",
+        "sharing_reason_15": "invalid package",
+        "sharing_reason_16": "recurring subscription license",
+        "sharing_reason_17": "license type not eligible for sharing",
+        "sharing_reason_18": "master subscription package",
+        "sharing_reason_19": "package contains no shareable apps",
+        "sharing_reason_20": "master subscription payment license",
+        "sharing_reason_21": "family group payment license",
+        "sharing_reason_22": "authorized device payment license",
+        "sharing_reason_23": "automatically granted payment license",
+        "sharing_reason_24": "pending license",
+        "sharing_reason_25": "refund pending",
+        "sharing_reason_26": "borrowed license",
+        "sharing_reason_27": "automatically granted license",
+        "sharing_reason_28": "timed trial license",
+        "sharing_reason_29": "free subscription license",
+        "sharing_reason_30": "inactive license",
         "btn_members": "Bot members ({pending} pending)",
         "members_title": "Members",
         "members_desc": "Family members log in themselves; approve or block them here.",
@@ -246,6 +281,7 @@ TEXTS = {
         "status_blocked_short": "⛔ blocked",
         "member_left": "\n⚠️ Left the Steam Family.",
         "member_gone": "This user is no longer in the family.",
+        "owner_action_denied": "This action requires the current family owner. Reopen the menu and try again.",
         "btn_approve": "Approve",
         "btn_block": "Block",
         "btn_remove": "Remove",
@@ -302,7 +338,7 @@ TEXTS = {
         "<b>Срок хранения и удаление</b>\nКоманда /delete или Настройки → Выйти удаляет аккаунт, токен, ссылку "
         "на Telegram, настройки, диалоги и личные кеши, отменяет незавершённый вход. Удаление администратором "
         "работает так же. Для возвращения нужен новый вход в Steam.\n"
-        "Общие снимки семьи, история замеченных участников и владельцев игр, настройки уведомлений остаются, "
+        "Общие снимки семьи, история замеченных участников и владельцев игр, очередь и настройки уведомлений остаются, "
         "пока зарегистрирован другой аккаунт; Steam может вновь передать ваши семейные данные через него. "
         "Удаление последнего аккаунта удаляет запись семьи и кеши. Публичный кеш магазина не содержит "
         "идентификаторов аккаунтов и остаётся.\n"
@@ -498,15 +534,50 @@ TEXTS = {
         "genre_desc": "Выберите жанр. Число показывает, сколько игр семьи в этом жанре.",
         "btn_any_genre": "Любой жанр",
         "players_title": "Игроки",
-        "players_desc": "Выберите, кто будет играть. Каждому нужна своя копия, поэтому в списке останутся "
-        "только игры, которых в семье не меньше, чем игроков.",
+        "players_desc": "Выберите, кто будет играть. Каждому нужна собственная копия или копия с семейным доступом. "
+        "Исключённой из доступа игрой должен владеть каждый игрок. Наличие свободных копий сейчас не проверяется.",
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "Этой игры больше нет в библиотеке семьи.",
         "price_unknown": "Цена неизвестна",
         "multiplayer": "👥 Мультиплеер",
         "singleplayer": "👤 Одиночная",
-        "copies_line": "📦 Копий: {n}{owners}",
+        "copies_line": "📦 Собственных копий: {n}{owners}",
+        "shareable_copies_line": "🤝 Копий для семейного доступа: {n}",
+        "access_owned": "🔑 Ваша копия",
+        "access_borrowed": "🔑 Ваш доступ: семейная библиотека",
+        "access_unavailable": "🔒 Для вас недоступно через семейную библиотеку",
+        "sharing_excluded": "⚠️ Семейный доступ исключён: {reason}",
+        "availability_unknown": "⏳ Свободно сейчас: неизвестно",
+        "sharing_reason_unknown": "ограничение Steam (код {code})",
+        "sharing_reason_1": "исключено издателем",
+        "sharing_reason_2": "лицензия исключена из семейного доступа",
+        "sharing_reason_3": "бесплатная игра",
+        "sharing_reason_4": "приватная лицензия",
+        "sharing_reason_6": "тип приложения не поддерживает семейный доступ",
+        "sharing_reason_7": "невозвратное DLC",
+        "sharing_reason_8": "приложение ещё не вышло",
+        "sharing_reason_9": "основное приложение исключено из семейного доступа",
+        "sharing_reason_10": "пакет исключён издателем",
+        "sharing_reason_11": "специальный пакет",
+        "sharing_reason_12": "пакет разработчика",
+        "sharing_reason_13": "пакет бесплатных выходных",
+        "sharing_reason_15": "недействительный пакет",
+        "sharing_reason_16": "лицензия с регулярной подпиской",
+        "sharing_reason_17": "тип лицензии не поддерживает семейный доступ",
+        "sharing_reason_18": "пакет основной подписки",
+        "sharing_reason_19": "в пакете нет приложений с семейным доступом",
+        "sharing_reason_20": "лицензия с оплатой основной подписки",
+        "sharing_reason_21": "лицензия с оплатой через семейную группу",
+        "sharing_reason_22": "лицензия с оплатой через авторизованное устройство",
+        "sharing_reason_23": "автоматически выданная платёжная лицензия",
+        "sharing_reason_24": "лицензия ожидает подтверждения",
+        "sharing_reason_25": "ожидается возврат средств",
+        "sharing_reason_26": "заимствованная лицензия",
+        "sharing_reason_27": "автоматически выданная лицензия",
+        "sharing_reason_28": "временная пробная лицензия",
+        "sharing_reason_29": "лицензия бесплатной подписки",
+        "sharing_reason_30": "неактивная лицензия",
         "btn_members": "Участники бота (ожидают: {pending})",
         "members_title": "Участники",
         "members_desc": "Участники семьи входят сами, а здесь вы их одобряете или блокируете.",
@@ -519,6 +590,7 @@ TEXTS = {
         "status_blocked_short": "⛔ заблокирован",
         "member_left": "\n⚠️ Покинул семью Steam.",
         "member_gone": "Этого пользователя больше нет в семье.",
+        "owner_action_denied": "Это действие доступно только текущему владельцу семьи. Откройте меню заново.",
         "btn_approve": "Одобрить",
         "btn_block": "Заблокировать",
         "btn_remove": "Удалить",
@@ -559,6 +631,14 @@ assert TEXTS["en"].keys() == TEXTS["ru"].keys(), set(TEXTS["en"]) ^ set(TEXTS["r
 def t(lang: str | None, key: str, **values) -> str:
     text = TEXTS.get(lang, TEXTS[DEFAULT])[key]
     return text.format(**values) if values else text
+
+
+def sharing_warning(lang: str, reason: int) -> str:
+    if not reason:
+        return ""
+    key = f"sharing_reason_{reason}"
+    text = t(lang, key) if key in TEXTS[DEFAULT] else t(lang, "sharing_reason_unknown", code=reason)
+    return t(lang, "sharing_excluded", reason=text)
 
 
 def language_of(manager: DialogManager) -> str:

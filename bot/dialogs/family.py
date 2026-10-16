@@ -32,6 +32,7 @@ from ..steam import (
     resolve_profile,
 )
 from ..ui import BLUE, GREEN, RED, Header, back_home, look
+from . import current_owner, require_owner
 
 log = logging.getLogger(__name__)
 # Previews only for store pages: profile links would show a big avatar card.
@@ -200,11 +201,14 @@ async def common_games(callback: CallbackQuery, button: Button, manager: DialogM
 # Owner actions on the Steam family
 async def act(manager: DialogManager, action, *args) -> None:
     """Runs a Steam family change with the acting user's own login and shows the outcome on the manage screen."""
+    account = await require_owner(manager)
+    if account is None:
+        return
     families: Families = manager.middleware_data["families"]
     family: Family = manager.middleware_data["family"]
     lang = manager.middleware_data["lang"]
     try:
-        token = await families.owner_token(manager.middleware_data["account"])
+        token = await families.owner_token(account)
         await action(families.http, token, family.family_id, *args)
     except SteamActionError as error:
         manager.dialog_data["notice"] = t(lang, "action_failed", error=escape(str(error)))
@@ -233,6 +237,8 @@ async def clear_notice(callback: CallbackQuery, widget, manager: DialogManager, 
 
 
 async def on_invitee(message: Message, widget, manager: DialogManager, text: str):
+    if await require_owner(manager) is None:
+        return
     steam_id = await resolve_profile(manager.middleware_data["families"].http, text)
     if steam_id is None:
         manager.dialog_data["error"] = True
@@ -277,16 +283,20 @@ async def on_rename(message: Message, widget, manager: DialogManager, name: str)
 
 
 async def purchases_getter(dialog_manager: DialogManager, family: Family, families: Families, account, **kwargs):
+    account = await current_owner(dialog_manager)
+    if account is None:
+        return {"requests": [], "denied": True}
     try:
         requests = await purchase_requests(families.http, await families.owner_token(account), family.family_id)
     except Exception:
         log.exception("Could not load purchase requests")
         requests = []
     return {
+        "denied": False,
         "requests": [
             (str(r["request_id"]), f"❌ {family.name(str(r['requester_steamid']))} · {date(r.get('time_requested'))}")
             for r in requests
-        ]
+        ],
     }
 
 
@@ -295,12 +305,13 @@ async def on_decline(callback: CallbackQuery, widget, manager: DialogManager, re
 
 
 async def on_start(start_data: Data, manager: DialogManager):
+    manager.dialog_data["family_id"] = manager.middleware_data["family"].family_id
     if manager.middleware_data["family"].snapshot is None:  # opened before the family finished loading
         await manager.done()
 
 
-def back_to(state, id_: str):
-    return back_home(SwitchTo(Tr("btn_back"), id=id_, state=state, on_click=clear_notice))
+def back_to(state, id_: str, when=None):
+    return back_home(SwitchTo(Tr("btn_back"), id=id_, state=state, on_click=clear_notice, when=when))
 
 
 family_dialog = Dialog(
@@ -430,14 +441,15 @@ family_dialog = Dialog(
     ),
     Window(
         Header("admin", "purchases"),
-        Tr("purchases_empty", when=~F["requests"]),
+        Tr("owner_action_denied", when="denied"),
+        Tr("purchases_empty", when=~F["requests"] & ~F["denied"]),
         Group(
             Select(
                 Format("{item[1]}"), id="request", item_id_getter=lambda r: r[0], items="requests", on_click=on_decline
             ),
             width=1,
         ),
-        back_to(FamilyView.manage, "back_manage"),
+        back_to(FamilyView.manage, "back_manage", when=~F["denied"]),
         getter=purchases_getter,
         state=FamilyView.purchases,
     ),

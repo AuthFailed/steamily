@@ -142,10 +142,7 @@ class Logins:
                     return
                 if not self._current(telegram_id):
                     raise asyncio.CancelledError
-                if (await self.families.db.account(telegram_id))["status"] == "pending":
-                    await self._tell_owner(family, steam_id)
                 result = None
-                await manager.start(Menu.main, mode=StartMode.RESET_STACK)
         except TimeoutError:
             result = "timeout"
         except asyncio.CancelledError:
@@ -153,6 +150,16 @@ class Logins:
             raise
         except Exception:
             log.exception("Steam login failed for %s", telegram_id)
+        else:
+            try:
+                await manager.start(Menu.main, mode=StartMode.RESET_STACK)
+            except Exception:
+                log.exception("Menu delivery after login failed for %s", telegram_id)
+            try:
+                if (await self.families.db.account(telegram_id))["status"] == "pending":
+                    await self._tell_owner(family, steam_id)
+            except Exception:
+                log.exception("Owner notification after login failed for %s", telegram_id)
         finally:
             Path(qr).unlink(missing_ok=True)
             if result and self._current(telegram_id):

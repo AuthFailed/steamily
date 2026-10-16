@@ -42,6 +42,17 @@ ALTER TABLE families ADD COLUMN IF NOT EXISTS owner_telegram_id BIGINT;
 ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS notify_requests BOOLEAN NOT NULL DEFAULT TRUE;
 -- Which group alerts are on; missing kinds use library.ALERTS defaults.
 ALTER TABLE families ADD COLUMN IF NOT EXISTS alerts JSONB;
+ALTER TABLE families ADD COLUMN IF NOT EXISTS alert_retry_at DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE families ADD COLUMN IF NOT EXISTS alert_link_version BIGINT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS pending_alerts (
+    id           BIGSERIAL PRIMARY KEY,
+    family_id    TEXT NOT NULL REFERENCES families ON DELETE CASCADE,
+    chat_id      BIGINT NOT NULL,
+    text         TEXT NOT NULL,
+    coalesce_key TEXT,
+    expires_at   DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS pending_alerts_family ON pending_alerts (family_id, id);
 -- The Telegram side of a registered member, for links next to their Steam profile.
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tg_username TEXT;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tg_name TEXT;
@@ -296,8 +307,126 @@ class Db:
                 is not None
             )
 
-    async def unlink_chat(self, chat_id: int) -> None:
-        await self.pool.execute("UPDATE families SET notify_chat = NULL WHERE notify_chat = $1", chat_id)
+    async def unlink_chat(self, chat_id: int, *, family_id: str | None = None, link_version: int | None = None) -> None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            families = await connection.fetch(
+                "SELECT family_id FROM families WHERE notify_chat = $1 AND ($2::text IS NULL OR family_id = $2) "
+                "AND ($3::bigint IS NULL OR alert_link_version = $3) FOR UPDATE",
+                chat_id,
+                family_id,
+                link_version,
+            )
+            family_ids = [family["family_id"] for family in families]
+            await connection.execute("DELETE FROM pending_alerts WHERE family_id = ANY($1::text[])", family_ids)
+            await connection.execute(
+                "UPDATE families SET notify_chat = NULL, alert_retry_at = 0, "
+                "alert_link_version = alert_link_version + 1 "
+                "WHERE family_id = ANY($1::text[])",
+                family_ids,
+            )
+
+    async def migrate_chat(
+        self, old_chat_id: int, new_chat_id: int, *, family_id: str | None = None, link_version: int | None = None
+    ) -> bool:
+        if old_chat_id == new_chat_id:
+            return False
+        async with self.pool.acquire() as connection, connection.transaction():
+            # Migration is rare; block concurrent relinks while checking the destination.
+            await connection.execute("LOCK TABLE families IN EXCLUSIVE MODE")
+            if await connection.fetchval("SELECT EXISTS (SELECT 1 FROM families WHERE notify_chat = $1)", new_chat_id):
+                return False
+            families = await connection.fetch(
+                "UPDATE families SET notify_chat = $2 WHERE notify_chat = $1 "
+                "AND ($3::text IS NULL OR family_id = $3) "
+                "AND ($4::bigint IS NULL OR alert_link_version = $4) RETURNING family_id",
+                old_chat_id,
+                new_chat_id,
+                family_id,
+                link_version,
+            )
+            await connection.execute(
+                "UPDATE pending_alerts SET chat_id = $2 WHERE chat_id = $1 AND family_id = ANY($3::text[])",
+                old_chat_id,
+                new_chat_id,
+                [family["family_id"] for family in families],
+            )
+            return bool(families)
+
+    async def _enqueue_alerts(self, connection, family_id: str, chat_id: int | None, alerts: list[dict]) -> None:
+        if chat_id is None:
+            return
+        for alert in alerts:
+            if alert.get("coalesce_key") is not None:
+                # A new identity keeps an in-flight acknowledgement from deleting its replacement.
+                await connection.execute(
+                    "DELETE FROM pending_alerts WHERE family_id = $1 AND coalesce_key = $2",
+                    family_id,
+                    alert["coalesce_key"],
+                )
+            await connection.execute(
+                """
+                INSERT INTO pending_alerts (family_id, chat_id, text, coalesce_key, expires_at)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                family_id,
+                chat_id,
+                alert["text"],
+                alert.get("coalesce_key"),
+                alert.get("expires_at"),
+            )
+
+    async def observe_family(self, family_id: str, state: dict, name: str, alerts: list[dict]) -> None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            chat_id = await connection.fetchval(
+                "UPDATE families SET state = $2, name = $3 WHERE family_id = $1 RETURNING notify_chat",
+                family_id,
+                state,
+                name,
+            )
+            await self._enqueue_alerts(connection, family_id, chat_id, alerts)
+
+    async def enqueue_alerts(self, family_id: str, alerts: list[dict]) -> None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            chat_id = await connection.fetchval(
+                "SELECT notify_chat FROM families WHERE family_id = $1 FOR UPDATE", family_id
+            )
+            await self._enqueue_alerts(connection, family_id, chat_id, alerts)
+
+    async def pending_alerts(self, family_id: str, now: float) -> list[asyncpg.Record]:
+        async with self.pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "DELETE FROM pending_alerts WHERE family_id = $1 AND expires_at <= $2", family_id, now
+            )
+            return await connection.fetch(
+                """
+                SELECT a.*, f.alert_link_version AS link_version FROM pending_alerts a JOIN families f USING (family_id)
+                WHERE a.family_id = $1 AND a.chat_id = f.notify_chat AND f.alert_retry_at <= $2 ORDER BY a.id
+                """,
+                family_id,
+                now,
+            )
+
+    async def delete_alert(self, alert_id: int) -> None:
+        await self.pool.execute("DELETE FROM pending_alerts WHERE id = $1", alert_id)
+
+    async def defer_alerts(
+        self, family_id: str, chat_id: int, retry_at: float, *, link_version: int | None = None
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE families SET alert_retry_at = GREATEST(alert_retry_at, $3) WHERE family_id = $1
+                AND notify_chat IS NOT NULL AND (notify_chat = $2 OR alert_link_version = $4::bigint)
+            """,
+            family_id,
+            chat_id,
+            retry_at,
+            link_version,
+        )
+
+    async def alert_families(self) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            "SELECT * FROM families f WHERE EXISTS (SELECT 1 FROM pending_alerts a WHERE a.family_id = f.family_id)"
+        )
 
     async def families_with_accounts(self) -> list[asyncpg.Record]:
         return await self.pool.fetch(
@@ -340,7 +469,22 @@ class Db:
         allowed = {"name", "notify_chat", "state", "language", "owner_telegram_id", "alerts"}
         assert fields and set(fields) <= allowed, fields
         columns = ", ".join(f"{name} = ${i}" for i, name in enumerate(fields, start=2))
-        await self.pool.execute(f"UPDATE families SET {columns} WHERE family_id = $1", family_id, *fields.values())
+        query = f"UPDATE families SET {columns} WHERE family_id = $1"
+        if "notify_chat" not in fields:
+            await self.pool.execute(query, family_id, *fields.values())
+            return
+        async with self.pool.acquire() as connection, connection.transaction():
+            family = await connection.fetchrow(
+                "SELECT notify_chat FROM families WHERE family_id = $1 FOR UPDATE", family_id
+            )
+            if family and family["notify_chat"] != fields["notify_chat"]:
+                await connection.execute("DELETE FROM pending_alerts WHERE family_id = $1", family_id)
+                await connection.execute(
+                    "UPDATE families SET alert_retry_at = 0, alert_link_version = alert_link_version + 1 "
+                    "WHERE family_id = $1",
+                    family_id,
+                )
+            await connection.execute(query, family_id, *fields.values())
 
     # Store cache, one JSON document per country
     async def store_cache(self, country: str) -> dict:

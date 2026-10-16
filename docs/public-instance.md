@@ -65,6 +65,7 @@ Send `/privacy` for the in-bot summary. The application stores the following:
 | Previously seen family members' SteamIDs and game-to-owner SteamID mappings | Avoid repeating new-game alerts, including after a restart | Accumulates while the family has registered accounts; deleted when the last account is removed |
 | Rendered family charts, which can contain Steam names and family statistics | Send statistics images to Telegram | Cached for the active family; removed when its last account is removed or changes families, and cleared on process startup |
 | Family owner role, Telegram notification chat ID, family language and alert settings | Manage the bot and route family notifications | Shared with the family; removed when the last registered account is removed |
+| Pending group alerts, including family member names and game events | Retry delivery after Telegram failures and bot restarts | Until delivered, discarded with a destination change, or removed with the last family account; online/playing alerts expire after 5 minutes |
 | Public store metadata by country and game ID, such as prices, tags and categories | Show and filter games without fetching every item repeatedly | Shared cache, refreshed when needed; contains no Telegram or Steam account IDs and remains after logout |
 
 The bot keeps a current snapshot and the shared member/ownership detection

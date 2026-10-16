@@ -3,12 +3,20 @@ import logging
 import random
 import tempfile
 import time
+from collections import defaultdict
 from html import escape
 from pathlib import Path
 
 import aiohttp
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+    TelegramNotFound,
+    TelegramRetryAfter,
+)
 
 from . import charts
 from .db import Db
@@ -27,6 +35,8 @@ from .steam_auth import SteamAuth, TokenRejected
 log = logging.getLogger(__name__)
 STATS_MAX_AGE = 10 * 60
 PRESENCE_INTERVAL = 60
+ALERT_RETRY_DELAY = 60
+PRESENCE_ALERT_TTL = 5 * 60
 
 
 DEFAULT_COUNTRY = "US"
@@ -41,6 +51,10 @@ class Family:
         self.stores = stores if stores is not None else {}
         self._charts: tempfile.TemporaryDirectory | None = None
         self._charts_removed = False
+        # shortcut: process-local coordination; use distributed locking before running multiple bot workers.
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_started = 0
+        self._refresh_completed = 0
 
     @property
     def chart_dir(self) -> Path:
@@ -82,6 +96,7 @@ class Families:
         self.last_steam_check: float | None = None
         self.last_family_check: dict[str, float] = {}
         self._cache_generation = 0
+        self.delivery_locks = defaultdict(asyncio.Lock)
         self.bot_username = ""
 
     def get(self, family_id: str) -> Family:
@@ -196,6 +211,7 @@ class Families:
         if family is not None:
             family.cleanup_charts()
         self.presence.pop(family_id, None)
+        self.delivery_locks.pop(family_id, None)
         self.last_family_check.pop(family_id, None)
         self.stats_cache.clear()  # Stats may include former members absent from the latest snapshot.
         self._cache_generation += 1
@@ -275,6 +291,19 @@ class Families:
 
     async def refresh(self, family_id: str) -> None:
         family = self.get(family_id)
+        requested = family._refresh_started
+        async with family._refresh_lock:
+            if self.items.get(family_id) is not family:
+                return
+            # Requests during a pass need a trailing fetch; other queued requests can share that pass.
+            if family._refresh_completed > requested:
+                return
+            family._refresh_started += 1
+            await self._refresh(family_id)
+            family._refresh_completed = family._refresh_started
+
+    async def _refresh(self, family_id: str) -> None:
+        family = self.get(family_id)
         previous = family.snapshot  # revocation also removes confirmed departures from the cached membership
         snapshot = await self._fetch(family_id)
         if snapshot is None:
@@ -282,21 +311,27 @@ class Families:
         row = await self.db.family(family_id)
         if row is None or self.items.get(family_id) is not family:
             return
-        family.snapshot = snapshot
-        self.presence.setdefault(family_id, snapshot.get("players", {}))
-
         events, state = reconcile(row["state"], snapshot)
         alerts = alert_settings(row)
+        pending = []
         if alerts["games"]:
             for event in events:
-                await self.send_alert(row, format_notification(event, snapshot["names"], row["language"]))
-        if previous:  # ponytail: compared in memory, so changes while the bot was down are not announced
+                pending.append({"text": format_notification(event, snapshot["names"], row["language"])})
+        previous = (row["state"] or {}).get("observed", previous)
+        if previous:
             for event in family_events(previous, snapshot):
                 if alerts[event["kind"]]:
-                    await self.send_alert(
-                        row, format_event(event, snapshot["names"], snapshot["apps"], row["language"])
-                    )
-        await self.db.update_family(family_id, state=state, name=snapshot["name"])
+                    pending.append({"text": format_event(event, snapshot["names"], snapshot["apps"], row["language"])})
+        state["observed"] = {
+            "members": snapshot["members"],
+            "apps": [{"appid": app["appid"], "name": app["name"]} for app in snapshot["apps"]],
+        }
+        await self.db.observe_family(family_id, state, snapshot["name"], pending)
+        if self.items.get(family_id) is not family:
+            return
+        family.snapshot = snapshot
+        self.presence.setdefault(family_id, snapshot.get("players", {}))
+        await self.deliver_alerts(family_id)
 
         # Prices in the currency of every member who uses the bot.
         accounts = await self.db.family_accounts(family_id)
@@ -360,16 +395,83 @@ class Families:
         log.warning("Family %s has no working Steam login", family_id)
         return None
 
-    async def send_alert(self, row, text: str) -> None:
-        if not row["notify_chat"]:
-            return
-        try:
-            await self.bot.send_message(row["notify_chat"], text, parse_mode=None)
-        except TelegramAPIError as error:  # e.g. the bot was removed from the group
-            log.warning("Alert to family %s group failed: %s", row["family_id"], error)
+    async def deliver_alerts(self, family_id: str) -> None:
+        lock = self.delivery_locks[family_id]
+        async with lock:
+            for _ in range(20):  # bound each pass so a backlog yields to other families
+                if self.delivery_locks.get(family_id) is not lock:
+                    return
+                pending = await self.db.pending_alerts(family_id, time.time())
+                if not pending or self.delivery_locks.get(family_id) is not lock:
+                    return
+                event = pending[0]
+                chat_id = event["chat_id"]
+                try:
+                    await self.bot.send_message(chat_id, event["text"], parse_mode=None)
+                except TelegramMigrateToChat as error:
+                    if self.delivery_locks.get(family_id) is not lock:
+                        return
+                    await self.db.migrate_chat(
+                        chat_id, error.migrate_to_chat_id, family_id=family_id, link_version=event["link_version"]
+                    )
+                    row = await self.db.family(family_id)
+                    if row is None or row["alert_link_version"] != event["link_version"]:
+                        return
+                    if row["notify_chat"] == chat_id:
+                        log.warning("Family %s migration destination is occupied; unlinking old group", family_id)
+                        await self.db.unlink_chat(chat_id, family_id=family_id, link_version=event["link_version"])
+                    else:
+                        await self.db.defer_alerts(
+                            family_id, chat_id, time.time() + ALERT_RETRY_DELAY, link_version=event["link_version"]
+                        )
+                    return
+                except (TelegramForbiddenError, TelegramNotFound) as error:
+                    if self.delivery_locks.get(family_id) is not lock:
+                        return
+                    log.warning("Family %s group is unavailable; unlinking: %s", family_id, error)
+                    await self.db.unlink_chat(chat_id, family_id=family_id, link_version=event["link_version"])
+                    return
+                except TelegramBadRequest as error:
+                    if self.delivery_locks.get(family_id) is not lock:
+                        return
+                    log.warning("Family %s alert %s permanently rejected: %s", family_id, event["id"], error)
+                    if any(reason in error.message.lower() for reason in ("chat not found", "chat was deleted")):
+                        await self.db.unlink_chat(chat_id, family_id=family_id, link_version=event["link_version"])
+                        return
+                    await self.db.delete_alert(event["id"])
+                except (TelegramAPIError, aiohttp.ClientError, OSError) as error:
+                    if self.delivery_locks.get(family_id) is not lock:
+                        return
+                    delay = error.retry_after if isinstance(error, TelegramRetryAfter) else ALERT_RETRY_DELAY
+                    log.warning("Family %s alert %s deferred: %s", family_id, event["id"], error)
+                    await self.db.defer_alerts(
+                        family_id, chat_id, time.time() + max(1, delay), link_version=event["link_version"]
+                    )
+                    return
+                else:
+                    await self.db.delete_alert(event["id"])
+
+    async def delivery_loop(self, interval: int = 5) -> None:
+        while True:
+            try:
+                for row in await self.db.alert_families():
+                    try:
+                        await self.deliver_alerts(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s alert delivery failed", row["family_id"])
+            except Exception:
+                log.exception("Pending alert scan failed")
+            await asyncio.sleep(interval)
 
     async def check_presence(self, family_id: str) -> None:
         """Online and now-playing alerts; Steam is asked once for all members of the family."""
+        family = self.get(family_id)
+        async with family._refresh_lock:
+            if self.items.get(family_id) is not family:
+                return
+            await self._check_presence(family_id)
+
+    async def _check_presence(self, family_id: str) -> None:
         row = await self.db.family(family_id)
         if row is None:
             return
@@ -383,33 +485,46 @@ class Families:
         presence = await fetch_presence(self.http, token, family.members)
         if self.items.get(family_id) is not family:
             return
+        pending = []
         for event in presence_events(self.presence.get(family_id, {}), presence):
             if alerts[event["kind"]]:
-                await self.send_alert(row, format_event(event, family.snapshot["names"], family.apps, row["language"]))
-                if self.items.get(family_id) is not family:
-                    return
+                pending.append(
+                    {
+                        "text": format_event(event, family.snapshot["names"], family.apps, row["language"]),
+                        "coalesce_key": f"{event['kind']}:{event['steamid']}",
+                        "expires_at": time.time() + PRESENCE_ALERT_TTL,
+                    }
+                )
+        await self.db.enqueue_alerts(family_id, pending)
         if self.items.get(family_id) is not family:
             return
         self.presence[family_id] = presence
         for steam_id, now in presence.items():  # keeps the 🟢 marks in menus fresh too
             family.snapshot.setdefault("players", {}).setdefault(steam_id, {}).update(now)
+        await self.deliver_alerts(family_id)
 
     async def presence_loop(self, interval: int = PRESENCE_INTERVAL) -> None:
         while True:
             await asyncio.sleep(interval)
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.check_presence(row["family_id"])
-                except Exception:
-                    log.exception("Family %s presence check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.check_presence(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s presence check failed", row["family_id"])
+            except Exception:
+                log.exception("Presence check cycle failed")
 
     async def refresh_loop(self, interval: int) -> None:
         while True:
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.refresh(row["family_id"])
-                except Exception:
-                    log.exception("Family %s check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.refresh(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s check failed", row["family_id"])
+            except Exception:
+                log.exception("Family refresh cycle failed")
             await asyncio.sleep(interval)
 
 
