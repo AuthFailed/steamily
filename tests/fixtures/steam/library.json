@@ -1,0 +1,26 @@
+{
+  "response": {
+    "apps": [
+      {
+        "appid": 10,
+        "name": "Fixture Game",
+        "owner_steamids": [
+          76561198000000002,
+          "76561198000000001",
+          "76561198000000002"
+        ],
+        "rt_time_acquired": 1700000020
+      },
+      {
+        "appid": 20,
+        "name": "",
+        "owner_steamids": [
+          "76561198000000003"
+        ]
+      },
+      {
+        "appid": 30
+      }
+    ]
+  }
+}

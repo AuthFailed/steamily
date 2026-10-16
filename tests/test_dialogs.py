@@ -5,7 +5,17 @@ import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
-from aiogram.types import Chat, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, InlineQuery, Update, User
+from aiogram.types import (
+    Chat,
+    ChatMemberAdministrator,
+    ChatMemberBanned,
+    ChatMemberLeft,
+    ChatMemberMember,
+    ChatMemberUpdated,
+    InlineQuery,
+    Update,
+    User,
+)
 from aiogram_dialog.test_tools import BotClient, MockMessageManager
 from aiogram_dialog.test_tools.keyboard import InlineButtonTextLocator as Btn
 from aiogram_dialog.test_tools.memory_storage import JsonMemoryStorage
@@ -442,28 +452,146 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_adding_bot_to_group_links_it_for_the_owner(self):
         self.families.bot = AsyncMock()
+        for user_id in (FRIEND, PENDING, NEWCOMER):
+            with self.subTest(user_id=user_id):
+                await self.membership(user_id, -700, "left", "member")
+                self.assertIsNone((await self.db.family(FAMILY))["notify_chat"])
+                self.assertIn("Only the Steam Family owner", self.families.bot.send_message.await_args.args[1])
+        await self.membership(OWNER, -800, "left", "member")
+        self.assertEqual((await self.db.family(FAMILY))["notify_chat"], -800)
+        self.assertIn("will be posted here", self.families.bot.send_message.await_args.args[1])
 
-        async def added(user_id, chat_id):
+    async def membership(self, user_id, chat_id, old, new):
+        bot_user = User(id=1, is_bot=True, first_name="B")
+        members = {
+            "left": ChatMemberLeft(user=bot_user),
+            "member": ChatMemberMember(user=bot_user),
+            "kicked": ChatMemberBanned(user=bot_user, until_date=0),
+        }
+        await self.dp.feed_update(
+            self.client(user_id).bot,
+            Update(
+                update_id=1,
+                my_chat_member=ChatMemberUpdated(
+                    chat=Chat(id=chat_id, type="supergroup", title="G"),
+                    from_user=User(id=user_id, is_bot=False, first_name="U"),
+                    date=datetime.now(),
+                    old_chat_member=members[old],
+                    new_chat_member=members[new] if isinstance(new, str) else new,
+                ),
+            ),
+        )
+
+    async def test_bot_promotion_does_not_relink_or_send_confirmation(self):
+        self.families.bot = AsyncMock()
+        await self.db.update_family(FAMILY, notify_chat=-800, language="ru")
+        administrator = ChatMemberAdministrator(
+            user=User(id=1, is_bot=True, first_name="B"),
+            can_be_edited=False,
+            is_anonymous=False,
+            can_manage_chat=True,
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_post_stories=False,
+            can_edit_stories=False,
+            can_delete_stories=False,
+            can_send_welcome_messages=False,
+        )
+        await self.membership(OWNER, -900, "member", administrator)
+        row = await self.db.family(FAMILY)
+        self.assertEqual((row["notify_chat"], row["language"]), (-800, "ru"))
+        self.families.bot.send_message.assert_not_awaited()
+
+    async def test_bot_removal_or_kick_unlinks_group_and_stops_alerts(self):
+        self.families.bot = AsyncMock()
+        for status in ("left", "kicked"):
+            with self.subTest(status=status):
+                await self.db.update_family(FAMILY, notify_chat=-800)
+                await self.families.send_alert(await self.db.family(FAMILY), "Before removal")
+                self.families.bot.send_message.assert_awaited_once_with(-800, "Before removal", parse_mode=None)
+                self.families.bot.reset_mock()
+
+                await self.membership(FRIEND, -800, "member", status)
+
+                row = await self.db.family(FAMILY)
+                self.assertIsNone(row["notify_chat"])
+                await self.families.send_alert(row, "After removal")
+                self.families.bot.send_message.assert_not_awaited()
+
+    async def test_removal_from_old_group_keeps_the_new_group_linked(self):
+        self.families.bot = AsyncMock()
+        await self.membership(OWNER, -800, "left", "member")
+        await self.membership(OWNER, -900, "left", "member")
+        self.families.bot.reset_mock()
+
+        await self.membership(FRIEND, -800, "member", "kicked")
+
+        row = await self.db.family(FAMILY)
+        self.assertEqual(row["notify_chat"], -900)
+        await self.families.send_alert(row, "New group alert")
+        self.families.bot.send_message.assert_awaited_once_with(-900, "New group alert", parse_mode=None)
+
+    async def test_empty_inline_query_lists_recent_family_games_without_store_search(self):
+        answer = AsyncMock()
+        with (
+            patch("bot.inline.search_store", AsyncMock()) as store_search,
+            patch("bot.inline.store_cards", AsyncMock(return_value={})) as details,
+            patch("aiogram.types.InlineQuery.answer", answer),
+        ):
             await self.dp.feed_update(
-                self.client(user_id).bot,
+                self.client(FRIEND).bot,
                 Update(
-                    update_id=1,
-                    my_chat_member=ChatMemberUpdated(
-                        chat=Chat(id=chat_id, type="supergroup", title="G"),
-                        from_user=User(id=user_id, is_bot=False, first_name="U"),
-                        date=datetime.now(),
-                        old_chat_member=ChatMemberLeft(user=User(id=1, is_bot=True, first_name="B")),
-                        new_chat_member=ChatMemberMember(user=User(id=1, is_bot=True, first_name="B")),
+                    update_id=4,
+                    inline_query=InlineQuery(
+                        id="empty", from_user=User(id=FRIEND, is_bot=False, first_name="B"), query="   ", offset=""
                     ),
                 ),
             )
+        store_search.assert_not_awaited()
+        expected = list(range(20, 10, -1))
+        self.assertEqual(details.await_args.args[1], expected)
+        answer.assert_awaited_once()
+        results = answer.await_args.args[0]
+        self.assertEqual([result.id for result in results], [str(appid) for appid in expected])
+        self.assertEqual(results[0].title, "Game 20")
+        self.assertIn("Price unknown", results[0].input_message_content.message_text)
+        self.assertIsNone(results[0].thumbnail_url)
+        self.assertEqual(answer.await_args.kwargs, {"cache_time": 60, "is_personal": True})
 
-        await added(FRIEND, -700)
-        self.assertIsNone((await self.db.family(FAMILY))["notify_chat"])
-        self.assertIn("Only the Steam Family owner", self.families.bot.send_message.await_args.args[1])
-        await added(OWNER, -800)
-        self.assertEqual((await self.db.family(FAMILY))["notify_chat"], -800)
-        self.assertIn("will be posted here", self.families.bot.send_message.await_args.args[1])
+    async def test_inline_card_failure_keeps_known_games_and_omits_unknown_store_games(self):
+        answer = AsyncMock()
+        with (
+            patch("bot.inline.search_store", AsyncMock(return_value=[999, 3])),
+            patch("bot.inline.store_cards", AsyncMock(side_effect=TimeoutError("Store unavailable"))),
+            patch("aiogram.types.InlineQuery.answer", answer),
+            self.assertLogs("bot.inline", level="ERROR"),
+        ):
+            await self.dp.feed_update(
+                self.client(FRIEND).bot,
+                Update(
+                    update_id=5,
+                    inline_query=InlineQuery(
+                        id="details-failure",
+                        from_user=User(id=FRIEND, is_bot=False, first_name="B"),
+                        query="game 03",
+                        offset="",
+                    ),
+                ),
+            )
+        answer.assert_awaited_once()
+        results = answer.await_args.args[0]
+        self.assertEqual([result.id for result in results], ["3"])
+        self.assertEqual(results[0].title, "Game 03")
+        card = results[0].input_message_content.message_text
+        self.assertIn("Alice", card)
+        self.assertIn("Bob", card)
+        self.assertIn("Price unknown", card)
+        self.assertIn("https://store.steampowered.com/app/3/", card)
+        self.assertIsNone(results[0].thumbnail_url)
 
     async def test_inline_search_shows_family_owners_in_senders_currency(self):
         with self.assertRaises(SteamAlreadyLinked):

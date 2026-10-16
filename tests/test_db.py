@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import asyncpg
@@ -229,17 +230,51 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         account = await self.db.account(10)
         self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), (None, 0.0))
 
-    async def test_renewal_schema_upgrade_keeps_existing_accounts(self):
-        await self.db.save_account(10, "1", "9", "legacy", "KZ")
-        await self.db.set_status(10, "approved")
-        await self.db.pool.execute("ALTER TABLE accounts DROP COLUMN IF EXISTS token_renewed_at")
-        await self.db.pool.execute(SCHEMA)
-        await self.db.pool.execute(SCHEMA)
-        account = await self.db.account(10)
-        self.assertEqual(account["token_renewed_at"], 0.0)
-        self.assertEqual(
-            (self.db.refresh_token(account), account["country"], account["status"]), ("legacy", "KZ", "approved")
+    async def test_legacy_schema_startup_preserves_data_and_is_idempotent(self):
+        await self.db.pool.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        await self.db.pool.execute((Path(__file__).parent / "fixtures" / "legacy_schema.sql").read_text())
+        secret_key = Fernet.generate_key().decode()
+        encrypted = Fernet(secret_key).encrypt(b"legacy-token")
+        await self.db.pool.execute(
+            """
+            INSERT INTO families (family_id, name, notify_chat, state, language, owner_telegram_id, alerts)
+            VALUES ('9', 'Legacy family', -100, '{"members":["1"],"ownership":{}}', 'ru', 10, '{"online":false}');
+            INSERT INTO telegram_users (telegram_id, language, notify_requests) VALUES (10, 'ru', false);
+            INSERT INTO store_cache (country, data) VALUES ('KZ', '{"apps":{"620":{"price":999}}}');
+            INSERT INTO fsm (key, state, data) VALUES ('dialog', 'Menu:main', '{"stack":["a"]}');
+            """
         )
+        await self.db.pool.execute(
+            """
+            INSERT INTO accounts
+                (telegram_id, steam_id, family_id, refresh_token, status, created_at, country, tg_username, tg_name)
+            VALUES (10, '1', '9', $1, 'approved', '2020-01-02T03:04:05Z', 'KZ', 'owner', 'Original owner')
+            """,
+            encrypted,
+        )
+        tables = ("accounts", "families", "telegram_users", "store_cache", "fsm")
+        before = {
+            table: [dict(row) for row in await self.db.pool.fetch(f"SELECT * FROM {table} ORDER BY 1")]
+            for table in tables
+        }
+        for _ in range(2):
+            await self.db.pool.close()
+            self.db = await Db.connect(TEST_DATABASE_URL, secret_key)
+            after = {
+                table: [dict(row) for row in await self.db.pool.fetch(f"SELECT * FROM {table} ORDER BY 1")]
+                for table in tables
+            }
+            self.assertEqual(after["accounts"][0].pop("token_renewed_at"), 0.0)
+            self.assertEqual(after, before)
+            self.assertEqual(self.db.refresh_token(await self.db.account(10)), "legacy-token")
+            with self.assertRaises(asyncpg.UniqueViolationError):
+                await self.db.pool.execute(
+                    "INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')"
+                )
+
+        await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '2', '9')")
+        account = await self.db.account(20)
+        self.assertEqual((account["status"], account["token_renewed_at"]), ("pending", 0.0))
 
     async def test_fsm_storage(self):
         storage = PgStorage(self.db)
