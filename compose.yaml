@@ -1,6 +1,13 @@
+# Run the bot:
+#   1. cp .env.example .env and fill it in (bot token from @BotFather, SECRET_KEY, POSTGRES_PASSWORD)
+#   2. docker compose up -d
+#   3. docker compose logs -f bot
+# Update to the latest version: docker compose pull && docker compose up -d
+# To build from source instead, replace `image:` below with `build: .`
+
 services:
   bot:
-    build: .
+    image: ghcr.io/authfailed/steamily:main
     restart: unless-stopped
     env_file: .env
     environment:
