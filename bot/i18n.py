@@ -134,6 +134,10 @@ TEXTS = {
         "login_timeout": "⌛ The login timed out.",
         "login_failed": "❌ Steam login failed.",
         "login_no_family": "❌ This Steam account isn't in a Steam Family.",
+        "login_cooldown": "Please wait {seconds} seconds before trying to log in again.",
+        "login_active": "A Steam sign-in is already in progress. Finish or cancel it before starting another.",
+        "login_busy": "Too many Steam sign-ins are in progress. Try again in {seconds} seconds.",
+        "login_stopping": "The bot is stopping. Try again after it restarts.",
         "login_already_linked": (
             "❌ This Steam account is already linked to another Telegram account.\n\n"
             "Use the Telegram account you linked originally. To move the link, open <b>Settings → Log out</b> "
@@ -356,6 +360,10 @@ TEXTS = {
         "login_timeout": "⌛ Время на вход истекло.",
         "login_failed": "❌ Не удалось войти через Steam.",
         "login_no_family": "❌ Этот аккаунт Steam не состоит в семье Steam.",
+        "login_cooldown": "Подождите {seconds} сек. перед следующей попыткой входа.",
+        "login_active": "Вход через Steam уже начат. Завершите или отмените его перед новой попыткой.",
+        "login_busy": "Слишком много одновременных входов через Steam. Попробуйте через {seconds} сек.",
+        "login_stopping": "Бот останавливается. Попробуйте войти после его перезапуска.",
         "login_already_linked": (
             "❌ Этот аккаунт Steam уже привязан к другому аккаунту Telegram.\n\n"
             "Войдите с аккаунта Telegram, который привязали изначально. Для переноса сначала откройте там "
