@@ -1,4 +1,4 @@
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import DialogManager, StartMode
 
 from ..family import role
@@ -10,7 +10,7 @@ async def deny_action(manager: DialogManager, reason: str = "owner_action_denied
     text = t(language_of(manager), reason)
     if isinstance(manager.event, CallbackQuery):
         await manager.event.answer(text, show_alert=True)
-    else:
+    elif isinstance(manager.event, Message):
         await manager.event.answer(text)
     await manager.start(Menu.main, mode=StartMode.RESET_STACK)
 

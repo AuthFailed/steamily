@@ -32,10 +32,13 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
             "include_family_group_response": "true",
         },
     )
-    group_id = family.get("response", {}).get("family_groupid")
-    members = family.get("response", {}).get("family_group", {}).get("members")
-    if not group_id or not isinstance(members, list):
+    response = family.get("response", {})
+    if response.get("is_not_member_of_any_group") is True:
         raise NoFamily("This Steam account is not joined to a Steam Family")
+    group_id = response.get("family_groupid")
+    members = response.get("family_group", {}).get("members")
+    if not group_id or str(group_id) == "0" or not isinstance(members, list) or not members:
+        raise RuntimeError("Steam returned an incomplete family response")
 
     library = await get_json(
         http,
@@ -188,17 +191,21 @@ async def fetch_user_country(http: aiohttp.ClientSession, access_token: str, ste
 
 
 def parse_snapshot(family: dict, library: dict, players: dict) -> dict:
-    members = family.get("response", {}).get("family_group", {}).get("members")
-    apps = library.get("response", {}).get("apps")
-    if not isinstance(members, list):
+    response = family.get("response", {})
+    if response.get("is_not_member_of_any_group") is True:
         raise NoFamily("This Steam account is not joined to a Steam Family")
+    group_id = response.get("family_groupid")
+    members = response.get("family_group", {}).get("members")
+    apps = library.get("response", {}).get("apps")
+    if not group_id or str(group_id) == "0" or not isinstance(members, list) or not members:
+        raise RuntimeError("Steam returned an incomplete family response")
     if not isinstance(apps, list):
         raise RuntimeError("Steam returned an incomplete family-library response")
 
     names, profiles = parse_players(players)
-    group = family["response"].get("family_group", {})
+    group = response.get("family_group", {})
     return {
-        "family_id": str(family["response"].get("family_groupid", "")),
+        "family_id": str(group_id),
         "name": group.get("name", ""),
         "members": [str(m["steamid"]) for m in members],
         "joined": {str(m["steamid"]): m.get("time_joined") for m in members},

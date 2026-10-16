@@ -64,7 +64,13 @@ async def set_status(manager: DialogManager, status: str | None) -> bool:
         await deny_action(manager, "member_gone")
         return False
     if status:
-        changed = await db.set_status(telegram_id, status, family_id=actor["family_id"])
+        family: Family = manager.middleware_data["family"]
+        changed = await db.set_status(
+            telegram_id,
+            status,
+            family_id=actor["family_id"],
+            members=family.members if status == "approved" else None,
+        )
     else:
         changed = await db.delete_account(telegram_id, family_id=actor["family_id"])
     if not changed:

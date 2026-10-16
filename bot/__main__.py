@@ -10,9 +10,11 @@ from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message
 from aiogram_dialog import DIALOG_EVENT_NAME, DialogManager, ShowMode, StartMode, setup_dialogs
 from aiogram_dialog.api.exceptions import OutdatedIntent, UnknownIntent
+from aiogram_dialog.utils import remove_intent_id
 
 from .config import poll_seconds, required
 from .db import Db, PgStorage
+from .dialogs import deny_action
 from .dialogs.admin import admin_dialog
 from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
@@ -21,7 +23,7 @@ from .family import Families, role
 from .i18n import DEFAULT, t
 from .inline import router as inline_router
 from .login import Logins
-from .states import Menu
+from .states import Admin, FamilyView, Menu
 
 router = Router()
 
@@ -31,22 +33,63 @@ class AccountMiddleware(BaseMiddleware):
 
     async def __call__(self, handler, event, data: dict):
         # Messages, button presses, and aiogram-dialog's own background updates (which carry .chat).
+        source = event.update.event if isinstance(event, ErrorEvent) else event
         chat = (
-            event.message.chat if isinstance(event, CallbackQuery) and event.message else getattr(event, "chat", None)
+            source.message.chat
+            if isinstance(source, CallbackQuery) and source.message
+            else getattr(source, "chat", None)
         )
-        if chat is None or event.from_user is None:
+        if chat is None or source.from_user is None:
             return None
-        if chat.type != "private" and not (isinstance(event, Message) and (event.text or "").startswith("/link")):
+        if chat.type != "private" and not (isinstance(source, Message) and (source.text or "").startswith("/link")):
             return None
-        language = await data["db"].language(event.from_user.id)
+        language = await data["db"].language(source.from_user.id)
         data["has_language"] = language is not None
-        data["lang"] = language or ("ru" if (event.from_user.language_code or "").startswith("ru") else DEFAULT)
-        account = await data["db"].account(event.from_user.id)
-        user = event.from_user
+        data["lang"] = language or ("ru" if (source.from_user.language_code or "").startswith("ru") else DEFAULT)
+        account = await data["db"].account(source.from_user.id)
+        user = source.from_user
         if account and (account["tg_username"], account["tg_name"]) != (user.username, user.full_name):
             await data["db"].set_telegram_profile(user.id, user.username, user.full_name)  # kept current for links
         data["account"] = account
         data["family"] = data["families"].get(account["family_id"]) if account else None
+        return await handler(event, data)
+
+
+class AccessMiddleware(BaseMiddleware):
+    """Rechecks access before processing buttons or text from an already open dialog."""
+
+    async def __call__(self, handler, event, data: dict):
+        manager: DialogManager = data.get("dialog_manager")
+        if manager is None or not manager.has_context():
+            return await handler(event, data)
+        state = manager.current_context().state
+        user_role = role(data.get("account"))
+        callback = remove_intent_id(event.data)[1] if isinstance(event, CallbackQuery) and event.data else None
+        denied = user_role not in ("member", "owner") and (
+            state.group is not Menu or state == Menu.main and callback in ("library", "family")
+        )
+        owner_states = (
+            Menu.group_alerts,
+            FamilyView.remove,
+            FamilyView.manage,
+            FamilyView.invite,
+            FamilyView.invite_role,
+            FamilyView.invites,
+            FamilyView.rename,
+            FamilyView.purchases,
+        )
+        if user_role != "owner":
+            owner_action = state.group is Admin or state in owner_states
+            owner_action |= state == Menu.settings and callback in ("requests_on", "requests_off", "group_alerts")
+            owner_action |= state == FamilyView.info and callback == "manage"
+            owner_action |= state == FamilyView.member and callback == "remove"
+            if owner_action:
+                await deny_action(manager)
+                return None
+        if denied:
+            await manager.start(Menu.main, mode=StartMode.RESET_STACK)
+            await manager.answer_callback()
+            return None
         return await handler(event, data)
 
 
@@ -99,6 +142,8 @@ def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, 
     setup_dialogs(dp, **dialog_options)
     for observer in (dp.message, dp.callback_query, dp.observers[DIALOG_EVENT_NAME]):
         observer.outer_middleware(AccountMiddleware())
+        observer.middleware(AccessMiddleware())
+    router.errors.middleware(AccountMiddleware())
     return dp
 
 
