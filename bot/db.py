@@ -185,6 +185,19 @@ class Db:
                 raise
             raise SteamAlreadyLinked("Steam account is already linked to another Telegram account.") from error
 
+    async def revoke_account(self, telegram_id: int, steam_id: str, family_id: str) -> bool:
+        result = await self.pool.execute(
+            """
+            UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
+                refresh_token = NULL, token_renewed_at = 0
+            WHERE telegram_id = $1 AND steam_id = $2 AND family_id = $3
+            """,
+            telegram_id,
+            steam_id,
+            family_id,
+        )
+        return result == "UPDATE 1"
+
     async def set_refresh_token(
         self, telegram_id: int, refresh_token: str | None, token_renewed_at: float = 0.0
     ) -> None:
@@ -207,11 +220,37 @@ class Db:
     async def set_country(self, telegram_id: int, country: str) -> None:
         await self.pool.execute("UPDATE accounts SET country = $2 WHERE telegram_id = $1", telegram_id, country)
 
-    async def set_status(self, telegram_id: int, status: str) -> None:
-        await self.pool.execute("UPDATE accounts SET status = $2 WHERE telegram_id = $1", telegram_id, status)
+    async def set_status(
+        self, telegram_id: int, status: str, *, family_id: str | None = None, members: list[str] | None = None
+    ) -> bool:
+        return (
+            await self.pool.fetchval(
+                """
+            UPDATE accounts SET status = $2 WHERE telegram_id = $1
+                AND ($3::text IS NULL OR family_id = $3)
+                AND ($4::text[] IS NULL OR steam_id = ANY($4))
+            RETURNING telegram_id
+            """,
+                telegram_id,
+                status,
+                family_id,
+                members,
+            )
+            is not None
+        )
 
-    async def delete_account(self, telegram_id: int) -> None:
-        await self.pool.execute("DELETE FROM accounts WHERE telegram_id = $1", telegram_id)
+    async def delete_account(self, telegram_id: int, *, family_id: str | None = None) -> bool:
+        return (
+            await self.pool.fetchval(
+                """
+            DELETE FROM accounts WHERE telegram_id = $1 AND ($2::text IS NULL OR family_id = $2)
+            RETURNING telegram_id
+            """,
+                telegram_id,
+                family_id,
+            )
+            is not None
+        )
 
     # Families
     async def family(self, family_id: str) -> asyncpg.Record | None:
@@ -258,24 +297,34 @@ class Db:
             if status != "approved":
                 await connection.execute("UPDATE accounts SET status = 'approved' WHERE telegram_id = $1", telegram_id)
 
-    async def revoke_membership(self, telegram_id: int, family_id: str) -> None:
+    async def revoke_membership(self, telegram_id: int, family_id: str, *, steam_id: str | None = None) -> bool:
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.fetchval("SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", family_id)
             account = await connection.fetchval(
-                "SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND family_id = $2 FOR UPDATE",
+                """
+                SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND family_id = $2
+                    AND ($3::text IS NULL OR steam_id = $3) FOR UPDATE
+                """,
                 telegram_id,
                 family_id,
+                steam_id,
             )
             if account is None:
-                return
+                return False
             await connection.execute(
-                "UPDATE accounts SET status = 'pending' WHERE telegram_id = $1 AND status = 'approved'", telegram_id
+                """
+                UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
+                    refresh_token = NULL, token_renewed_at = 0
+                WHERE telegram_id = $1 AND (status = 'approved' OR refresh_token IS NOT NULL OR token_renewed_at <> 0)
+                """,
+                telegram_id,
             )
             await connection.execute(
                 "UPDATE families SET owner_telegram_id = NULL WHERE family_id = $1 AND owner_telegram_id = $2",
                 family_id,
                 telegram_id,
             )
+            return True
 
     async def reconcile_members(self, family_id: str, members: list[str]) -> None:
         async with self.pool.acquire() as connection, connection.transaction():
@@ -286,8 +335,10 @@ class Db:
                 return
             await connection.execute(
                 """
-                UPDATE accounts SET status = 'pending'
-                WHERE family_id = $1 AND status = 'approved' AND NOT (steam_id = ANY($2::text[]))
+                UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
+                    refresh_token = NULL, token_renewed_at = 0
+                WHERE family_id = $1 AND NOT (steam_id = ANY($2::text[]))
+                    AND (status = 'approved' OR refresh_token IS NOT NULL OR token_renewed_at <> 0)
                 """,
                 family_id,
                 members,

@@ -104,15 +104,35 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.update_family("8", owner_telegram_id=10)
         await self.db.revoke_membership(10, "8")
         self.assertEqual((await self.db.account(10))["status"], "approved")
+        self.assertEqual(self.db.refresh_token(await self.db.account(10)), "token")
         self.assertEqual((await self.db.family("8"))["owner_telegram_id"], 10)
         await self.db.revoke_membership(10, "9")
         self.assertEqual((await self.db.account(10))["status"], "pending")
+        self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
         self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
         await self.db.set_status(10, "blocked")
+        await self.db.set_refresh_token(10, "blocked-token", 123.0)
         await self.db.update_family("9", owner_telegram_id=10)
         await self.db.revoke_membership(10, "9")
         self.assertEqual((await self.db.account(10))["status"], "blocked")
+        self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
+        self.assertEqual((await self.db.account(10))["token_renewed_at"], 0.0)
         self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_stale_steam_membership_cannot_revoke_a_same_family_replacement(self):
+        await self.db.save_account(10, "1", "9", "old-token")
+        await self.db.save_account(10, "2", "9", "new-token", "KZ", 123.0)
+        await self.db.set_status(10, "approved")
+        await self.db.update_family("9", owner_telegram_id=10)
+        before = await self.snapshot_links()
+        self.assertFalse(await self.db.revoke_membership(10, "9", steam_id="1"))
+        self.assertEqual(await self.snapshot_links(), before)
+        self.assertTrue(await self.db.revoke_membership(10, "9", steam_id="2"))
+        account = await self.db.account(10)
+        self.assertEqual(account["status"], "pending")
+        self.assertIsNone(self.db.refresh_token(account))
+        self.assertEqual(account["token_renewed_at"], 0.0)
+        self.assertIsNone(account["owner_telegram_id"])
 
     async def test_reconcile_members_revokes_departed_owner_and_promotes_a_current_member(self):
         for telegram_id, steam_id in ((10, "1"), (20, "2")):
@@ -130,8 +150,25 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             current = dict(await self.db.account(account["telegram_id"]))
             current.pop("owner_telegram_id")
             expected_status = "pending" if account["telegram_id"] == 10 else "approved"
-            self.assertEqual(current, {**dict(account), "status": expected_status})
+            expected = {**dict(account), "status": expected_status}
+            if account["telegram_id"] == 10:
+                expected.update(refresh_token=None, token_renewed_at=0.0)
+            self.assertEqual(current, expected)
         self.assertEqual((await self.db.family("9"))["state"], before["families"][0]["state"])
+
+    async def test_reconcile_members_clears_departed_credentials_for_every_status(self):
+        for telegram_id, status in ((10, "approved"), (20, "pending"), (30, "blocked"), (40, "approved")):
+            await self.db.save_account(telegram_id, str(telegram_id), "9", "token", "KZ", 123.0)
+            await self.db.set_status(telegram_id, status)
+        await self.db.update_family("9", owner_telegram_id=40)
+        current_before = dict(await self.db.account(40))
+        await self.db.reconcile_members("9", ["40"])
+        self.assertEqual(dict(await self.db.account(40)), current_before)
+        for telegram_id, expected_status in ((10, "pending"), (20, "pending"), (30, "blocked")):
+            account = await self.db.account(telegram_id)
+            self.assertEqual(account["status"], expected_status)
+            self.assertIsNone(self.db.refresh_token(account))
+            self.assertEqual(account["token_renewed_at"], 0.0)
 
     async def test_reconcile_members_prefers_approved_then_oldest_pending_and_excludes_blocked(self):
         for telegram_id, steam_id, status in ((10, "1", "blocked"), (20, "2", "pending"), (30, "3", "approved")):
@@ -351,6 +388,17 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.store_cache("DE"), {})
         await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
         self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
+
+    async def test_changing_family_requires_new_approval(self):
+        await self.db.ensure_family("other", "Other")
+        for status in ("approved", "blocked"):
+            with self.subTest(status=status):
+                await self.db.save_account(10, "1", "9", "old")
+                await self.db.set_status(10, status)
+                await self.db.save_account(10, "1", "9", "same-family")
+                self.assertEqual((await self.db.account(10))["status"], status)
+                await self.db.save_account(10, "1", "other", "new-family")
+                self.assertEqual((await self.db.account(10))["status"], "pending")
 
     async def test_initial_owner_claim_requires_an_account_in_the_family(self):
         await self.db.ensure_family("other", "Other")

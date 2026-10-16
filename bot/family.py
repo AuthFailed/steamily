@@ -37,6 +37,10 @@ class Family:
         self.lock = asyncio.Lock()
         self.snapshot: dict | None = None
         self.stores = stores if stores is not None else {}
+        # shortcut: process-local coordination; use distributed locking before running multiple bot workers.
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_started = 0
+        self._refresh_completed = 0
 
     @property
     def apps(self) -> list[dict]:
@@ -88,10 +92,12 @@ class Families:
         except NoFamily:
             if account and account["steam_id"] == steam_id:
                 async with self.get(account["family_id"]).lock:
-                    await self.db.revoke_membership(telegram_id, account["family_id"])
+                    await self._revoke_account(account)
             raise
         country = await fetch_user_country(self.http, access_token, steam_id)
         family_id = snapshot["family_id"]
+        if steam_id not in snapshot["members"]:
+            raise RuntimeError("Steam returned a family without the signed-in account")
         await self.db.ensure_family(family_id, snapshot["name"])
         account_lock = self.get(account["family_id"]).lock if account else asyncio.Lock()
         async with account_lock:
@@ -101,7 +107,7 @@ class Families:
             await self.db.claim_initial_owner(family_id, telegram_id)
         family = self.get(family_id)
         async with family.lock:
-            await self.db.reconcile_members(family_id, snapshot["members"])
+            await self._reconcile_accounts(family_id, snapshot["members"])
             family.snapshot = snapshot
         refresh_ids = [family_id]
         if account and account["family_id"] != family_id:
@@ -139,6 +145,7 @@ class Families:
                         for a in await self.db.family_accounts(account["family_id"])
                         if a["telegram_id"] != telegram_id
                         and a["status"] != "blocked"
+                        and a["refresh_token"]
                         and (a["steam_id"] in family.members if family.snapshot else a["status"] == "approved")
                     ]
                     approved = [a for a in others if a["status"] == "approved"]
@@ -148,6 +155,21 @@ class Families:
                 await self.db.delete_user(telegram_id)
                 self.auths.pop(telegram_id, None)
                 return new_owner
+
+    async def _revoke_account(self, account) -> None:
+        family_id, telegram_id = account["family_id"], account["telegram_id"]
+        if not await self.db.revoke_membership(telegram_id, family_id, steam_id=account["steam_id"]):
+            return
+        self.auths.pop(telegram_id, None)
+        family = self.get(family_id)
+        if family.snapshot:
+            family.snapshot = {**family.snapshot, "members": [m for m in family.members if m != account["steam_id"]]}
+
+    async def _reconcile_accounts(self, family_id: str, members: list[str]) -> None:
+        await self.db.reconcile_members(family_id, members)
+        for account in await self.db.family_accounts(family_id):
+            if account["steam_id"] not in members:
+                self.auths.pop(account["telegram_id"], None)
 
     async def owner_token(self, account) -> str:
         """Access token of the acting user's own Steam account, for changes to the family."""
@@ -177,12 +199,24 @@ class Families:
 
     async def refresh(self, family_id: str) -> None:
         family = self.get(family_id)
+        requested = family._refresh_started
+        async with family._refresh_lock:
+            # Requests during a pass need a trailing fetch; other queued requests can share that pass.
+            if family._refresh_completed > requested:
+                return
+            family._refresh_started += 1
+            await self._refresh(family_id)
+            family._refresh_completed = family._refresh_started
+
+    async def _refresh(self, family_id: str) -> None:
+        family = self.get(family_id)
         async with family.lock:
-            row = await self.db.family(family_id)
+            previous = family.snapshot  # Capture membership before revocation trims the cached snapshot.
             snapshot = await self._fetch(family_id)
             if snapshot is None:
                 return
-            previous, family.snapshot = family.snapshot, snapshot
+            row = await self.db.family(family_id)
+            family.snapshot = snapshot
         self.presence.setdefault(family_id, snapshot.get("players", {}))
 
         events, state = reconcile(row["state"], snapshot)
@@ -240,15 +274,18 @@ class Families:
             try:
                 snapshot = await fetch_family_snapshot(self.http, token)
             except NoFamily:
-                await self.db.revoke_membership(account["telegram_id"], family_id)
+                await self._revoke_account(account)
                 continue
-            except RuntimeError as error:  # A failed or incomplete response does not prove departure.
+            except RuntimeError as error:
                 log.warning("Account %s cannot read family %s: %s", account["telegram_id"], family_id, error)
                 continue
-            if snapshot["family_id"] == family_id:  # a member may have moved to another family
-                await self.db.reconcile_members(family_id, snapshot["members"])
+            if account["steam_id"] not in snapshot["members"]:
+                log.warning("Steam returned a family without account %s", account["telegram_id"])
+                continue
+            if snapshot["family_id"] == family_id:
+                await self._reconcile_accounts(family_id, snapshot["members"])
                 return snapshot
-            await self.db.revoke_membership(account["telegram_id"], family_id)
+            await self._revoke_account(account)
         log.warning("Family %s has no working Steam login", family_id)
         return None
 
@@ -281,19 +318,25 @@ class Families:
     async def presence_loop(self, interval: int = PRESENCE_INTERVAL) -> None:
         while True:
             await asyncio.sleep(interval)
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.check_presence(row["family_id"])
-                except Exception:
-                    log.exception("Family %s presence check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.check_presence(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s presence check failed", row["family_id"])
+            except Exception:
+                log.exception("Presence check cycle failed")
 
     async def refresh_loop(self, interval: int) -> None:
         while True:
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.refresh(row["family_id"])
-                except Exception:
-                    log.exception("Family %s check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.refresh(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s check failed", row["family_id"])
+            except Exception:
+                log.exception("Family refresh cycle failed")
             await asyncio.sleep(interval)
 
 

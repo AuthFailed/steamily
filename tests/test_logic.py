@@ -135,11 +135,14 @@ class SteamParsingTest(unittest.TestCase):
         self.assertEqual((snapshot["family_id"], snapshot["name"]), ("9", "Fam"))
         self.assertEqual(snapshot["joined"], {"1": 200, "2": 100})
         self.assertEqual(snapshot["names"], {"1": "Alice"})
-        self.assertEqual(snapshot["apps"][0], {"appid": 620, "name": "App 620", "owners": ["1", "2"], "acquired": 5})
+        self.assertEqual(
+            snapshot["apps"][0],
+            {"appid": 620, "name": "App 620", "owners": ["1", "2"], "acquired": 5, "exclude_reason": 0},
+        )
         self.assertEqual(snapshot["apps"][1]["owners"], [])
 
     def test_missing_members_are_an_incomplete_response(self):
-        with self.assertRaisesRegex(RuntimeError, "incomplete family-membership response"):
+        with self.assertRaisesRegex(RuntimeError, "incomplete family response"):
             parse_snapshot({"response": {"family_groupid": "9"}}, {"response": {"apps": []}}, {})
 
     def test_parse_store_item(self):
@@ -174,7 +177,7 @@ class SteamFetchTest(unittest.IsolatedAsyncioTestCase):
             {"response": {"is_not_member_of_any_group": "true"}},
         ):
             with self.subTest(response=response), patch("bot.steam.get_json", AsyncMock(return_value=response)):
-                with self.assertRaisesRegex(RuntimeError, "incomplete family-membership response"):
+                with self.assertRaisesRegex(RuntimeError, "incomplete family response"):
                     await fetch_family_snapshot(None, "access")
 
     async def test_temporary_failure_is_not_confirmed_departure(self):
