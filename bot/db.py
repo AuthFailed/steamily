@@ -9,72 +9,7 @@ from aiogram.fsm.state import State
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
 from cryptography.fernet import Fernet
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS families (
-    family_id     TEXT PRIMARY KEY,
-    name          TEXT NOT NULL DEFAULT '',
-    notify_chat   BIGINT,
-    state         JSONB
-);
-CREATE TABLE IF NOT EXISTS accounts (
-    telegram_id   BIGINT PRIMARY KEY,
-    steam_id      TEXT NOT NULL,
-    family_id     TEXT NOT NULL REFERENCES families ON DELETE CASCADE,
-    refresh_token BYTEA,
-    status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'blocked')),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS accounts_family ON accounts (family_id);
-CREATE TABLE IF NOT EXISTS store_cache (
-    country TEXT PRIMARY KEY,
-    data    JSONB NOT NULL
-);
-CREATE TABLE IF NOT EXISTS telegram_users (
-    telegram_id BIGINT PRIMARY KEY,
-    language    TEXT NOT NULL
-);
-ALTER TABLE families ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'en';
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS country TEXT;
--- Unix seconds of the last successful refresh-token renewal, preserved across restarts.
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_renewed_at DOUBLE PRECISION NOT NULL DEFAULT 0;
--- The family owner is a bot role: it passes on when the owner logs out (see Families.leave).
-ALTER TABLE families ADD COLUMN IF NOT EXISTS owner_telegram_id BIGINT;
-ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS notify_requests BOOLEAN NOT NULL DEFAULT TRUE;
--- Which group alerts are on; missing kinds use library.ALERTS defaults.
-ALTER TABLE families ADD COLUMN IF NOT EXISTS alerts JSONB;
-ALTER TABLE families ADD COLUMN IF NOT EXISTS alert_retry_at DOUBLE PRECISION NOT NULL DEFAULT 0;
-ALTER TABLE families ADD COLUMN IF NOT EXISTS alert_link_version BIGINT NOT NULL DEFAULT 0;
-CREATE TABLE IF NOT EXISTS pending_alerts (
-    id           BIGSERIAL PRIMARY KEY,
-    family_id    TEXT NOT NULL REFERENCES families ON DELETE CASCADE,
-    chat_id      BIGINT NOT NULL,
-    text         TEXT NOT NULL,
-    coalesce_key TEXT,
-    expires_at   DOUBLE PRECISION
-);
-CREATE INDEX IF NOT EXISTS pending_alerts_family ON pending_alerts (family_id, id);
--- The Telegram side of a registered member, for links next to their Steam profile.
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tg_username TEXT;
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tg_name TEXT;
-CREATE TABLE IF NOT EXISTS fsm (
-    key   TEXT PRIMARY KEY,
-    state TEXT,
-    data  JSONB NOT NULL DEFAULT '{}'
-);
-DO $$
-BEGIN
-    -- Keep the duplicate check and index creation atomic against account writes.
-    LOCK TABLE accounts IN SHARE ROW EXCLUSIVE MODE;
-    IF EXISTS (SELECT 1 FROM accounts GROUP BY steam_id HAVING count(*) > 1) THEN
-        RAISE EXCEPTION 'Duplicate Steam account links prevent startup. See docs/steam-account-links.md for recovery.'
-            USING HINT = 'SELECT steam_id, array_agg(telegram_id ORDER BY telegram_id) FROM accounts '
-                         'GROUP BY steam_id HAVING count(*) > 1;';
-    END IF;
-    CREATE UNIQUE INDEX IF NOT EXISTS accounts_steam_id_key ON accounts (steam_id);
-END $$;
--- Shared snapshots and chat settings only outlive a login while another account remains.
-DELETE FROM families f WHERE NOT EXISTS (SELECT 1 FROM accounts a WHERE a.family_id = f.family_id);
-"""
+from bot.migrations import migrate
 
 
 class SteamAlreadyLinked(ValueError):
@@ -93,7 +28,8 @@ class Db:
 
         pool = await asyncpg.create_pool(dsn, init=init)
         try:
-            await pool.execute(SCHEMA)
+            async with pool.acquire() as connection:
+                await migrate(connection)
             return cls(pool, secret_key)
         except BaseException:
             await pool.close()
@@ -440,6 +376,19 @@ class Db:
     async def alert_families(self) -> list[asyncpg.Record]:
         return await self.pool.fetch(
             "SELECT * FROM families f WHERE EXISTS (SELECT 1 FROM pending_alerts a WHERE a.family_id = f.family_id)"
+        )
+
+    async def alert_health(self, now: float) -> dict[str, int]:
+        return dict(
+            await self.pool.fetchrow(
+                """
+            SELECT count(*) AS pending_retry,
+                   count(*) FILTER (WHERE f.alert_retry_at > $1) AS deferred
+            FROM pending_alerts a JOIN families f USING (family_id)
+            WHERE a.chat_id = f.notify_chat AND (a.expires_at IS NULL OR a.expires_at > $1)
+            """,
+                now,
+            )
         )
 
     async def families_with_accounts(self) -> list[asyncpg.Record]:

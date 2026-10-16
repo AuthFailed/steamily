@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from asyncpg import CheckViolationError
 
@@ -220,6 +220,10 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("9", self.families.presence)
         self.assertNotIn("9", self.families.delivery_locks)
         self.assertNotIn("9", self.families.last_family_check)
+        self.assertNotIn("9", self.families.health.families)
+        self.assertNotIn("9", self.families.health.first_seen)
+        tasks = {name: Mock(done=lambda: False) for name in self.families.health.workers}
+        self.assertEqual(self.families.health.snapshot(tasks)["steam"]["families"], [])
         with self.assertRaises(TokenRejected):
             await self.families.owner_token(account)
         with self.assertRaises(TokenRejected):
@@ -244,6 +248,7 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(ALICE, self.families.stats_cache)
         self.assertIs(self.families.items["9"], family)
         self.assertIn("9", self.families.presence)
+        self.assertIn("9", self.families.health.families)
         self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 1)
 
     async def test_inflight_snapshot_cannot_restore_a_deleted_family(self):
@@ -818,6 +823,14 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
         fields = dict(self.steam_call.await_args.args[2])
         self.assertEqual((fields[1], fields[3]), ("rotated", 0))
         self.assertEqual((await self.db.account(1))["token_renewed_at"], 100_000.0)
+
+    async def test_uncommitted_registration_does_not_retain_health_family_identifiers(self):
+        with patch.object(self.db, "save_account", AsyncMock(side_effect=OSError("unavailable"))):
+            with self.assertRaises(OSError):
+                await self.families.register(1, "original", ALICE)
+        self.assertEqual(self.families.health.families, {})
+        self.assertEqual(self.families.health.first_seen, {})
+        self.assertIsNone(self.families.last_steam_check)
 
     async def test_relogin_keeps_rotated_token_and_existing_approval(self):
         await self.families.register(1, "original", ALICE)

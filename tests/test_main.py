@@ -45,7 +45,7 @@ class BackgroundTasksTest(unittest.IsolatedAsyncioTestCase):
         async def background(name):
             tasks.append(asyncio.current_task())
             started.add(name)
-            if len(started) == 3:
+            if len(started) == 4:
                 ready.set()
             try:
                 await asyncio.Event().wait()
@@ -57,10 +57,12 @@ class BackgroundTasksTest(unittest.IsolatedAsyncioTestCase):
         families.refresh_loop.side_effect = lambda _: background("refresh")
         families.presence_loop.side_effect = lambda: background("presence")
         families.delivery_loop.side_effect = lambda: background("delivery")
+        health = MagicMock()
+        health.monitor.side_effect = lambda *args: background("health")
         db = MagicMock()
 
         async def close():
-            self.assertEqual(cleaned, {"refresh", "presence", "delivery"})
+            self.assertEqual(cleaned, {"refresh", "presence", "delivery", "health"})
 
         db.pool.close = AsyncMock(side_effect=close)
         logins = MagicMock(close=AsyncMock(side_effect=close))
@@ -74,13 +76,24 @@ class BackgroundTasksTest(unittest.IsolatedAsyncioTestCase):
 
         dispatcher = MagicMock(start_polling=AsyncMock(side_effect=poll))
         bot = AsyncMock(me=AsyncMock(return_value=SimpleNamespace(username="bot")))
+        bot.session.close.side_effect = close
         http = MagicMock()
         http.__aenter__ = AsyncMock()
         http.__aexit__ = AsyncMock(side_effect=exit_http)
         try:
             with (
-                patch.object(app, "required", return_value="configured"),
-                patch.object(app, "poll_seconds", return_value=60),
+                patch.object(
+                    app,
+                    "load_config",
+                    return_value=SimpleNamespace(
+                        telegram_bot_token="configured",
+                        database_url="configured",
+                        secret_key="configured",
+                        poll_interval_seconds=60,
+                    ),
+                ),
+                patch.object(app, "STATUS_PATH"),
+                patch.object(app, "Health", return_value=health),
                 patch.object(app, "Bot", return_value=bot),
                 patch.object(app.charts, "reset_cache"),
                 patch.object(app.Db, "connect", AsyncMock(return_value=db)),
@@ -94,6 +107,7 @@ class BackgroundTasksTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(task.cancelled() for task in tasks))
             logins.close.assert_awaited_once()
             db.pool.close.assert_awaited_once()
+            bot.session.close.assert_awaited_once()
         finally:
             for task in tasks:
                 task.cancel()
