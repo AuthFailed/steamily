@@ -76,6 +76,7 @@ class Families:
 
     async def register(self, telegram_id: int, refresh_token: str, steam_id: str) -> Family:
         """Called after a successful Steam login. Raises RuntimeError if the account has no family."""
+        await self.db.check_steam_link(telegram_id, steam_id)
         account = await self.db.account(telegram_id)
         last_renewal = account["token_renewed_at"] if account and account["steam_id"] == steam_id else 0.0
         auth = SteamAuth(self.http, refresh_token, steam_id, last_renewal=last_renewal)

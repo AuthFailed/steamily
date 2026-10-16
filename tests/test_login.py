@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from bot.db import SteamAlreadyLinked
+from bot.dialogs.menu import login_getter
 from bot.login import Logins
 from bot.steam import NoFamily
 
@@ -313,6 +315,32 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
         await self.run_login(AsyncMock(return_value=TOKEN))
         self.manager.update.assert_awaited_with({"login": "no_family"})
         self.manager.start.assert_not_called()
+
+    async def test_already_linked_is_shown_and_login_resources_are_cleaned(self):
+        self.families.register.side_effect = SteamAlreadyLinked()
+
+        data = await self.run_login(AsyncMock(return_value=TOKEN))
+
+        self.manager.update.assert_awaited_once_with({"login": "already_linked"})
+        self.assertFalse(Path(data["qr"]).exists())
+        self.assertEqual(self.logins.tasks, {})
+        self.manager.start.assert_not_awaited()
+        self.families.db.account.assert_not_awaited()
+        self.logins.bot.send_message.assert_not_awaited()
+
+    async def test_already_linked_result_renders_localized_recovery(self):
+        manager = MagicMock(dialog_data={"login": "already_linked"})
+        for lang, rejection, recovery, operator in (
+            ("en", "already linked to another Telegram account", "Settings → Log out", "contact the bot operator"),
+            ("ru", "уже привязан к другому аккаунту Telegram", "Настройки → Выйти", "оператору бота"),
+        ):
+            with self.subTest(lang=lang):
+                rendered = await login_getter(manager, lang)
+                self.assertFalse(rendered["waiting"])
+                self.assertIsNone(rendered["qr"])
+                self.assertIn(rejection, rendered["failure"])
+                self.assertIn(recovery, rendered["failure"])
+                self.assertIn(operator, rendered["failure"])
 
 
 if __name__ == "__main__":

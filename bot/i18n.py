@@ -138,6 +138,13 @@ TEXTS = {
         "login_active": "A Steam sign-in is already in progress. Finish or cancel it before starting another.",
         "login_busy": "Too many Steam sign-ins are in progress. Try again in {seconds} seconds.",
         "login_stopping": "The bot is stopping. Try again after it restarts.",
+        "login_already_linked": (
+            "❌ This Steam account is already linked to another Telegram account.\n\n"
+            "Use the Telegram account you linked originally. To move the link, open <b>Settings → Log out</b> "
+            "in that account first, then sign in here. Logging out deletes that account's bot data and settings "
+            "and may pass family ownership to another member.\n\n"
+            "If you cannot access that Telegram account, contact the bot operator."
+        ),
         "btn_retry": "Try again",
         "owner_new_member": "👋 <b>{name}</b> logged in and waits for access: "
         "open Family → Manage family → Bot members.",
@@ -357,6 +364,13 @@ TEXTS = {
         "login_active": "Вход через Steam уже начат. Завершите или отмените его перед новой попыткой.",
         "login_busy": "Слишком много одновременных входов через Steam. Попробуйте через {seconds} сек.",
         "login_stopping": "Бот останавливается. Попробуйте войти после его перезапуска.",
+        "login_already_linked": (
+            "❌ Этот аккаунт Steam уже привязан к другому аккаунту Telegram.\n\n"
+            "Войдите с аккаунта Telegram, который привязали изначально. Для переноса сначала откройте там "
+            "<b>Настройки → Выйти</b>, затем войдите здесь. При выходе данные и настройки этого аккаунта в боте "
+            "удалятся, а роль владельца семьи может перейти другому участнику.\n\n"
+            "Если доступа к тому аккаунту Telegram нет, обратитесь к оператору бота."
+        ),
         "btn_retry": "Попробовать снова",
         "owner_new_member": "👋 <b>{name}</b> вошёл в бота и ждёт доступа: "
         "откройте Семья → Управление семьёй → Участники бота.",

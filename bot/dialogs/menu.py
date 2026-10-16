@@ -76,7 +76,14 @@ async def login_getter(dialog_manager: DialogManager, lang: str, **kwargs):
         "url": data.get("url", ""),
         "location": LOGIN_LOCATION or t(lang, "location_unknown"),
         "failure": f"{premium('login')} <b>{t(lang, 'login_title')}</b>\n\n"
-        + t(lang, {"timeout": "login_timeout", "no_family": "login_no_family"}.get(data.get("login"), "login_failed")),
+        + t(
+            lang,
+            {
+                "timeout": "login_timeout",
+                "no_family": "login_no_family",
+                "already_linked": "login_already_linked",
+            }.get(data.get("login"), "login_failed"),
+        ),
     }
 
 
