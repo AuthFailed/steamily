@@ -133,7 +133,7 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
             account = await db.account(10)
             self.assertEqual((account["publish_presence"], account["publish_telegram"]), (True, True))
             self.assertEqual(account["publication_version"], version)
-            self.assertEqual(len(await self.versions()), 6)
+            self.assertEqual(len(await self.versions()), len(MIGRATIONS))
         finally:
             await db.pool.close()
 
@@ -158,6 +158,27 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         """)
         self.assertGreater(next_id, pending[-1]["id"])
         self.assertEqual(len(await self.versions()), len(MIGRATIONS))
+
+    async def test_browser_upgrade_preserves_encrypted_login_approval_and_reader_on_restart(self):
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:6]):
+            await migrate(self.connection)
+        encrypted = Fernet(Fernet.generate_key()).encrypt(b"legacy-login")
+        await self.connection.execute("""
+            INSERT INTO families (family_id, name, owner_telegram_id) VALUES ('9', 'Existing', 10);
+            INSERT INTO accounts (telegram_id, steam_id, family_id, status) VALUES (10, '1', '9', 'approved');
+        """)
+        await self.connection.execute("UPDATE accounts SET refresh_token = $1", encrypted)
+        before = await self.versions()
+        await migrate(self.connection)
+        account = await self.connection.fetchrow("SELECT * FROM accounts WHERE telegram_id = 10")
+        self.assertEqual(
+            (account["refresh_token"], account["status"], account["token_generation"]), (encrypted, "approved", 0)
+        )
+        self.assertIsNone(await self.connection.fetchval("SELECT reader_telegram_id FROM families"))
+        await self.connection.execute("UPDATE families SET reader_telegram_id = 10")
+        await migrate(self.connection)
+        self.assertEqual((await self.versions())[:6], before)
+        self.assertEqual(await self.connection.fetchval("SELECT reader_telegram_id FROM families"), 10)
 
     async def test_failed_migration_rolls_back_schema_data_and_all_new_versions(self):
         await self.connection.execute(MIGRATIONS[0].read_text())

@@ -34,7 +34,7 @@ class SetupTest(unittest.TestCase):
         values = read_env_file(self.path)
         Fernet(values["SECRET_KEY"].encode())
         self.assertTrue(values["POSTGRES_PASSWORD"])
-        self.assertEqual(values["POLL_INTERVAL_SECONDS"], "600")
+        self.assertEqual(values["POLL_INTERVAL_SECONDS"], "1800")
         self.assertEqual(values["LOGIN_LOCATION"], "Vienna, Wien, AT")
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         self.assertIn("WARNING", output)
@@ -71,20 +71,20 @@ class SetupTest(unittest.TestCase):
 
     def test_external_database_setup(self):
         database_url = "postgresql://local:private@localhost/family"
-        output = self.run_setup([TOKEN, database_url], ["60", ""], external_db=True)
+        output = self.run_setup([TOKEN, database_url], ["300", ""], external_db=True)
         values = read_env_file(self.path)
         self.assertEqual(values["DATABASE_URL"], database_url)
         self.assertNotIn("POSTGRES_PASSWORD", values)
         self.assertNotIn(database_url, output)
 
     def test_invalid_input_is_explained_and_reprompted(self):
-        output = self.run_setup(["not-a-token", TOKEN, "has@sign", "valid-password"], ["59", "60", ""])
+        output = self.run_setup(["not-a-token", TOKEN, "has@sign", "valid-password"], ["299", "300", ""])
         self.assertIn("TELEGRAM_BOT_TOKEN", output)
         self.assertIn("POSTGRES_PASSWORD", output)
         self.assertIn("POLL_INTERVAL_SECONDS", output)
         self.assertNotIn("not-a-token", output)
         self.assertNotIn("has@sign", output)
-        self.assertEqual(read_env_file(self.path)["POLL_INTERVAL_SECONDS"], "60")
+        self.assertEqual(read_env_file(self.path)["POLL_INTERVAL_SECONDS"], "300")
 
     def test_env_file_parse_errors_do_not_disclose_values(self):
         self.path.write_text('SECRET_KEY="private-unterminated\n')

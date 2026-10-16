@@ -9,6 +9,7 @@ from aiogram_dialog import StartMode
 
 from bot.dialogs.admin import approve, block, remove
 from bot.dialogs.menu import on_logout
+from bot.family import SessionRevocationFailed
 from bot.states import Admin, Menu
 
 
@@ -124,6 +125,22 @@ class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.manager.middleware_data["account"])
         self.manager.start.assert_not_awaited()
         self.background.start.assert_not_awaited()
+
+    async def test_revocation_failure_keeps_actor_state_and_offers_retry(self):
+        self.families.leave.side_effect = SessionRevocationFailed("Steam unavailable")
+
+        await on_logout(self.callback, None, self.manager)
+
+        self.assertIsNotNone(self.manager.middleware_data["account"])
+        self.assertIs(self.manager.middleware_data["family"], self.family)
+        self.assertTrue(self.manager.middleware_data["has_language"])
+        self.assertEqual(self.manager.middleware_data["deleted_dialogs"], [])
+        self.manager.start.assert_not_awaited()
+        self.background.start.assert_not_awaited()
+        self.families.bot.send_message.assert_not_awaited()
+        self.callback.answer.assert_awaited_once()
+        self.assertIn("kept so you can retry", self.callback.answer.await_args.args[0])
+        self.assertTrue(self.callback.answer.await_args.kwargs["show_alert"])
 
     async def test_logout_delivery_cancellation_propagates(self):
         self.background.start.side_effect = asyncio.CancelledError

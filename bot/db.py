@@ -66,6 +66,11 @@ class Db:
         await connection.execute("DELETE FROM fsm WHERE split_part(key, ':', 3) = $1", str(telegram_id))
         if family_id is not None:
             await connection.execute(
+                "UPDATE families SET reader_telegram_id = NULL WHERE family_id = $1 AND reader_telegram_id = $2",
+                family_id,
+                telegram_id,
+            )
+            await connection.execute(
                 "UPDATE families SET owner_telegram_id = NULL WHERE family_id = $1 AND owner_telegram_id = $2",
                 family_id,
                 telegram_id,
@@ -131,23 +136,34 @@ class Db:
         refresh_token: str,
         country: str | None = None,
         token_renewed_at: float = 0.0,
+        *,
+        claim_owner: bool = False,
     ) -> None:
         await self.check_steam_link(telegram_id, steam_id)
         try:
             # Approval, ownership and publication consent belong to one Steam account in one family.
-            await self.pool.execute(
-                """
+            async with self.pool.acquire() as connection, connection.transaction():
+                if claim_owner:
+                    await connection.fetchval(
+                        "SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", family_id
+                    )
+                await connection.execute(
+                    """
             WITH cleared_owner AS (
-                UPDATE families f SET owner_telegram_id = NULL
-                WHERE owner_telegram_id = $1 AND EXISTS (
+                UPDATE families f SET
+                    owner_telegram_id = CASE WHEN owner_telegram_id = $1 THEN NULL ELSE owner_telegram_id END,
+                    reader_telegram_id = CASE WHEN reader_telegram_id = $1 THEN NULL ELSE reader_telegram_id END
+                WHERE (owner_telegram_id = $1 OR reader_telegram_id = $1) AND EXISTS (
                     SELECT 1 FROM accounts a WHERE a.telegram_id = $1 AND a.family_id = f.family_id
                     AND (a.family_id <> $3 OR a.steam_id <> $2)
                 ) RETURNING family_id
             )
-            INSERT INTO accounts (telegram_id, steam_id, family_id, refresh_token, country, token_renewed_at)
-            SELECT $1, $2, $3, $4, $5, $6 FROM (SELECT count(*) FROM cleared_owner) AS cleared
+            INSERT INTO accounts
+                (telegram_id, steam_id, family_id, refresh_token, country, token_renewed_at, token_generation)
+            SELECT $1, $2, $3, $4, $5, $6, nextval('steamily_token_generation')
+            FROM (SELECT count(*) FROM cleared_owner) AS cleared
             ON CONFLICT (telegram_id) DO UPDATE SET family_id = $3, refresh_token = $4, country = $5,
-                token_renewed_at = $6,
+                token_renewed_at = $6, token_generation = EXCLUDED.token_generation,
                 status = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
                     THEN accounts.status ELSE 'pending' END,
                 publish_presence = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
@@ -157,29 +173,48 @@ class Db:
                 publication_version = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
                     THEN accounts.publication_version ELSE gen_random_uuid()::text END, steam_id = $2
             """,
-                telegram_id,
-                steam_id,
-                family_id,
-                self.fernet.encrypt(refresh_token.encode()),
-                country,
-                token_renewed_at,
-            )
+                    telegram_id,
+                    steam_id,
+                    family_id,
+                    self.fernet.encrypt(refresh_token.encode()),
+                    country,
+                    token_renewed_at,
+                )
+                if claim_owner:
+                    claimed = await connection.fetchval(
+                        "UPDATE families SET owner_telegram_id = $2 WHERE family_id = $1 "
+                        "AND owner_telegram_id IS NULL AND EXISTS (SELECT 1 FROM accounts "
+                        "WHERE telegram_id = $2 AND family_id = $1 AND status <> 'blocked') "
+                        "RETURNING owner_telegram_id",
+                        family_id,
+                        telegram_id,
+                    )
+                    if claimed is not None:
+                        await connection.execute(
+                            "UPDATE accounts SET status = 'approved' WHERE telegram_id = $1", telegram_id
+                        )
         except asyncpg.UniqueViolationError as error:
             if error.constraint_name != "accounts_steam_id_key":
                 raise
             raise SteamAlreadyLinked("Steam account is already linked to another Telegram account.") from error
 
-    async def revoke_account(self, telegram_id: int, steam_id: str, family_id: str) -> bool:
+    async def revoke_account(
+        self, telegram_id: int, steam_id: str, family_id: str, *, expected_generation: int | None = None
+    ) -> bool:
         result = await self.pool.execute(
             """
             UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
-                refresh_token = NULL, token_renewed_at = 0, publish_presence = FALSE, publish_telegram = FALSE,
+                refresh_token = NULL, token_renewed_at = 0,
+                token_generation = nextval('steamily_token_generation'),
+                publish_presence = FALSE, publish_telegram = FALSE,
                 publication_version = gen_random_uuid()::text
             WHERE telegram_id = $1 AND steam_id = $2 AND family_id = $3
+                AND ($4::bigint IS NULL OR token_generation = $4)
             """,
             telegram_id,
             steam_id,
             family_id,
+            expected_generation,
         )
         return result == "UPDATE 1"
 
@@ -190,16 +225,22 @@ class Db:
         token_renewed_at: float = 0.0,
         *,
         expected_refresh_token: bytes | None = None,
-    ) -> None:
+        expected_generation: int | None = None,
+    ) -> bool:
         token = self.fernet.encrypt(refresh_token.encode()) if refresh_token else None
-        await self.pool.execute(
-            "UPDATE accounts SET refresh_token = $2, token_renewed_at = $3 WHERE telegram_id = $1 "
-            "AND ($4::bytea IS NULL OR refresh_token = $4)",
+        saved = await self.pool.fetchval(
+            "UPDATE accounts SET refresh_token = $2, token_renewed_at = $3, "
+            "token_generation = CASE WHEN $2::bytea IS NULL THEN nextval('steamily_token_generation') "
+            "ELSE token_generation END WHERE telegram_id = $1 "
+            "AND ($4::bytea IS NULL OR refresh_token = $4) "
+            "AND ($5::bigint IS NULL OR token_generation = $5) RETURNING telegram_id",
             telegram_id,
             token,
             token_renewed_at,
             expected_refresh_token,
+            expected_generation,
         )
+        return saved is not None
 
     def refresh_token(self, account: asyncpg.Record) -> str | None:
         return self.fernet.decrypt(account["refresh_token"]).decode() if account["refresh_token"] else None
@@ -475,17 +516,26 @@ class Db:
             if status != "approved":
                 await connection.execute("UPDATE accounts SET status = 'approved' WHERE telegram_id = $1", telegram_id)
 
-    async def revoke_membership(self, telegram_id: int, family_id: str, *, steam_id: str | None = None) -> bool:
+    async def revoke_membership(
+        self,
+        telegram_id: int,
+        family_id: str,
+        *,
+        steam_id: str | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.fetchval("SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", family_id)
             account = await connection.fetchval(
                 """
                 SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND family_id = $2
-                    AND ($3::text IS NULL OR steam_id = $3) FOR UPDATE
+                    AND ($3::text IS NULL OR steam_id = $3)
+                    AND ($4::bigint IS NULL OR token_generation = $4) FOR UPDATE
                 """,
                 telegram_id,
                 family_id,
                 steam_id,
+                expected_generation,
             )
             if account is None:
                 return False
@@ -493,6 +543,7 @@ class Db:
                 """
                 UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
                     refresh_token = NULL, token_renewed_at = 0, publish_presence = FALSE, publish_telegram = FALSE,
+                    token_generation = nextval('steamily_token_generation'),
                     publication_version = gen_random_uuid()::text
                 WHERE telegram_id = $1 AND (status = 'approved' OR refresh_token IS NOT NULL OR token_renewed_at <> 0
                     OR publish_presence OR publish_telegram)
@@ -517,6 +568,7 @@ class Db:
                 """
                 UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
                     refresh_token = NULL, token_renewed_at = 0, publish_presence = FALSE, publish_telegram = FALSE,
+                    token_generation = nextval('steamily_token_generation'),
                     publication_version = gen_random_uuid()::text
                 WHERE family_id = $1 AND NOT (steam_id = ANY($2::text[]))
                     AND (status = 'approved' OR refresh_token IS NOT NULL OR token_renewed_at <> 0
@@ -553,7 +605,7 @@ class Db:
                 )
 
     async def update_family(self, family_id: str, **fields) -> None:
-        allowed = {"name", "notify_chat", "state", "language", "owner_telegram_id", "alerts"}
+        allowed = {"name", "notify_chat", "state", "language", "owner_telegram_id", "reader_telegram_id", "alerts"}
         assert fields and set(fields) <= allowed, fields
         columns = ", ".join(f"{name} = ${i}" for i, name in enumerate(fields, start=2))
         query = f"UPDATE families SET {columns} WHERE family_id = $1"

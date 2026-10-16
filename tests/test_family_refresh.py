@@ -32,6 +32,7 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
                 "notify_chat": -100,
                 "language": "en",
                 "alerts": {},
+                "reader_telegram_id": None,
             }
             for family_id in ("9", "10")
         }
@@ -190,6 +191,9 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
         await self.finish(first)
 
     async def test_failure_releases_lock_and_queued_refresh_retries(self):
+        clock = self.enterContext(patch("bot.family.time"))
+        clock.monotonic.return_value = 1000.0
+        clock.time.return_value = 1_000_000.0
         fetching, release = asyncio.Event(), asyncio.Event()
 
         async def fetch(family_id):
@@ -208,6 +212,9 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OSError, "Steam unavailable"):
             await asyncio.wait_for(first, timeout=2)
         await self.finish(second)
+        self.assertEqual(self.fetch.await_count, 1)
+        clock.monotonic.return_value = 1060.0
+        await self.families.refresh("9")
         self.assertEqual(self.rows["9"]["state"]["ownership"], {"620": [ALICE]})
 
     async def test_active_cancellation_releases_lock_and_queued_refresh_retries(self):
@@ -279,6 +286,9 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows["9"]["state"]["ownership"], {"620": [ALICE], "730": [ALICE]})
 
     async def test_failed_trailing_pass_does_not_coalesce_away_queued_retry(self):
+        clock = self.enterContext(patch("bot.family.time"))
+        clock.monotonic.return_value = 1000.0
+        clock.time.return_value = 1_000_000.0
         fetching, release = asyncio.Event(), asyncio.Event()
 
         async def fetch(family_id):
@@ -299,6 +309,9 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OSError, "Trailing fetch failed"):
             await asyncio.wait_for(second, timeout=2)
         await self.finish(third)
+        self.assertEqual(self.fetch.await_count, 2)
+        clock.monotonic.return_value = 1060.0
+        await self.families.refresh("9")
         self.assertEqual(self.fetch.await_count, 3)
         self.assertEqual(self.families.get("9").snapshot["apps"], [PORTAL, CS])
         self.assertEqual(self.rows["9"]["state"]["ownership"], {"620": [ALICE], "730": [ALICE]})

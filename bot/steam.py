@@ -4,6 +4,8 @@ import time
 
 import aiohttp
 
+from .steam_auth import TokenRejected
+
 API = "https://api.steampowered.com"
 STORE_BATCH = 50
 STORE_MAX_AGE = 24 * 60 * 60
@@ -16,8 +18,17 @@ class NoFamily(RuntimeError):
     pass
 
 
+def _check_auth(response) -> None:
+    # AccessDenied can concern one family action; these results reject the session itself.
+    if response.status in (401, 403) or (
+        response.status == 200 and response.headers.get("x-eresult") in ("5", "26", "27", "43")
+    ):
+        raise TokenRejected("Steam rejected this session")
+
+
 async def get_json(http: aiohttp.ClientSession, method: str, params: dict) -> dict:
     async with http.get(f"{API}/{method}/", params=params) as response:
+        _check_auth(response)
         eresult = response.headers.get("x-eresult", "1")
         if response.status != 200 or eresult != "1":
             raise RuntimeError(f"Steam {method} failed with HTTP {response.status}, EResult {eresult}")
@@ -80,6 +91,7 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
 async def post_json(http: aiohttp.ClientSession, method: str, params: dict) -> dict:
     """POST-only WebAPI methods. Steam explains refusals in the x-error_message header."""
     async with http.post(f"{API}/{method}/", data=params) as response:
+        _check_auth(response)
         eresult = response.headers.get("x-eresult", "1")
         if response.status != 200 or eresult != "1":
             detail = response.headers.get("x-error_message") or f"HTTP {response.status}, EResult {eresult}"
@@ -184,6 +196,7 @@ async def fetch_user_country(http: aiohttp.ClientSession, access_token: str, ste
         async with http.post(
             f"{API}/IUserAccountService/GetUserCountry/v1/", data={"access_token": access_token, "steamid": steam_id}
         ) as response:
+            _check_auth(response)
             if response.status != 200:
                 return None
             return (await response.json(content_type=None)).get("response", {}).get("country") or None

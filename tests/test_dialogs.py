@@ -36,6 +36,7 @@ from bot.db import PgStorage, SteamAlreadyLinked
 from bot.family import Families
 from bot.login import qr_png
 from bot.steam import SteamActionError
+from bot.steam_auth import TokenRejected
 from tests.pg import fresh_db, needs_pg
 
 OWNER, FRIEND, PENDING, NEWCOMER = 100, 200, 300, 400
@@ -95,6 +96,9 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.db = await fresh_db()
         self.families = Families(self.db, http=None, bot=None)
         self.families.refresh = AsyncMock()  # never call Steam from tests
+        revoke = patch("bot.steam_auth.SteamAuth.revoke", new_callable=AsyncMock)
+        self.revoke = revoke.start()
+        self.addCleanup(revoke.stop)
         self.dp.workflow_data.update(db=self.db, families=self.families)
 
         await self.db.ensure_family(FAMILY, "Fam")
@@ -204,7 +208,9 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Войти через Steam", self.buttons())
 
         await client.click(self.last(), Btn("Войти через Steam"))
-        self.assertIn("«Через мобильное приложение»", self.last().caption)
+        self.assertIn("сеанс сайта Steam", self.last().text)
+        await client.click(self.last(), Btn("Перейти к QR-коду"))
+        self.assertIn("Веб-браузер", self.last().caption)
         self.assertIn("город, где стоит сервер бота", self.last().caption)  # LOGIN_LOCATION not set
 
     async def test_public_info_before_login_and_safe_instance_values(self):
@@ -284,12 +290,16 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.send("/start")
         self.assertIn("Log in with your Steam account", self.last().text)
         self.assertEqual(self.buttons(), ["Log in with Steam", "Settings", "About this bot"])
+        started_before = len(self.logins.started)
         with patch("bot.dialogs.menu.LOGIN_LOCATION", "Vienna, Wien, AT"):
             await client.click(self.last(), Btn("Log in with Steam"))
+            self.assertIn("website session", self.last().text)
+            self.assertEqual(len(self.logins.started), started_before)
+            await client.click(self.last(), Btn("Continue to QR"))
         self.assertEqual(self.logins.started[-1], NEWCOMER)
         login = self.last()
         self.assertIsNotNone(login.photo)  # the QR is part of the dialog message
-        self.assertIn("mobile app", login.caption)
+        self.assertIn("Web browser", login.caption)
         self.assertIn("Vienna, Wien, AT", login.caption)
         self.assertEqual(login.reply_markup.inline_keyboard[0][0].url, "https://s.team/q/1/42")
         await client.click(login, Btn("Cancel"))
@@ -467,6 +477,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         client = self.client(OWNER)
         await self.open_bot_members(client)
         await client.click(self.last(), Btn("✏️ Rename family"))
+        await self.db.update_family(FAMILY, reader_telegram_id=FRIEND)
         await self.fetch_members([BOB, CAROL])
 
         with (
@@ -1281,6 +1292,28 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.db.account(FRIEND))["owner_telegram_id"], FRIEND)
         self.assertEqual(self.families.bot.send_message.await_args.args[0], FRIEND)
         self.assertIn("You are now the owner", self.families.bot.send_message.await_args.args[1])
+
+    async def test_failed_steam_logout_keeps_account_and_confirmation_for_retry(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Settings"))
+        await client.click(self.last(), Btn("Log out"))
+        self.revoke.side_effect = RuntimeError("Steam unavailable")
+        await client.click(self.last(), Btn("Yes, log out"))
+        self.assertEqual(self.db.refresh_token(await self.db.account(FRIEND)), "token")
+        self.assertIn("Yes, log out", self.buttons())
+
+    async def test_action_auth_refusal_drops_only_the_acting_session(self):
+        client = self.client(OWNER)
+        self.families.owner_token = AsyncMock(return_value="token")
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family"))
+        await client.click(self.last(), Btn("Manage family"))
+        with patch("bot.dialogs.family.rename_family", AsyncMock(side_effect=TokenRejected("revoked"))):
+            await client.click(self.last(), Btn("✏️ Rename family"))
+            await client.send("New name")
+        self.assertIsNone(self.db.refresh_token(await self.db.account(OWNER)))
+        self.assertEqual(self.db.refresh_token(await self.db.account(FRIEND)), "token")
 
     async def test_family_overview_stats_and_member_card(self):
         await self.db.set_publication(

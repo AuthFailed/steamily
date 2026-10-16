@@ -16,6 +16,7 @@ from bot.steam import NoFamily
 
 ALICE = "76561198000000001"
 TOKEN = "x." + "eyJzdWIiOiAiNzY1NjExOTgwMDAwMDAwMDEifQ" + ".y"  # {"sub": ALICE}
+COOKIE = ALICE + "%7C%7C" + TOKEN
 
 
 class LoginsTest(unittest.IsolatedAsyncioTestCase):
@@ -29,7 +30,15 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
         self.begin = AsyncMock(return_value=self.begin_data)
         self.clock = MagicMock(return_value=1000.0)
         self.pending = []
+
+        async def finalize(http, token, steam_id, *, on_refresh):
+            await on_refresh(COOKIE)
+            return COOKIE
+
+        self.revoke = AsyncMock()
         self.patches = [
+            patch("bot.login.finalize_login", side_effect=finalize),
+            patch("bot.login.revoke_session", self.revoke),
             patch("bot.login.begin_qr_login", self.begin),
             patch("bot.login.poll_qr_login", side_effect=self.wait_for_cancel),
             patch("bot.login.time", SimpleNamespace(monotonic=self.clock)),
@@ -43,6 +52,7 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self.logins.close()
 
     def tearDown(self):
         for p in self.patches:
@@ -207,7 +217,7 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
     async def test_canceled_registration_cannot_open_the_menu(self):
         entered = asyncio.Event()
 
-        async def register(*args):
+        async def register(*args, **kwargs):
             entered.set()
             try:
                 await asyncio.Event().wait()
@@ -315,7 +325,10 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0]["url"], "https://s.team/q/1/b")
         self.assertNotEqual(updates[0]["qr"], data["qr"])
-        self.families.register.assert_awaited_once_with(1, TOKEN, ALICE)
+        self.families.register.assert_awaited_once()
+        self.assertEqual(self.families.register.await_args.args, (1, COOKIE, ALICE))
+        self.assertTrue(callable(self.families.register.await_args.kwargs["on_registered"]))
+        self.revoke.assert_not_awaited()
         self.manager.start.assert_awaited_once()
         self.assertFalse(Path(data["qr"]).exists() or Path(updates[0]["qr"]).exists())  # temp files cleaned
         self.assertFalse(self.logins.tasks)
@@ -355,7 +368,8 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertLogs("bot.login", level="ERROR") as logs:
                     data = await self.run_login(poll)
 
-                self.families.register.assert_awaited_once_with(1, TOKEN, ALICE)
+                self.families.register.assert_awaited_once()
+                self.assertEqual(self.families.register.await_args.args, (1, COOKIE, ALICE))
                 self.begin.assert_awaited_once()
                 poll.assert_awaited_once()
                 self.logins.bot.send_message.assert_awaited_once()
@@ -376,7 +390,8 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertLogs("bot.login", level="ERROR") as logs:
                     data = await self.run_login(AsyncMock(return_value=TOKEN))
 
-                self.families.register.assert_awaited_once_with(1, TOKEN, ALICE)
+                self.families.register.assert_awaited_once()
+                self.assertEqual(self.families.register.await_args.args, (1, COOKIE, ALICE))
                 self.manager.update.assert_not_awaited()
                 self.assertFalse(any("Steam login failed" in line for line in logs.output))
                 self.assertFalse(self.logins.tasks)
@@ -391,7 +406,8 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(data["qr"]).exists())
         self.assertEqual(self.logins.tasks, {})
         self.manager.start.assert_not_awaited()
-        self.families.db.account.assert_not_awaited()
+        self.families.db.account.assert_awaited_once_with(1)
+        self.revoke.assert_awaited_once()
         self.logins.bot.send_message.assert_not_awaited()
 
     async def test_already_linked_result_renders_localized_recovery(self):
@@ -407,6 +423,151 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(rejection, rendered["failure"])
                 self.assertIn(recovery, rendered["failure"])
                 self.assertIn(operator, rendered["failure"])
+
+    async def test_failed_registration_revokes_latest_staged_cookie_and_closes_private_session(self):
+        latest = ALICE + "%7C%7Clatest"
+
+        async def fail(*args, on_refresh, on_registered):
+            await on_refresh(latest)
+            raise RuntimeError("registration unavailable")
+
+        self.families.register.side_effect = fail
+        await self.run_login(AsyncMock(return_value=TOKEN))
+        http, revoked, identity = self.revoke.await_args.args
+        self.assertEqual((revoked, identity), (latest, ALICE))
+        self.assertTrue(http.closed)
+        self.assertIsNot(http, self.families.http)
+        self.manager.update.assert_awaited_with({"login": "failed"})
+
+    async def test_failed_finalization_revokes_the_approved_raw_token(self):
+        with patch("bot.login.finalize_login", AsyncMock(side_effect=RuntimeError("unavailable"))):
+            await self.run_login(AsyncMock(return_value=TOKEN))
+        http, revoked, identity = self.revoke.await_args.args
+        self.assertEqual((revoked, identity), (TOKEN, ALICE))
+        self.assertTrue(http.closed)
+
+    async def test_immediate_cancel_closes_private_session_and_removes_qr(self):
+        begin = {"client_id": 1, "request_id": b"r", "url": "https://s.team/q/cancel", "interval": 5}
+        with patch("bot.login.begin_qr_login", AsyncMock(return_value=begin)) as start:
+            data = await self.logins.start(1, self.manager)
+        http = start.await_args.args[0]
+        self.addAsyncCleanup(http.close)
+        task = self.logins.tasks[1]
+        self.logins.cancel(1)
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        self.assertTrue(http.closed)
+        self.assertFalse(Path(data["qr"]).exists())
+
+    async def test_timeout_after_registration_commit_delivers_success_without_revocation(self):
+        committed = asyncio.Event()
+        timers = []
+        real_timeout = asyncio.timeout
+
+        def timeout(seconds):
+            timer = real_timeout(None)
+            timers.append(timer)
+            return timer
+
+        async def saved(*args, on_refresh, on_registered):
+            on_registered()
+            committed.set()
+            await asyncio.Future()
+
+        self.families.register.side_effect = saved
+        with (
+            patch("bot.login.asyncio.timeout", side_effect=timeout),
+            patch("bot.login.poll_qr_login", AsyncMock(return_value=TOKEN)),
+        ):
+            await self.logins.start(1, self.manager)
+            task = self.logins.tasks[1]
+            await asyncio.wait_for(committed.wait(), 1)
+            timers[-1].reschedule(asyncio.get_running_loop().time())
+            await task
+        self.manager.start.assert_awaited_once_with(Menu.main, mode=StartMode.RESET_STACK)
+        self.manager.update.assert_not_awaited()
+        self.revoke.assert_not_awaited()
+
+    async def test_cancel_after_registration_commit_keeps_saved_session(self):
+        committed = asyncio.Event()
+
+        async def saved(*args, on_refresh, on_registered):
+            on_registered()
+            committed.set()
+            await asyncio.Future()
+
+        self.families.register.side_effect = saved
+        with patch("bot.login.poll_qr_login", AsyncMock(return_value=TOKEN)):
+            await self.logins.start(1, self.manager)
+            task = self.logins.tasks[1]
+            await asyncio.wait_for(committed.wait(), 1)
+            self.logins.cancel(1)
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.revoke.assert_not_awaited()
+
+    async def test_repeated_cancel_drains_staged_session_cleanup(self):
+        await self.assert_cleanup_drained(timed_out=False)
+
+    async def test_cancel_after_timeout_drains_staged_session_cleanup(self):
+        await self.assert_cleanup_drained(timed_out=True)
+
+    async def assert_cleanup_drained(self, *, timed_out):
+        for action in ("forget", "close"):
+            with self.subTest(action=action):
+                self.logins = Logins(self.families, bot=AsyncMock())
+                registering, revoking, release, revoked = (asyncio.Event() for _ in range(4))
+                timers = []
+                real_timeout = asyncio.timeout
+
+                def timeout(seconds, *, real_timeout=real_timeout, timers=timers):
+                    timer = real_timeout(None)
+                    timers.append(timer)
+                    return timer
+
+                async def register(*args, registering=registering, **kwargs):
+                    registering.set()
+                    await asyncio.Future()
+
+                async def revoke(http, credential, steam_id, *, revoking=revoking, release=release, revoked=revoked):
+                    self.assertEqual((credential, steam_id), (COOKIE, ALICE))
+                    self.assertFalse(http.closed)
+                    revoking.set()
+                    await release.wait()
+                    self.assertFalse(http.closed)
+                    revoked.set()
+
+                self.families.register.side_effect = register
+                self.revoke.side_effect = revoke
+                with (
+                    patch("bot.login.asyncio.timeout", side_effect=timeout),
+                    patch("bot.login.poll_qr_login", AsyncMock(return_value=TOKEN)),
+                ):
+                    data = await self.logins.start(1, self.manager)
+                    task = self.logins.tasks[1]
+                    await asyncio.wait_for(registering.wait(), 1)
+                    if timed_out:
+                        timers[-1].reschedule(asyncio.get_running_loop().time())
+                    else:
+                        self.logins.cancel(1)
+                    await asyncio.wait_for(revoking.wait(), 1)
+                    http = self.revoke.await_args.args[0]
+                    self.logins.cancel(1)
+                    drain = asyncio.create_task(self.logins.forget(1) if action == "forget" else self.logins.close())
+                    try:
+                        await asyncio.sleep(0)
+                        await asyncio.sleep(0)
+                        self.assertFalse(task.done(), "cancellation must wait for staged-session revocation")
+                        self.assertFalse(drain.done())
+                        self.assertFalse(http.closed)
+                    finally:
+                        release.set()
+                        await asyncio.gather(task, drain, return_exceptions=True)
+                    self.assertTrue(revoked.is_set())
+                    self.assertTrue(http.closed)
+                    self.assertFalse(Path(data["qr"]).exists())
+                    self.assertFalse(self.logins.tasks)
 
 
 if __name__ == "__main__":

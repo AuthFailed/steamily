@@ -23,13 +23,13 @@ set a log or backup expiry policy.
 
 ## Steam login and account safety
 
-The QR code authorizes a Steam session on the operator's server. You approve it in
+The QR code authorizes a Steam website session labelled **Steamily** on the operator's server. You approve it in
 the official Steam app; the bot does not ask for or store your Steam password.
 The bot stores an encrypted refresh token so it can access Steam without asking
 you to approve every check. Encryption protects the stored token, but the running
 bot and an operator with its database and encryption key can use it. Treat this
 as granting account access to the operator, and authorize only an instance you
-trust.
+trust. This is website account access, not a permission limited to family data.
 
 Steam may show an unusual sign-in warning or restrict or lock your account after
 this server login. The confirmation can show a different country from your own.
@@ -37,7 +37,9 @@ Check the location against `/about`, and reject any login you did not initiate o
 cannot explain. The bot cannot guarantee that Steam will accept the login or that
 the account will remain unrestricted.
 
-Deleting your bot data and revoking the session at Steam are separate actions:
+**Settings → Log out** or `/delete` revokes the selected Steam session before deleting
+your bot data. Other devices remain signed in. If Steam revocation fails, the bot
+keeps the local login for retry. You can also remove the session manually:
 
 1. Open Steam's [Authorized Devices](https://store.steampowered.com/account/authorizeddevices)
    while signed in. Review the server session and remove its access. You can also
@@ -114,8 +116,9 @@ passed on. If another account remains registered, shared family data and its
 notification configuration stay available to them; your own Telegram profile
 reference is removed. When the last registered account is removed, the abandoned
 family record and its cached snapshot are deleted. The anonymous public store
-cache remains. Logging out does not make you leave your Steam Family or revoke
-the session at Steam.
+cache remains. Logging out does not make you leave your Steam Family. Administrative
+removal deletes local data without revoking the session at Steam; remove that
+session through Authorized Devices if needed.
 
 After deletion, old dialogs cannot restore your account. Starting again creates
 new preferences and requires a fresh Steam login and any necessary approval.

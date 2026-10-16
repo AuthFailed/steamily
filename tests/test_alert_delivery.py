@@ -188,11 +188,21 @@ class AlertDeliveryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_observation_does_not_advance_membership_baseline(self):
         self.fetch.return_value = {**snapshot([]), "members": [ALICE]}
-        with patch.object(self.db, "observe_family", AsyncMock(side_effect=RuntimeError("database down"))):
-            with self.assertRaisesRegex(RuntimeError, "database down"):
-                await self.families.refresh("9")
-        self.assertEqual(self.families.get("9").members, [ALICE, BOB])
-        await self.families.refresh("9")
+        before = (await self.db.family("9"))["state"]
+        with patch("bot.family.time") as clock:
+            clock.monotonic.return_value = 1000.0
+            clock.time.return_value = 1_000_000.0
+            with patch.object(self.db, "observe_family", AsyncMock(side_effect=RuntimeError("database down"))):
+                with self.assertRaisesRegex(RuntimeError, "database down"):
+                    await self.families.refresh("9")
+            self.assertEqual(self.families.get("9").members, [ALICE, BOB])
+            self.assertEqual((await self.db.family("9"))["state"], before)
+            clock.monotonic.return_value = 1059.0
+            await self.families.refresh("9")
+            self.assertEqual((await self.db.family("9"))["state"], before)
+            self.bot.send_message.assert_not_awaited()
+            clock.monotonic.return_value = 1060.0
+            await self.families.refresh("9")
         self.assertIn("left the Steam family", self.bot.send_message.await_args.args[1])
 
     async def test_cancelled_delivery_keeps_event_and_releases_family_lock(self):

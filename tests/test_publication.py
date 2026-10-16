@@ -15,6 +15,9 @@ class PublicationTest(unittest.IsolatedAsyncioTestCase):
                 "family_id": "9",
                 "status": "approved",
                 "refresh_token": b"token",
+                "token_renewed_at": 0.0,
+                "token_generation": 1,
+                "owner_telegram_id": 1,
                 "created_at": 1,
                 "publication_version": "alice-original",
                 "publish_presence": True,
@@ -28,6 +31,9 @@ class PublicationTest(unittest.IsolatedAsyncioTestCase):
                 "family_id": "9",
                 "status": "approved",
                 "refresh_token": b"token",
+                "token_renewed_at": 0.0,
+                "token_generation": 2,
+                "owner_telegram_id": 1,
                 "created_at": 2,
                 "publication_version": "bob-original",
                 "publish_presence": False,
@@ -38,6 +44,8 @@ class PublicationTest(unittest.IsolatedAsyncioTestCase):
         }
         self.row = {
             "family_id": "9",
+            "owner_telegram_id": 1,
+            "reader_telegram_id": 1,
             "notify_chat": -100,
             "alert_link_version": 1,
             "language": "en",
@@ -90,7 +98,7 @@ class PublicationTest(unittest.IsolatedAsyncioTestCase):
             "apps": [],
         }
         self.families._fetch = AsyncMock(side_effect=lambda _: self.family.snapshot)
-        self.families.any_token = AsyncMock(return_value="access")
+        self.families.owner_token = AsyncMock(return_value="access")
         self.families.presence["9"] = {m: {"online": False} for m in self.family.members}
 
     def test_hidden_identity_never_uses_username_name_or_numeric_fallback(self):

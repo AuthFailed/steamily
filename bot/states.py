@@ -4,6 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 class Menu(StatesGroup):
     language = State()
     main = State()
+    login_intro = State()
     login = State()
     settings = State()
     group_alerts = State()

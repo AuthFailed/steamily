@@ -137,7 +137,7 @@ def setup_env(path: Path, *, external_db: bool = False) -> None:
         )
         # Compose supplies its own URI; leave any saved native DATABASE_URL unchanged.
         values.pop("DATABASE_URL", None)
-    values.setdefault("POLL_INTERVAL_SECONDS", "600")
+    values.setdefault("POLL_INTERVAL_SECONDS", "1800")
     _prompt(values, "POLL_INTERVAL_SECONDS", "Polling interval in seconds")
     _prompt(values, "LOGIN_LOCATION", "Optional server location shown during Steam login")
     validation_values = values

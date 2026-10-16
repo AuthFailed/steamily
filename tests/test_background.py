@@ -34,7 +34,7 @@ class BackgroundLoopsTest(unittest.IsolatedAsyncioTestCase):
                 async def enumerate_families(events=events):
                     events.append("enumerate")
                     if events.count("enumerate") == 1:
-                        raise OSError("database unavailable")
+                        raise OSError("database unavailable: access_token=private-test-token")
                     return [{"family_id": "healthy"}]
 
                 async def process(family_id, events=events):
@@ -55,7 +55,9 @@ class BackgroundLoopsTest(unittest.IsolatedAsyncioTestCase):
 
                 expected = ["enumerate", 7, "enumerate", "healthy"]
                 self.assertEqual(events, [7, *expected] if loop_name == "presence_loop" else expected)
-                self.assertIsInstance(logs.records[0].exc_info[1], OSError)
+                self.assertIsNone(logs.records[0].exc_info)
+                self.assertIn("OSError", logs.output[0])
+                self.assertNotIn("private-test-token", "\n".join(logs.output))
 
     async def test_family_failure_keeps_other_families_and_later_cycles_running(self):
         for loop_name, operation in LOOPS:

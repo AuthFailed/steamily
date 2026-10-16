@@ -57,12 +57,12 @@ def validate_config(values: Mapping[str, str], *, compose: bool = False) -> Conf
     except (ValueError, UnicodeError):
         errors["SECRET_KEY"] = "must be a valid Fernet key; restore the original key if a database already exists"
     try:
-        interval = int(values.get("POLL_INTERVAL_SECONDS", "600"))
-        if interval < 60:
+        interval = int(values.get("POLL_INTERVAL_SECONDS", "1800"))
+        if interval < 300:
             raise ValueError
     except ValueError:
-        interval = 600
-        errors["POLL_INTERVAL_SECONDS"] = "must be a whole number of at least 60"
+        interval = 1800
+        errors["POLL_INTERVAL_SECONDS"] = "must be a whole number of at least 300"
     if any(character in location for character in "\r\n\x00`"):
         errors["LOGIN_LOCATION"] = "must be a single line of text without backticks"
     if (compose or "POSTGRES_PASSWORD" in values) and not re.fullmatch(
@@ -78,8 +78,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
     return validate_config(os.environ if environ is None else environ)
 
 
-# Steam asks users to pick the location nearest to the sign-in, which is where this bot's server runs,
-# e.g. "Vienna, Wien, AT". Unset, the login steps describe it in general words.
+# Show the server's real sign-in location, e.g. "Vienna, Wien, AT", before requesting approval.
 LOGIN_LOCATION = os.environ.get("LOGIN_LOCATION", "").strip()
 INSTANCE_OPERATOR = os.environ.get("INSTANCE_OPERATOR", "").strip()
 INSTANCE_HOSTING = os.environ.get("INSTANCE_HOSTING", "").strip()

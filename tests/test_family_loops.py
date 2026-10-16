@@ -30,7 +30,7 @@ class FamilyLoopsTest(unittest.IsolatedAsyncioTestCase):
 
                     with (
                         patch("bot.family.asyncio.sleep", side_effect=sleep) as sleep_mock,
-                        patch("bot.family.log.exception") as log,
+                        patch("bot.family.log.error") as log,
                     ):
                         task = asyncio.create_task(getattr(families, loop_name)(interval=17))
                         try:
@@ -73,7 +73,7 @@ class FamilyLoopsTest(unittest.IsolatedAsyncioTestCase):
                 setattr(families, operation, action)
                 with (
                     patch("bot.family.asyncio.sleep", new_callable=AsyncMock),
-                    patch("bot.family.log.exception") as log,
+                    patch("bot.family.log.error") as log,
                 ):
                     task = asyncio.create_task(getattr(families, loop_name)(interval=17))
                     try:

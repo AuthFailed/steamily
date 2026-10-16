@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from bot.dialogs.menu import on_login
+from bot.dialogs.menu import begin_login, on_login
 from bot.login import LoginRejected
 from bot.states import Menu
 
@@ -10,7 +10,7 @@ from bot.states import Menu
 class LoginFeedbackTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.callback = SimpleNamespace(from_user=SimpleNamespace(id=42), answer=AsyncMock())
-        self.logins = SimpleNamespace(start=AsyncMock())
+        self.logins = SimpleNamespace(start=AsyncMock(), cancel=Mock())
         self.data = {"login": "waiting", "qr": "/old-qr.png", "url": "https://s.team/q/old", "other": 1}
         self.manager = Mock(
             middleware_data={"logins": self.logins, "lang": "en"},
@@ -40,7 +40,7 @@ class LoginFeedbackTest(unittest.IsolatedAsyncioTestCase):
                     self.manager.middleware_data["lang"] = lang
                     self.logins.start.side_effect = LoginRejected(reason, 12)
 
-                    await on_login(self.callback, None, self.manager)
+                    await begin_login(self.callback, None, self.manager)
 
                     self.callback.answer.assert_awaited_once_with(message, show_alert=True)
                     self.assertEqual(self.manager.dialog_data, self.data)
@@ -50,7 +50,7 @@ class LoginFeedbackTest(unittest.IsolatedAsyncioTestCase):
         login = {"login": "waiting", "qr": "/new-qr.png", "url": "https://s.team/q/new"}
         self.logins.start.return_value = login
 
-        await on_login(self.callback, None, self.manager)
+        await begin_login(self.callback, None, self.manager)
 
         self.logins.start.assert_awaited_once_with(42, self.manager.bg.return_value)
         self.assertEqual(self.manager.dialog_data, {**self.data, **login})
@@ -60,8 +60,17 @@ class LoginFeedbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_unexpected_failure_keeps_existing_failure_screen_behavior(self):
         self.logins.start.side_effect = RuntimeError("Steam unavailable")
 
-        await on_login(self.callback, None, self.manager)
+        await begin_login(self.callback, None, self.manager)
 
         self.assertEqual(self.manager.dialog_data["login"], "failed")
         self.manager.switch_to.assert_awaited_once_with(Menu.login)
+        self.callback.answer.assert_not_awaited()
+
+    async def test_intro_does_not_start_or_reserve_a_steam_login(self):
+        await on_login(self.callback, None, self.manager)
+
+        self.logins.cancel.assert_called_once_with(42)
+        self.logins.start.assert_not_awaited()
+        self.assertEqual(self.manager.dialog_data, self.data)
+        self.manager.switch_to.assert_awaited_once_with(Menu.login_intro)
         self.callback.answer.assert_not_awaited()

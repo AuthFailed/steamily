@@ -3,13 +3,16 @@ import base64
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from bot.steam_auth import SteamAuth, SteamError, TokenRejected, begin_qr_login, poll_qr_login
+from bot.steam_auth import SteamAuth, SteamError, TokenRejected
+from bot.steam_auth import call as auth_call
+from bot.steam_browser import begin_browser_login as begin_qr_login
+from bot.steam_browser import poll_browser_login as poll_qr_login
 
 ALICE = "76561198000000001"
 NOW = 2_000_000_000.0
@@ -88,9 +91,46 @@ class SteamAuthTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.auth.refresh_token, "refresh")
                 self.persist.assert_not_awaited()
 
+    async def test_rate_limits_and_timeouts_preserve_credentials_and_can_retry(self):
+        for eresult in [16, 84, None]:
+            failure = SteamError(200, "temporary problem")
+            failure.eresult = eresult
+            self.call.side_effect = failure
+            self.auth.access_token = "expired-cached-access"
+            with self.subTest(eresult=eresult), self.assertRaises(SteamError):
+                await self.auth.get_access_token()
+            self.assertEqual(self.auth.refresh_token, "refresh")
+            self.assertEqual(self.auth.access_token, "expired-cached-access")
+            self.assertEqual(self.auth.last_renewal, NOW - DAY)
+            self.persist.assert_not_awaited()
+        self.call.side_effect = None
+        self.assertEqual(await self.auth.get_access_token(), "access")
+
+    async def test_only_known_http_200_auth_results_reject_the_refresh_token(self):
+        for eresult in [5, 15, 26, 27, 43]:
+            failure = SteamError(200, "secret-token")
+            failure.eresult = eresult
+            self.call.side_effect = failure
+            with self.subTest(eresult=eresult), self.assertRaises(TokenRejected) as error:
+                await self.auth.get_access_token()
+            self.assertNotIn("secret", str(error.exception))
+            self.assertEqual(self.auth.refresh_token, "refresh")
+
+    async def test_rpc_preserves_numeric_eresult_without_exposing_body(self):
+        response = MagicMock(status=200, headers={"x-eresult": "84"})
+        response.read = AsyncMock(return_value=b"body-secret")
+        context = AsyncMock()
+        context.__aenter__.return_value = response
+        http = MagicMock()
+        http.post.return_value = context
+        with self.assertRaises(SteamError) as error:
+            await auth_call(http, "GenerateAccessTokenForApp", [])
+        self.assertEqual(error.exception.eresult, 84)
+        self.assertNotIn("body-secret", str(error.exception))
+
     async def test_missing_access_token_does_not_advance_or_persist_renewal(self):
         self.call.return_value = {2: b"rotated"}
-        with self.assertRaises(TokenRejected):
+        with self.assertRaises(RuntimeError):
             await self.auth.get_access_token()
         self.assertEqual(self.auth.last_renewal, NOW - DAY)
         self.assertEqual(self.auth.refresh_token, "refresh")
@@ -184,6 +224,184 @@ class SteamAuthTest(unittest.IsolatedAsyncioTestCase):
         self.persist.assert_not_awaited()
 
 
+def refresh_jwt(audience="web", steam_id=ALICE):
+    payload = {
+        "sub": steam_id,
+        "exp": NOW + DAY,
+        "aud": ["derive", *(audience if isinstance(audience, list) else [audience])],
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return "x." + encoded + ".y"
+
+
+class BrowserSteamAuthTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.original = ALICE + "%7C%7C" + refresh_jwt()
+        self.rotated = ALICE + "%7C%7C" + refresh_jwt() + "-rotated"
+        self.persist = AsyncMock()
+        self.shared_http, self.private_http = object(), object()
+        self.context = AsyncMock()
+        self.context.__aenter__.return_value = self.private_http
+        self.sessions = patch("bot.steam_auth.aiohttp.ClientSession", return_value=self.context).start()
+        self.renew = patch(
+            "bot.steam_browser.renew_access_token", AsyncMock(return_value=(ACCESS, self.original))
+        ).start()
+        self.mobile = patch("bot.steam_auth.call", AsyncMock(return_value={1: ACCESS.encode()})).start()
+        patch("bot.steam_auth.time.time", return_value=NOW).start()
+        self.addCleanup(patch.stopall)
+        self.auth = SteamAuth(self.shared_http, self.original, ALICE, self.persist, last_renewal=NOW - DAY)
+
+    async def test_browser_renewal_uses_private_session_and_caches_access(self):
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+        self.renew.assert_awaited_once_with(self.private_http, self.original, ALICE, on_refresh=ANY)
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+        self.assertEqual(self.sessions.call_count, 1)
+        self.assertNotIn("android", self.sessions.call_args.kwargs["headers"]["user-agent"].lower())
+        self.mobile.assert_not_awaited()
+        self.persist.assert_not_awaited()
+
+    async def test_raw_web_jwt_is_detected_without_a_database_mode(self):
+        raw = refresh_jwt()
+        self.auth.refresh_token = raw
+        self.renew.return_value = (ACCESS, raw)
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+        self.renew.assert_awaited_once_with(self.private_http, raw, ALICE, on_refresh=ANY)
+        self.mobile.assert_not_awaited()
+
+    async def test_existing_mobile_jwt_still_uses_legacy_exchange(self):
+        raw = refresh_jwt("mobile")
+        self.auth.refresh_token = raw
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+        self.mobile.assert_awaited_once()
+        self.renew.assert_not_awaited()
+        self.sessions.assert_not_called()
+
+    async def test_raw_mobile_audience_wins_when_web_is_also_present(self):
+        self.auth.refresh_token = refresh_jwt(["mobile", "web"])
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+        self.mobile.assert_awaited_once()
+        self.renew.assert_not_awaited()
+
+    async def test_ambiguous_browser_response_keeps_refresh_cookie_and_can_retry(self):
+        self.auth.access_token = "expired-cached-access"
+        self.renew.side_effect = RuntimeError("Steam returned an incomplete browser session response")
+        with self.assertRaises(RuntimeError):
+            await self.auth.get_access_token()
+        self.assertEqual(self.auth.refresh_token, self.original)
+        self.assertEqual(self.auth.access_token, "expired-cached-access")
+        self.assertIsNone(self.auth._pending_renewal)
+        self.persist.assert_not_awaited()
+        self.renew.side_effect = None
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+
+    async def test_browser_rotation_is_persisted_before_downstream_error(self):
+        async def exchange(http, cookie, steam_id, *, on_refresh):
+            await on_refresh(self.rotated)
+            self.persist.assert_awaited_once_with(self.rotated, NOW)
+            raise RuntimeError("later request failed")
+
+        self.renew.side_effect = exchange
+        with self.assertRaises(RuntimeError):
+            await self.auth.get_access_token()
+        self.assertEqual(self.auth.refresh_token, self.rotated)
+        self.assertEqual(self.auth.last_renewal, NOW)
+        self.assertIsNone(self.auth.access_token)
+
+    async def test_failed_browser_persistence_retries_before_any_new_network(self):
+        self.persist.side_effect = [OSError("database unavailable"), None]
+
+        async def first(http, cookie, steam_id, *, on_refresh):
+            await on_refresh(self.rotated)
+            self.fail("must stop when persistence fails")
+
+        self.renew.side_effect = first
+        with self.assertRaises(OSError):
+            await self.auth.get_access_token()
+        self.assertEqual(self.auth.refresh_token, self.original)
+        self.assertEqual(self.auth._pending_renewal, (self.rotated, NOW, None))
+
+        async def second(http, cookie, steam_id, *, on_refresh):
+            self.assertEqual(cookie, self.rotated)
+            self.assertEqual(self.persist.await_args_list, [call(self.rotated, NOW), call(self.rotated, NOW)])
+            return ACCESS, self.rotated
+
+        self.renew.side_effect = second
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+        self.assertEqual(self.auth.refresh_token, self.rotated)
+        self.assertIsNone(self.auth._pending_renewal)
+        self.assertEqual(self.sessions.call_count, 2)
+
+    async def test_browser_registration_updates_cookie_without_persistence_callback(self):
+        self.auth.on_renew = None
+
+        async def exchange(http, cookie, steam_id, *, on_refresh):
+            await on_refresh(self.rotated)
+            return ACCESS, self.rotated
+
+        self.renew.side_effect = exchange
+        self.assertEqual(await self.auth.get_access_token(), ACCESS)
+        self.assertEqual(self.auth.refresh_token, self.rotated)
+        self.assertEqual(self.auth.last_renewal, NOW)
+
+    async def test_browser_concurrent_requests_share_one_renewal(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def exchange(http, cookie, steam_id, *, on_refresh):
+            started.set()
+            await release.wait()
+            return ACCESS, cookie
+
+        self.renew.side_effect = exchange
+        first = asyncio.create_task(self.auth.get_access_token())
+        await asyncio.sleep(0)
+        if not started.is_set():
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            self.fail("browser renewal was not selected")
+        second = asyncio.create_task(self.auth.get_access_token())
+        await asyncio.sleep(0)
+        release.set()
+        self.assertEqual(await asyncio.gather(first, second), [ACCESS, ACCESS])
+        self.renew.assert_awaited_once()
+
+    async def test_revoked_auth_stops_cached_and_new_access_without_network(self):
+        self.auth.access_token = ACCESS
+        with patch("bot.steam_browser.revoke_session", AsyncMock()) as revoke:
+            await self.auth.revoke()
+            await self.auth.revoke()
+            revoke.assert_awaited_once_with(self.shared_http, self.original, ALICE)
+        with self.assertRaises(TokenRejected):
+            await self.auth.get_access_token()
+        self.assertIsNone(self.auth.access_token)
+        self.renew.assert_not_awaited()
+        self.mobile.assert_not_awaited()
+        self.sessions.assert_not_called()
+
+    async def test_failed_revocation_preserves_cached_access_and_allows_retry(self):
+        self.auth.access_token = ACCESS
+        with patch("bot.steam_browser.revoke_session", AsyncMock(side_effect=[RuntimeError("outage"), None])) as revoke:
+            with self.assertRaises(RuntimeError):
+                await self.auth.revoke()
+            self.assertEqual(await self.auth.get_access_token(), ACCESS)
+            await self.auth.revoke()
+            self.assertEqual(revoke.await_count, 2)
+        with self.assertRaises(TokenRejected):
+            await self.auth.get_access_token()
+
+    async def test_revoke_retries_pending_cookie_then_revokes_latest_under_lock(self):
+        self.auth._pending_renewal = (self.rotated, NOW, None)
+
+        async def revoke(http, cookie, steam_id):
+            self.assertTrue(self.auth._lock.locked())
+            self.assertEqual(cookie, self.rotated)
+            self.persist.assert_awaited_once_with(self.rotated, NOW)
+
+        with patch("bot.steam_browser.revoke_session", AsyncMock(side_effect=revoke), create=True) as revoke_call:
+            await self.auth.revoke()
+        revoke_call.assert_awaited_once_with(self.shared_http, self.rotated, ALICE)
+        self.assertIsNone(self.auth.access_token)
+
+
 class SteamAuthWireTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.fixtures = json.loads((Path(__file__).parent / "fixtures/steam/auth.json").read_text())
@@ -218,7 +436,7 @@ class SteamAuthWireTest(unittest.IsolatedAsyncioTestCase):
         api_patch.start()
         self.addCleanup(api_patch.stop)
 
-    async def test_qr_begin_posts_mobile_device_protobuf_and_decodes_interval(self):
+    async def test_qr_begin_posts_browser_device_protobuf_and_decodes_interval(self):
         login = await begin_qr_login(self.http)
 
         self.assertEqual(
@@ -234,9 +452,9 @@ class SteamAuthWireTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["path"], "/IAuthenticationService/BeginAuthSessionViaQR/v1/")
         self.assertEqual(request["content_type"], "multipart/form-data")
         self.assertEqual(request["fields"], {"input_protobuf_encoded"})
-        self.assertEqual(request["protobuf"], bytes.fromhex(self.fixtures["begin"]["request_hex"]))
-        self.assertEqual(request["headers"]["user-agent"], "okhttp/4.9.2")
-        self.assertIn("mobileClient=android", request["headers"]["cookie"])
+        self.assertEqual(request["protobuf"], bytes.fromhex("1a0c0a08537465616d696c7910022209436f6d6d756e697479"))
+        self.assertEqual(request["headers"]["user-agent"], "Steamily")
+        self.assertNotIn("cookie", request["headers"])
 
     async def test_qr_begin_defaults_poll_interval_when_steam_omits_it(self):
         self.response = self.fixtures["begin_without_interval"]
@@ -280,7 +498,7 @@ class SteamAuthWireTest(unittest.IsolatedAsyncioTestCase):
                 self.response = {**self.fixtures["rejected"], "status": status}
                 persist = AsyncMock()
                 auth = SteamAuth(self.http, "fixture-refresh", ALICE, persist, last_renewal=NOW - DAY)
-                with self.assertRaisesRegex(TokenRejected, "EResult 15 Access Denied"):
+                with self.assertRaisesRegex(TokenRejected, "Steam rejected"):
                     await auth.get_access_token()
                 self.assertEqual(auth.refresh_token, "fixture-refresh")
                 self.assertEqual(auth.last_renewal, NOW - DAY)
@@ -300,7 +518,7 @@ class SteamAuthWireTest(unittest.IsolatedAsyncioTestCase):
         self.response = self.fixtures["missing_access"]
         persist = AsyncMock()
         auth = SteamAuth(self.http, "fixture-refresh", ALICE, persist)
-        with self.assertRaisesRegex(TokenRejected, "no access token"):
+        with self.assertRaisesRegex(RuntimeError, "no access token"):
             await auth.get_access_token()
         self.assertEqual(auth.refresh_token, "fixture-refresh")
         persist.assert_not_awaited()

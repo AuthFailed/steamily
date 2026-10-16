@@ -23,6 +23,92 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.db.pool.close()
 
+    async def test_stale_session_cannot_overwrite_or_clear_a_new_login(self):
+        await self.db.save_account(10, "1", "9", "old")
+        old_generation = (await self.db.account(10))["token_generation"]
+        await self.db.save_account(10, "1", "9", "new")
+        current = await self.db.account(10)
+        self.assertGreater(current["token_generation"], old_generation)
+        for token in ("late-rotation", None):
+            self.assertFalse(await self.db.set_refresh_token(10, token, expected_generation=old_generation))
+            self.assertEqual(self.db.refresh_token(await self.db.account(10)), "new")
+        self.assertTrue(
+            await self.db.set_refresh_token(10, "current-rotation", expected_generation=current["token_generation"])
+        )
+        self.assertEqual((await self.db.account(10))["token_generation"], current["token_generation"])
+
+    async def test_first_login_and_owner_claim_commit_together(self):
+        await self.db.save_account(10, "1", "9", "first", claim_owner=True)
+        self.assertEqual((await self.db.account(10))["status"], "approved")
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 10)
+        await self.db.save_account(20, "2", "9", "second", claim_owner=True)
+        self.assertEqual((await self.db.account(20))["status"], "pending")
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 10)
+
+    async def test_rejected_generation_cannot_be_republished_by_a_late_rotation(self):
+        await self.db.save_account(10, "1", "9", "old")
+        generation = (await self.db.account(10))["token_generation"]
+        self.assertTrue(await self.db.set_refresh_token(10, None, expected_generation=generation))
+        self.assertFalse(await self.db.set_refresh_token(10, "late", expected_generation=generation))
+        self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
+
+    async def test_logout_and_recreation_do_not_reuse_the_credential_generation(self):
+        await self.db.save_account(10, "1", "9", "old")
+        old_generation = (await self.db.account(10))["token_generation"]
+        await self.db.delete_user(10)
+        await self.db.ensure_family("9", "Fam")
+        await self.db.save_account(10, "1", "9", "replacement")
+        self.assertNotEqual((await self.db.account(10))["token_generation"], old_generation)
+        self.assertFalse(await self.db.set_refresh_token(10, None, expected_generation=old_generation))
+        self.assertEqual(self.db.refresh_token(await self.db.account(10)), "replacement")
+
+    async def test_failed_owner_claim_rolls_back_the_new_account(self):
+        await self.db.pool.execute("""
+            CREATE FUNCTION reject_owner() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'owner update unavailable'; END $$;
+            CREATE TRIGGER owner_failure BEFORE UPDATE OF owner_telegram_id ON families
+            FOR EACH ROW EXECUTE FUNCTION reject_owner();
+        """)
+        with self.assertRaises(asyncpg.RaiseError):
+            await self.db.save_account(10, "1", "9", "must-not-commit", claim_owner=True)
+        self.assertIsNone(await self.db.account(10))
+
+    async def test_atomic_owner_claim_does_not_approve_a_blocked_account(self):
+        await self.db.save_account(10, "1", "9", "old")
+        await self.db.set_status(10, "blocked")
+        await self.db.save_account(10, "1", "9", "new", claim_owner=True)
+        self.assertEqual((await self.db.account(10))["status"], "blocked")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_membership_rejection_cannot_clear_or_restore_a_replacement_generation(self):
+        await self.db.save_account(10, "1", "9", "old")
+        stale = (await self.db.account(10))["token_generation"]
+        await self.db.save_account(10, "1", "9", "new")
+        for reject in (
+            lambda generation: self.db.revoke_account(10, "1", "9", expected_generation=generation),
+            lambda generation: self.db.revoke_membership(10, "9", steam_id="1", expected_generation=generation),
+        ):
+            self.assertFalse(await reject(stale))
+            self.assertEqual(self.db.refresh_token(await self.db.account(10)), "new")
+            current = (await self.db.account(10))["token_generation"]
+            self.assertTrue(await reject(current))
+            self.assertFalse(await self.db.set_refresh_token(10, "late", expected_generation=current))
+            await self.db.save_account(10, "1", "9", "new")
+        current = (await self.db.account(10))["token_generation"]
+        await self.db.reconcile_members("9", [])
+        self.assertFalse(await self.db.set_refresh_token(10, "late", expected_generation=current))
+        self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
+
+    async def test_changing_families_releases_reader_without_changing_another_owner(self):
+        await self.db.save_account(10, "1", "9", "reader")
+        await self.db.save_account(20, "2", "9", "owner")
+        await self.db.update_family("9", reader_telegram_id=10, owner_telegram_id=20)
+        await self.db.ensure_family("8", "Other")
+        await self.db.save_account(10, "1", "8", "new-login")
+        old_family = await self.db.family("9")
+        self.assertEqual(old_family["owner_telegram_id"], 20)
+        self.assertIsNone(old_family["reader_telegram_id"])
+
     async def publication(self, telegram_id, steam_id, family_id, setting, on):
         account = await self.db.account(telegram_id)
         return await self.db.set_publication(
@@ -72,7 +158,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             "ALTER TABLE accounts DROP COLUMN publish_presence, DROP COLUMN publish_telegram, "
             "DROP COLUMN publication_version"
         )
-        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version = 6")
+        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version >= 6")
         await self.migrate_db()
         account = await self.db.account(10)
         self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
@@ -381,8 +467,12 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             if account["telegram_id"] == 10:
                 self.assertNotEqual(current["publication_version"], account["publication_version"])
                 expected.update(
-                    refresh_token=None, token_renewed_at=0.0, publication_version=current["publication_version"]
+                    refresh_token=None,
+                    token_renewed_at=0.0,
+                    publication_version=current["publication_version"],
+                    token_generation=current["token_generation"],
                 )
+                self.assertGreater(current["token_generation"], account["token_generation"])
             self.assertEqual(current, expected)
         self.assertEqual((await self.db.family("9"))["state"], before["families"][0]["state"])
 
@@ -768,17 +858,16 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
                 await super().check_steam_link(telegram_id, steam_id)
                 await barrier.wait()
 
-        async with self.db.pool.acquire() as first, self.db.pool.acquire() as second:
-            key = Fernet.generate_key().decode()
-            first_db, second_db = RacingDb(first, key), RacingDb(second, key)
-            results = await asyncio.wait_for(
-                asyncio.gather(
-                    first_db.save_account(10, "1", "9", "first-token"),
-                    second_db.save_account(20, "1", "9", "second-token"),
-                    return_exceptions=True,
-                ),
-                timeout=5,
-            )
+        key = Fernet.generate_key().decode()
+        first_db, second_db = RacingDb(self.db.pool, key), RacingDb(self.db.pool, key)
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                first_db.save_account(10, "1", "9", "first-token"),
+                second_db.save_account(20, "1", "9", "second-token"),
+                return_exceptions=True,
+            ),
+            timeout=5,
+        )
         self.assertEqual(sum(result is None for result in results), 1)
         self.assertEqual(sum(isinstance(result, SteamAlreadyLinked) for result in results), 1)
         self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM accounts WHERE steam_id = '1'"), 1)
@@ -884,7 +973,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
     async def test_pending_publication_envelope_survives_upgrade_and_restart(self):
         await self.db.enqueue_alerts("9", [{"text": "legacy alert"}])
         await self.db.pool.execute("ALTER TABLE pending_alerts DROP COLUMN publication")
-        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version = 6")
+        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version >= 6")
         await self.migrate_db()
         self.assertIsNone((await self.db.pending_alerts("9", 100))[0]["publication"])
         publication = {
@@ -1211,12 +1300,14 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
                 for table in tables
             }
             self.assertEqual(after["accounts"][0].pop("token_renewed_at"), 0.0)
+            self.assertEqual(after["accounts"][0].pop("token_generation"), 0)
             self.assertFalse(after["accounts"][0].pop("publish_presence"))
             self.assertFalse(after["accounts"][0].pop("publish_telegram"))
             publication_versions.append(after["accounts"][0].pop("publication_version"))
             self.assertTrue(publication_versions[-1])
             self.assertEqual(after["families"][0].pop("alert_retry_at"), 0.0)
             self.assertEqual(after["families"][0].pop("alert_link_version"), 0)
+            self.assertIsNone(after["families"][0].pop("reader_telegram_id"))
             self.assertEqual(after, before)
             self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
             self.assertEqual(self.db.refresh_token(await self.db.account(10)), "legacy-token")

@@ -31,6 +31,7 @@ from ..steam import (
     rename_family,
     resolve_profile,
 )
+from ..steam_auth import TokenRejected
 from ..ui import BLUE, GREEN, RED, Header, back_home, look
 from . import current_owner, require_owner
 
@@ -217,10 +218,13 @@ async def act(manager: DialogManager, action, *args) -> None:
     try:
         token = await families.owner_token(account)
         await action(families.http, token, family.family_id, *args)
+    except TokenRejected:
+        await families._reject_token(account)
+        manager.dialog_data["notice"] = t(lang, "relogin")
     except SteamActionError as error:
         manager.dialog_data["notice"] = t(lang, "action_failed", error=escape(str(error)))
-    except Exception:
-        log.exception("Steam family action failed")
+    except Exception as error:
+        log.warning("Steam family action failed (%s)", type(error).__name__)
         manager.dialog_data["notice"] = t(lang, "action_failed", error="—")
     else:
         manager.dialog_data["notice"] = t(lang, "action_done")
@@ -295,8 +299,11 @@ async def purchases_getter(dialog_manager: DialogManager, family: Family, famili
         return {"requests": [], "denied": True}
     try:
         requests = await purchase_requests(families.http, await families.owner_token(account), family.family_id)
-    except Exception:
-        log.exception("Could not load purchase requests")
+    except TokenRejected:
+        await families._reject_token(account)
+        requests = []
+    except Exception as error:
+        log.warning("Could not load purchase requests (%s)", type(error).__name__)
         requests = []
     return {
         "denied": False,

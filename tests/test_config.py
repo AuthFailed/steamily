@@ -16,7 +16,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_defaults_and_optional_location(self):
         settings = validate_config(self.values | {"LOGIN_LOCATION": " Vienna, Wien, AT "})
-        self.assertEqual(settings.poll_interval_seconds, 600)
+        self.assertEqual(settings.poll_interval_seconds, 1800)
         self.assertEqual(settings.login_location, "Vienna, Wien, AT")
         self.assertNotIn(self.values["SECRET_KEY"], repr(settings))
         self.assertNotIn(self.values["DATABASE_URL"], repr(settings))
@@ -57,8 +57,8 @@ class ConfigTest(unittest.TestCase):
         validate_config(self.values | {"DATABASE_URL": "postgresql:///local_database"})
 
     def test_poll_interval_boundary(self):
-        self.assertEqual(validate_config(self.values | {"POLL_INTERVAL_SECONDS": "60"}).poll_interval_seconds, 60)
-        for value in ("59", "", "1.5"):
+        self.assertEqual(validate_config(self.values | {"POLL_INTERVAL_SECONDS": "300"}).poll_interval_seconds, 300)
+        for value in ("299", "", "1.5"):
             with self.subTest(value=value), self.assertRaises(ConfigError) as caught:
                 validate_config(self.values | {"POLL_INTERVAL_SECONDS": value})
             self.assertIn("POLL_INTERVAL_SECONDS", caught.exception.errors)

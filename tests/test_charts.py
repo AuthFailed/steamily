@@ -96,7 +96,16 @@ class ChartCacheTest(unittest.IsolatedAsyncioTestCase):
         first_chart = Path(charts.bars("Games", [("Alice", 20)], directory=first.chart_dir))
         second_chart = Path(charts.columns("Added", [("2026-10", 2)], directory=second.chart_dir))
         self.assertEqual(first_chart.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
-        self.db.account.return_value = {"steam_id": "alice", "family_id": "one", "owner_telegram_id": None}
+        self.db.account.return_value = {
+            "telegram_id": 1,
+            "steam_id": "alice",
+            "family_id": "one",
+            "owner_telegram_id": None,
+            "refresh_token": None,
+            "token_renewed_at": 0.0,
+            "token_generation": 1,
+        }
+        self.db.family.return_value = None  # Deleting the last account also removes its family row.
         self.db.family_accounts.return_value = []
 
         await self.families.leave(1)

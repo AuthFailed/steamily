@@ -14,7 +14,7 @@ from aiogram_dialog.widgets.media import DynamicMedia
 from aiogram_dialog.widgets.text import Format
 
 from ..config import INSTANCE_HOSTING, INSTANCE_OPERATOR, LOGIN_LOCATION
-from ..family import Family, alert_settings, role
+from ..family import Family, SessionRevocationFailed, alert_settings, role
 from ..i18n import LANGUAGES, Tr, language_of, t
 from ..library import ALERTS
 from ..login import LoginRejected
@@ -70,6 +70,11 @@ async def main_getter(account, family: Family | None, lang: str, **kwargs):
 
 
 async def on_login(callback: CallbackQuery, button: Button, manager: DialogManager):
+    manager.middleware_data["logins"].cancel(callback.from_user.id)
+    await manager.switch_to(Menu.login_intro)
+
+
+async def begin_login(callback: CallbackQuery, button: Button, manager: DialogManager):
     try:
         login = await manager.middleware_data["logins"].start(callback.from_user.id, manager.bg())
     except LoginRejected as error:
@@ -104,6 +109,10 @@ async def login_getter(dialog_manager: DialogManager, lang: str, **kwargs):
             }.get(data.get("login"), "login_failed"),
         ),
     }
+
+
+async def login_intro_getter(lang: str, **kwargs):
+    return {"location": escape(LOGIN_LOCATION or t(lang, "location_unknown"))}
 
 
 async def settings_getter(dialog_manager: DialogManager, account, db, lang: str = "en", **kwargs):
@@ -230,7 +239,11 @@ async def on_logout(callback: CallbackQuery, button: Button, manager: DialogMana
     families = manager.middleware_data["families"]
     family = manager.middleware_data["family"]
     await manager.middleware_data["logins"].forget(callback.from_user.id)
-    new_owner = await families.leave(callback.from_user.id)
+    try:
+        new_owner = await families.leave(callback.from_user.id)
+    except SessionRevocationFailed:
+        await callback.answer(t(manager.middleware_data["lang"], "logout_failed"), show_alert=True)
+        return
     manager.middleware_data["deleted_dialogs"].append(callback.from_user.id)
     manager.middleware_data.update(account=None, family=None, has_language=False)
     try:
@@ -282,11 +295,18 @@ menu_dialog = Dialog(
         state=Menu.main,
     ),
     Window(
+        Header("login", "login_intro"),
+        Button(Tr("btn_login_continue"), id="login_continue", on_click=begin_login, style=look("login", GREEN)),
+        SwitchTo(Tr("btn_cancel"), id="cancel_intro", state=Menu.main, style=look("cancel")),
+        getter=login_intro_getter,
+        state=Menu.login_intro,
+    ),
+    Window(
         DynamicMedia("qr", when="waiting"),
         Header("login", "login", when="waiting"),
         Format("{failure}", when=~F["waiting"]),
         Url(Tr("btn_open_app"), Format("{url}"), id="open_app", when="waiting", style=look("login")),
-        Button(Tr("btn_retry"), id="retry", on_click=on_login, when=~F["waiting"], style=look("retry", GREEN)),
+        Button(Tr("btn_retry"), id="retry", on_click=begin_login, when=~F["waiting"], style=look("retry", GREEN)),
         Button(Tr("btn_cancel"), id="cancel_login", on_click=cancel_login, style=look("cancel")),
         getter=login_getter,
         state=Menu.login,

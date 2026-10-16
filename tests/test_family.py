@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, Mock, patch
 from asyncpg import CheckViolationError
 
 from bot.db import SteamAlreadyLinked
-from bot.family import Families, role
+from bot.family import Families, SessionRevocationFailed, role
 from bot.steam import NoFamily
-from bot.steam_auth import TokenRejected
+from bot.steam_auth import SteamAuth, TokenRejected
 from tests.pg import fresh_db, needs_pg
 
 ALICE, BOB = "76561198000000001", "76561198000000002"
@@ -33,6 +33,7 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             patch("bot.family.update_store_cache", AsyncMock(return_value=False)),
             patch("bot.family.fetch_user_country", AsyncMock(return_value="KZ")),
             patch("bot.steam_auth.SteamAuth.get_access_token", AsyncMock(return_value="access")),
+            patch("bot.steam_auth.SteamAuth.revoke", AsyncMock(), create=True),
         ]
         for p in self.patches:
             p.start()
@@ -149,7 +150,7 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(CheckViolationError, "reject_owner_approval"):
                 await self.families.register(1, "refresh", ALICE)
             self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
-            self.assertEqual((await self.db.account(1))["status"], "pending")
+            self.assertIsNone(await self.db.account(1))
             await self.families.register(2, "refresh", BOB)
         self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 2)
         self.assertEqual((await self.db.account(2))["status"], "approved")
@@ -161,8 +162,9 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OSError):
                 await self.families.refresh("9")
         self.assertIsNotNone((await self.db.account(1))["refresh_token"])
+        restarted = Families(self.db, http=None, bot=self.bot)
         with patch("bot.steam_auth.SteamAuth.get_access_token", AsyncMock(side_effect=TokenRejected("revoked"))):
-            await self.families.refresh("9")
+            await restarted.refresh("9")
         self.assertIsNone((await self.db.account(1))["refresh_token"])
         self.assertEqual((await self.db.account(1))["status"], "approved")
 
@@ -335,7 +337,8 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=RuntimeError("unavailable"))),
             patch("bot.family.time.time", return_value=456.0),
         ):
-            await self.families.refresh("9")
+            with self.assertRaises(RuntimeError):
+                await self.families.refresh("9")
         self.assertEqual(self.families.last_steam_check, 123.0)
         self.assertEqual(self.families.last_family_check, {"9": 123.0})
 
@@ -420,12 +423,12 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             await self.families.register(1, "alice", ALICE)
             await self.families.register(2, "bob", BOB)
         await self.db.set_status(2, "approved")
-        await self.db.update_family("9", notify_chat=-100)
+        await self.db.update_family("9", notify_chat=-100, reader_telegram_id=2)
         current = {**snapshot([]), "members": [BOB]}
         with (
             patch(
                 "bot.steam_auth.SteamAuth.get_access_token",
-                AsyncMock(side_effect=[TokenRejected("revoked"), "bob-access"]),
+                AsyncMock(return_value="bob-access"),
             ),
             patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)),
         ):
@@ -461,14 +464,13 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
             await self.families.register(1, "alice", ALICE)
         for failure in (RuntimeError("incomplete response"), OSError("network down")):
+            self.families.read_backoff.clear()
             with (
                 self.subTest(failure=failure),
                 patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=failure)),
             ):
-                try:
+                with self.assertRaises(type(failure)):
                     await self.families.refresh("9")
-                except OSError:
-                    pass
             account = await self.db.account(1)
             self.assertEqual((account["status"], account["owner_telegram_id"]), ("approved", 1))
             self.assertIsNotNone(account["refresh_token"])
@@ -588,9 +590,10 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             await self.families.register(1, "alice", ALICE)
             await self.families.register(2, "bob", BOB)
         await self.db.set_status(2, "approved")
+        await self.db.update_family("9", reader_telegram_id=2)
         current = {**snapshot([]), "members": [BOB]}
         with (
-            patch("bot.steam_auth.SteamAuth.get_access_token", AsyncMock(side_effect=[TokenRejected("gone"), "bob"])),
+            patch("bot.steam_auth.SteamAuth.get_access_token", AsyncMock(return_value="bob")),
             patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)),
         ):
             await self.families.refresh("9")
@@ -603,7 +606,8 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             await self.families.register(1, "alice", ALICE)
         before = await self.db.account(1)
         with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=RuntimeError("Steam HTTP 503"))):
-            await self.families.refresh("9")
+            with self.assertRaises(RuntimeError):
+                await self.families.refresh("9")
         self.assertEqual(await self.db.account(1), before)
 
     async def test_valid_different_family_revokes_old_access_even_without_another_login(self):
@@ -685,6 +689,35 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((alice["family_id"], alice["status"]), ("10", "pending"))
         self.assertEqual(role(await self.db.account(2)), "owner")
         self.assertEqual(role(await self.db.account(3)), "owner")
+
+    async def test_pending_only_old_family_waits_for_a_fresh_member_login(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        carol = "76561198000000003"
+        target = {**snapshot([], family_id="10"), "members": [ALICE, carol]}
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)):
+            await self.families.register(3, "carol", carol)
+        attempted = []
+
+        async def token(auth):
+            attempted.append(auth.steam_id)
+            return auth.steam_id
+
+        async def fetch(http, access):
+            return {**snapshot([]), "members": [BOB]} if access == BOB else target
+
+        with (
+            patch("bot.steam_auth.SteamAuth.get_access_token", token),
+            patch("bot.family.fetch_family_snapshot", side_effect=fetch),
+        ):
+            await self.families.register(1, "alice-new", ALICE)
+            self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+            self.assertEqual(role(await self.db.account(2)), "pending")
+            self.assertNotIn(BOB, attempted)
+            await self.families.register(2, "bob-fresh", BOB)
+        self.assertEqual(role(await self.db.account(2)), "owner")
+        self.assertEqual((await self.db.family("9"))["reader_telegram_id"], 2)
 
     async def test_replacing_owners_steam_account_does_not_preempt_an_approved_member(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
@@ -811,6 +844,339 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
 
 
 @needs_pg
+class ReaderSafetyTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.db = await fresh_db()
+        await self.db.ensure_family("9", "Fam")
+        await self.db.save_account(2, BOB, "9", "bob-refresh", "US")
+        await self.db.save_account(1, ALICE, "9", "alice-refresh", "US")
+        await self.db.set_status(1, "approved")
+        await self.db.set_status(2, "approved")
+        await self.db.update_family("9", owner_telegram_id=1, notify_chat=-100, alerts={"playing": True})
+        self.families = Families(self.db, http=None, bot=AsyncMock())
+        self.families.get("9").snapshot = snapshot([])
+        self.tokens = []
+
+        async def access(auth):
+            self.tokens.append(auth.steam_id)
+            return "access-" + auth.steam_id
+
+        self.patches = [
+            patch.object(SteamAuth, "get_access_token", access),
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))),
+            patch("bot.family.update_store_cache", AsyncMock(return_value=False)),
+        ]
+        for p in self.patches:
+            p.start()
+
+    async def asyncTearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        await self.db.pool.close()
+
+    async def test_reader_prefers_owner_and_survives_restart_and_owner_change(self):
+        await self.families.refresh("9")
+        self.assertEqual((await self.db.family("9"))["reader_telegram_id"], 1)
+        await self.db.update_family("9", owner_telegram_id=2)
+        restarted = Families(self.db, http=None, bot=AsyncMock())
+        await restarted.any_token("9")
+        self.assertEqual(self.tokens, [ALICE, ALICE])
+
+    async def test_reader_uses_an_approved_member_when_owner_is_blocked(self):
+        await self.db.set_status(1, "blocked")
+        await self.families.any_token("9")
+        self.assertEqual((await self.db.family("9"))["reader_telegram_id"], 2)
+        self.assertEqual(self.tokens, [BOB])
+
+    async def test_rejected_reader_stops_without_trying_other_accounts(self):
+        async def reject(auth):
+            self.tokens.append(auth.steam_id)
+            if auth.steam_id == ALICE:
+                raise TokenRejected("revoked")
+            return "other-account-access"
+
+        with patch.object(SteamAuth, "get_access_token", reject):
+            await self.families.refresh("9")
+            await self.families.refresh("9")
+            self.assertIsNone(await self.families.any_token("9"))
+            await self.families.check_presence("9")
+        self.assertEqual(self.tokens, [ALICE])
+        self.assertIsNone((await self.db.account(1))["refresh_token"])
+        self.assertIsNotNone((await self.db.account(2))["refresh_token"])
+        self.assertEqual((await self.db.family("9"))["reader_telegram_id"], 1)
+        self.assertNotIn(1, self.families.auths)
+
+    async def test_api_rejection_also_stops_the_designated_reader(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=TokenRejected("refused"))):
+            await self.families.refresh("9")
+        self.assertIsNone((await self.db.account(1))["refresh_token"])
+        self.assertIsNone(await self.families.any_token("9"))
+        self.assertEqual(self.tokens, [ALICE])
+
+    async def test_refresh_backoff_also_pauses_presence_and_resets_after_success(self):
+        with patch("bot.family.time") as clock:
+            clock.monotonic.return_value = 1000.0
+            with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=OSError("outage"))):
+                with self.assertRaises(OSError):
+                    await self.families.refresh("9")
+                with patch(
+                    "bot.family.fetch_presence", AsyncMock(side_effect=AssertionError("presence during backoff"))
+                ):
+                    await self.families.check_presence("9")
+                clock.monotonic.return_value = 1059.0
+                await self.families.refresh("9")
+                clock.monotonic.return_value = 1060.0
+                with self.assertRaises(OSError):
+                    await self.families.refresh("9")
+                clock.monotonic.return_value = 1179.0
+                await self.families.refresh("9")
+            clock.monotonic.return_value = 1180.0
+            await self.families.refresh("9")
+            with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=OSError("new outage"))):
+                with self.assertRaises(OSError):
+                    await self.families.refresh("9")
+                clock.monotonic.return_value = 1239.0
+                await self.families.refresh("9")
+                clock.monotonic.return_value = 1240.0
+                with self.assertRaises(OSError):
+                    await self.families.refresh("9")
+        self.assertEqual(self.tokens, [ALICE] * 5)
+
+    async def test_presence_failure_backs_off_family_refresh(self):
+        with patch("bot.family.time") as clock:
+            clock.monotonic.return_value = 1000.0
+            with patch("bot.family.fetch_presence", AsyncMock(side_effect=OSError("outage"))):
+                with self.assertRaises(OSError):
+                    await self.families.check_presence("9")
+            with patch(
+                "bot.family.fetch_family_snapshot", AsyncMock(side_effect=AssertionError("refresh during backoff"))
+            ):
+                await self.families.refresh("9")
+        self.assertEqual(self.tokens, [ALICE])
+
+    async def test_repeated_failures_back_off_for_at_most_one_hour(self):
+        retry_at = 1000.0
+        with (
+            patch("bot.family.time") as clock,
+            patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=OSError("outage"))),
+            patch("bot.family.fetch_presence", AsyncMock(side_effect=AssertionError("presence during backoff"))),
+        ):
+            for delay in [60, 120, 240, 480, 960, 1920, 3600, 3600]:
+                clock.monotonic.return_value = retry_at
+                with self.assertRaises(OSError):
+                    await self.families.refresh("9")
+                clock.monotonic.return_value = retry_at + delay - 1
+                await self.families.refresh("9")
+                await self.families.check_presence("9")
+                retry_at += delay
+        self.assertEqual(self.tokens, [ALICE] * 8)
+
+    async def test_presence_api_rejection_stops_all_scheduled_reads(self):
+        with patch("bot.family.fetch_presence", AsyncMock(side_effect=TokenRejected("refused"))):
+            await self.families.check_presence("9")
+            await self.families.check_presence("9")
+        await self.families.refresh("9")
+        self.assertIsNone((await self.db.account(1))["refresh_token"])
+        self.assertIsNotNone((await self.db.account(2))["refresh_token"])
+        self.assertEqual(self.tokens, [ALICE])
+
+    async def test_stats_api_rejection_clears_only_the_reader_and_stops_retrying(self):
+        with patch("bot.family.member_stats", AsyncMock(side_effect=TokenRejected("refused"))):
+            self.assertEqual(await self.families.member_stats("9", BOB), {})
+            self.assertEqual(await self.families.member_stats("9", ALICE), {})
+        self.assertIsNone((await self.db.account(1))["refresh_token"])
+        self.assertIsNotNone((await self.db.account(2))["refresh_token"])
+        self.assertNotIn(1, self.families.auths)
+        self.assertEqual(self.tokens, [ALICE])
+
+    async def test_scheduled_country_lookup_uses_only_the_reader_session(self):
+        await self.db.pool.execute("UPDATE accounts SET country = NULL")
+        countries = []
+
+        async def country(http, token, steam_id):
+            countries.append((token, steam_id))
+            return "KZ"
+
+        with patch("bot.family.fetch_user_country", side_effect=country):
+            await self.families.refresh("9")
+        self.assertEqual(countries, [("access-" + ALICE, ALICE)])
+        self.assertEqual((await self.db.account(1))["country"], "KZ")
+        self.assertIsNone((await self.db.account(2))["country"])
+        self.assertEqual(self.tokens, [ALICE, ALICE])
+
+    async def test_country_api_rejection_stops_the_reader_without_fallback(self):
+        await self.db.pool.execute("UPDATE accounts SET country = NULL")
+        with patch("bot.family.fetch_user_country", AsyncMock(side_effect=TokenRejected("refused"))):
+            await self.families.refresh("9")
+            await self.families.refresh("9")
+        self.assertIsNone((await self.db.account(1))["refresh_token"])
+        self.assertIsNotNone((await self.db.account(2))["refresh_token"])
+        self.assertNotIn(1, self.families.auths)
+        self.assertEqual(self.tokens, [ALICE, ALICE])
+
+    async def test_logout_revokes_its_session_before_account_or_owner_changes(self):
+        revoked = []
+
+        async def revoke(auth):
+            revoked.append(auth.refresh_token)
+            self.assertEqual(auth.refresh_token, "alice-refresh")
+            self.assertIsNotNone(await self.db.account(1))
+            self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 1)
+
+        with patch.object(SteamAuth, "revoke", revoke, create=True):
+            self.assertEqual(await self.families.leave(1), 2)
+        self.assertEqual(revoked, ["alice-refresh"])
+        self.assertIsNone(await self.db.account(1))
+        self.assertIsNotNone(await self.db.account(2))
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 2)
+        self.assertNotIn(1, self.families.account_locks)
+
+    async def test_failed_logout_keeps_credentials_and_family_roles(self):
+        await self.db.set_language(1, "ru")
+        with patch.object(SteamAuth, "revoke", AsyncMock(side_effect=RuntimeError("Steam unavailable")), create=True):
+            with self.assertRaises(SessionRevocationFailed):
+                await self.families.leave(1)
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "alice-refresh")
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 1)
+        self.assertEqual(await self.db.language(1), "ru")
+
+    async def test_queued_presence_waits_for_backoff_without_another_steam_read(self):
+        account = await self.db.account(1)
+        await self.db.set_publication(
+            1, ALICE, "9", "publish_presence", True, expected_version=account["publication_version"]
+        )
+        account = await self.db.account(1)
+        await self.db.enqueue_alerts(
+            "9",
+            [
+                {
+                    "text": "presence",
+                    "coalesce_key": "playing:" + ALICE,
+                    "publication": {
+                        "event": {"kind": "playing", "steamid": ALICE},
+                        "telegram_id": 1,
+                        "publication_version": account["publication_version"],
+                    },
+                }
+            ],
+        )
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=OSError("outage"))):
+            with self.assertRaises(OSError):
+                await self.families.refresh("9")
+        with patch.object(self.families, "_fetch", AsyncMock(side_effect=AssertionError("Steam during backoff"))):
+            await self.families.deliver_alerts("9")
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 1)
+        self.families.bot.send_message.assert_not_awaited()
+
+    async def test_late_rejection_cannot_clear_a_replacement_login_or_cache(self):
+        stale = await self.db.account(1)
+        await self.db.save_account(1, ALICE, "9", "replacement", "US")
+        await self.families.owner_token(await self.db.account(1))
+        current_auth = self.families.auths[1]
+        await self.families._reject_token(stale)
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "replacement")
+        self.assertIs(self.families.auths[1], current_auth)
+
+    async def test_late_rejection_cannot_clear_a_login_recreated_after_logout(self):
+        stale = await self.db.account(1)
+        await self.db.delete_user(1)
+        await self.db.save_account(1, ALICE, "9", "replacement", "US")
+        await self.families.owner_token(await self.db.account(1))
+        current_auth = self.families.auths[1]
+        await self.families._reject_token(stale)
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "replacement")
+        self.assertIs(self.families.auths[1], current_auth)
+
+    async def test_old_renewal_callback_cannot_overwrite_a_replacement_login(self):
+        stale = await self.db.account(1)
+        old_auth = self.families.auth(1, "alice-refresh", ALICE, generation=stale["token_generation"])
+        await self.db.save_account(1, ALICE, "9", "replacement", "US")
+        await self.families.owner_token(await self.db.account(1))
+        current_auth = self.families.auths[1]
+        with self.assertRaises(TokenRejected):
+            await old_auth.on_renew("obsolete-rotation", 1000.0)
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "replacement")
+        self.assertIs(self.families.auths[1], current_auth)
+        self.assertNotEqual((await self.db.account(1))["token_generation"], stale["token_generation"])
+
+    async def test_stale_action_context_is_rejected_before_network(self):
+        stale = await self.db.account(1)
+        await self.db.save_account(1, ALICE, "9", "replacement", "US")
+        with self.assertRaises(TokenRejected):
+            await self.families.owner_token(stale)
+        current = dict(await self.db.account(1))
+        for field, value in [("steam_id", BOB), ("family_id", "other-family")]:
+            with self.subTest(field=field), self.assertRaises(TokenRejected):
+                await self.families.owner_token({**current, field: value})
+        self.assertEqual(self.tokens, [])
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "replacement")
+
+    async def test_stats_and_presence_late_rejection_preserve_a_new_login(self):
+        for operation in ["stats", "presence"]:
+            with self.subTest(operation=operation):
+                self.families.stats_cache.clear()
+
+                async def late_rejection(*args, operation=operation):
+                    await self.db.save_account(1, ALICE, "9", "replacement-" + operation, "US")
+                    raise TokenRejected("old request refused")
+
+                target = "member_stats" if operation == "stats" else "fetch_presence"
+                with patch("bot.family." + target, side_effect=late_rejection):
+                    if operation == "stats":
+                        await self.families.member_stats("9", ALICE)
+                    else:
+                        await self.families.check_presence("9")
+                self.assertEqual(self.db.refresh_token(await self.db.account(1)), "replacement-" + operation)
+
+    async def test_stats_transient_failure_pauses_scheduled_reads(self):
+        for phase in ["token", "stats"]:
+            with self.subTest(phase=phase), patch("bot.family.time") as clock:
+                self.families.read_backoff.clear()
+                self.families.stats_cache.clear()
+                clock.monotonic.return_value = 1000.0
+                target = "bot.steam_auth.SteamAuth.get_access_token" if phase == "token" else "bot.family.member_stats"
+                with patch(target, AsyncMock(side_effect=OSError("outage"))):
+                    with self.assertRaises(OSError):
+                        await self.families.member_stats("9", ALICE)
+                with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=AssertionError("no backoff"))):
+                    clock.monotonic.return_value = 1059.0
+                    await self.families.refresh("9")
+                self.assertIsNotNone((await self.db.account(1))["refresh_token"])
+
+    async def test_logout_and_new_registration_are_serialized(self):
+        revoking, release, new_auth_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def revoke(auth):
+            self.assertEqual(auth.refresh_token, "alice-refresh")
+            revoking.set()
+            await release.wait()
+
+        async def access(auth):
+            if auth.refresh_token == "replacement":
+                new_auth_started.set()
+            return "access"
+
+        with (
+            patch.object(SteamAuth, "revoke", revoke),
+            patch.object(SteamAuth, "get_access_token", access),
+            patch("bot.family.fetch_user_country", AsyncMock(return_value="US")),
+        ):
+            leaving = asyncio.create_task(self.families.leave(1))
+            await asyncio.wait_for(revoking.wait(), 1)
+            registering = asyncio.create_task(self.families.register(1, "replacement", ALICE))
+            try:
+                await asyncio.wait_for(new_auth_started.wait(), 0.05)
+                started_during_logout = True
+            except TimeoutError:
+                started_during_logout = False
+            finally:
+                release.set()
+                await asyncio.gather(leaving, registering)
+        self.assertFalse(started_during_logout)
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "replacement")
+
+
+@needs_pg
 class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.db = await fresh_db()
@@ -821,9 +1187,10 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
             patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))),
             patch("bot.steam_auth.time.time", return_value=100_000.0),
             patch("bot.steam_auth.call", AsyncMock(return_value={1: b"access", 2: b"rotated"})),
+            patch("bot.steam_auth.SteamAuth.revoke", AsyncMock()),
         ]
-        self.steam_call = self.patches[-1].start()
-        for p in self.patches[:-1]:
+        self.steam_call = self.patches[-2].start()
+        for p in [*self.patches[:-2], self.patches[-1]]:
             p.start()
 
     async def asyncTearDown(self):
@@ -932,6 +1299,53 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
         account = await self.db.account(1)
         self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("pending", 200_000.0))
 
+    async def test_committed_rotation_is_retried_after_a_lost_database_reply(self):
+        await self.families.register(1, "original", ALICE)
+        account = await self.db.account(1)
+        access = "x.eyJleHAiOjMwMDAwMH0.y"
+        self.steam_call.return_value = {1: access.encode(), 2: b"committed"}
+        self.steam_call.reset_mock()
+        persist = self.db.set_refresh_token
+        calls = 0
+
+        async def commit_then_fail(*args, **kwargs):
+            nonlocal calls
+            saved = await persist(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                raise OSError("reply lost after commit")
+            return saved
+
+        with (
+            patch("bot.steam_auth.time.time", return_value=200_000.0),
+            patch.object(self.db, "set_refresh_token", side_effect=commit_then_fail),
+        ):
+            with self.assertRaises(OSError):
+                await self.families.owner_token(account)
+            cached = self.families.auths[1]
+            self.assertEqual(self.db.refresh_token(await self.db.account(1)), "committed")
+            self.assertIsNotNone(cached._pending_renewal)
+            self.assertEqual(await self.families.owner_token(await self.db.account(1)), access)
+        self.assertIs(self.families.auths[1], cached)
+        self.assertEqual((cached.refresh_token, cached.last_renewal), ("committed", 200_000.0))
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "committed")
+        self.assertEqual(calls, 2)
+        self.steam_call.assert_awaited_once()
+
+    async def test_stale_account_row_does_not_restore_a_rotated_session(self):
+        await self.families.register(1, "original", ALICE)
+        stale_account = await self.db.account(1)
+        self.steam_call.return_value = {1: b"x.eyJleHAiOjMwMDAwMH0.y", 2: b"latest"}
+        self.steam_call.reset_mock()
+        with patch("bot.steam_auth.time.time", return_value=200_000.0):
+            await self.families.owner_token(stale_account)
+        cached = self.families.auths[1]
+        with patch("bot.steam_auth.time.time", return_value=200_001.0):
+            await self.families.owner_token(stale_account)
+        self.assertIs(self.families.auths[1], cached)
+        self.assertEqual(self.families.auths[1].refresh_token, "latest")
+        self.steam_call.assert_awaited_once()
+
     async def test_logout_rejects_an_inflight_token_renewal(self):
         await self.families.register(1, "original", ALICE)
         account = await self.db.account(1)
@@ -947,11 +1361,15 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
             renewal = asyncio.create_task(self.families.owner_token(account))
             try:
                 await asyncio.wait_for(started.wait(), 2)
-                await self.families.leave(1)
+                logout = asyncio.create_task(self.families.leave(1))
+                await asyncio.sleep(0)
+                self.assertFalse(logout.done())
             finally:
                 released.set()
+            self.assertEqual(await renewal, "late-access")
+            await asyncio.wait_for(logout, 2)
             with self.assertRaises(TokenRejected):
-                await renewal
+                await self.families.owner_token(account)
         self.assertIsNone(await self.db.account(1))
         self.assertNotIn(1, self.families.auths)
 
@@ -964,7 +1382,7 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
         async def delayed_write(*args, **kwargs):
             started.set()
             await released.wait()
-            await set_token(*args, **kwargs)
+            return await set_token(*args, **kwargs)
 
         self.steam_call.return_value = {1: b"late-access", 2: b"late-refresh"}
         with (
@@ -974,7 +1392,7 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
             renewal = asyncio.create_task(self.families.owner_token(account))
             try:
                 await asyncio.wait_for(started.wait(), 2)
-                await self.families.leave(1)
+                await self.db.delete_user(1)
                 await self.db.ensure_family("9", "Fam")
                 await self.db.save_account(1, BOB, "9", "new-login")
             finally:
@@ -994,6 +1412,41 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
                 await self.families.register(1, "new-login", ALICE)
         account = await self.db.account(1)
         self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("rotated", 100_000.0))
+
+    async def test_failed_registration_reports_latest_cookie_for_cleanup(self):
+        await self.families.register(1, "original", ALICE)
+        remembered = []
+
+        async def remember(token):
+            remembered.append(token)
+
+        with (
+            patch("bot.steam_auth.time.time", return_value=200_000.0),
+            patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=OSError("unavailable"))),
+        ):
+            self.steam_call.return_value = {1: b"access", 2: b"latest-cookie"}
+            with self.assertRaises(OSError):
+                await self.families.register(1, "new-login", ALICE, on_refresh=remember)
+        self.assertEqual(remembered, ["latest-cookie"])
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "rotated")
+
+    async def test_registration_acknowledges_commit_before_cancellable_refresh(self):
+        acknowledged = []
+
+        async def refresh(family_id):
+            self.assertEqual(acknowledged, [True])
+            self.assertEqual(self.db.refresh_token(await self.db.account(1)), "rotated")
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+        with patch.object(self.families, "refresh", side_effect=refresh):
+            task = asyncio.create_task(
+                self.families.register(1, "original", ALICE, on_registered=lambda: acknowledged.append(True))
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(acknowledged, [True])
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "rotated")
 
 
 if __name__ == "__main__":

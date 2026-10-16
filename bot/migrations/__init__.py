@@ -15,6 +15,7 @@ MIGRATIONS = tuple(
         "004_alert_delivery.sql",
         "005_delete_abandoned_families.sql",
         "006_member_publication.sql",
+        "007_browser_sessions.sql",
     )
 )
 
