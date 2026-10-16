@@ -13,6 +13,46 @@ DEFAULT = "en"
 
 TEXTS = {
     "en": {
+        "btn_about": "About this bot",
+        "btn_privacy": "Privacy and deletion",
+        "btn_status": "Instance status",
+        "instance_unknown": "Not supplied by the operator",
+        "check_never": "No successful check since restart",
+        "about_title": "About this instance",
+        "about_desc": "Operator / contact: <b>{operator}</b>\nHosting: <b>{hosting}</b>\n"
+        "Steam login location: <b>{location}</b>\n\n"
+        '<a href="https://github.com/AuthFailed/steamily">Source code</a> · '
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/LICENSE.md">PolyForm Noncommercial license</a>\n'
+        "Free, noncommercial use. No uptime or account-safety guarantee. Independent of Valve and Telegram.\n\n"
+        "Only authorize a server session if you trust its operator. Missing details should be checked with them.",
+        "privacy_title": "Privacy and deletion",
+        "privacy_desc": "<b>Stored data and purpose</b>\nTelegram ID, name and username; SteamID, family, approval, "
+        "registration date, country and preferences identify you, control access and show local prices. "
+        "The encrypted Steam refresh token lets the bot check Steam and perform requested actions; "
+        "the operator holds its decryption key. Your Steam password is not stored. Saved dialogs keep menus "
+        "working after a restart.\n\n"
+        "<b>Retention and deletion</b>\nUse /delete or Settings → Log out to erase your account, token, Telegram "
+        "profile link, preferences, saved dialogs and personal runtime caches, and cancel pending login. "
+        "Administrative removal follows the same rules. You need a fresh Steam login to return.\n"
+        "Shared family snapshots, seen member/game ownership history and alert settings remain while another "
+        "account is registered; Steam may supply your family data again through them. The last account's "
+        "removal deletes the family record and caches. Public store metadata stays without account identifiers.\n"
+        "Other users' open member screens may keep selected IDs until those dialogs close or reset, "
+        "or their viewer logs out; these cannot restore your account.\n"
+        "Telegram messages, Steam records and operator backups/logs have separate retention; ask the operator.\n\n"
+        "<b>Steam safety</b>\nServer login can cause unusual sign-in warnings or an account lock. "
+        "Only approve a login you initiated and whose location matches /about. Local deletion does not revoke "
+        'the Steam session. Open <a href="https://store.steampowered.com/account/authorizeddevices">'
+        "Steam Authorized Devices</a> to remove it; use Sign out everywhere if you cannot identify it "
+        "(also signs out your other devices).\n\n"
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/docs/public-instance.md">'
+        "Full privacy and usage policy</a>",
+        "instance_status_title": "Instance status",
+        "instance_status_desc": "The bot is responding now.\nLast successful Steam family check: <b>{checked}</b>\n\n"
+        "For registered users this is your family; otherwise it is the last check across the instance. "
+        "Times reset on restart. A response or old timestamp does not prove Steam is available now.",
+        "deleted_desc": "<b>Your bot data was deleted.</b>\nUse /start to begin again. "
+        "Your Steam session must be revoked separately in Steam Authorized Devices.",
         "language_title": "Language / Язык",
         "language_desc": "Choose the bot language.\nВыберите язык бота.",
         "main_title": "Steam Family",
@@ -114,11 +154,14 @@ TEXTS = {
         "purchases_empty": "No open requests.",
         "sum_owners": "👥 Everyone has it: {names}",
         "logout_title": "Log out",
-        "logout_desc": "The bot forgets your Steam login. You can log in again any time.",
+        "logout_desc": "Delete your account, token, Telegram profile link, preferences and saved dialogs, "
+        "and cancel pending login. Shared family data remains while another account is registered. "
+        "This does not revoke the session at Steam. See /privacy.",
         "btn_logout_yes": "Yes, log out",
         "logged_out": "Logged out",
         "login_title": "Log in with Steam",
         "login_desc": (
+            "⚠️ A server login may trigger an account lock. Only continue if you trust this instance (/about).\n\n"
             "1. On your phone open the <b>Steam</b> app → <b>Steam Guard</b> (shield icon) → scan this QR code. "
             "If Steam is on this phone, just tap <b>Open in Steam app</b>.\n"
             "2. Steam warns about an <b>unusual sign-in attempt</b> and asks how you are signing in: "
@@ -237,6 +280,49 @@ TEXTS = {
         "steam_user": "Steam user {steam_id}",
     },
     "ru": {
+        "btn_about": "О боте",
+        "btn_privacy": "Данные и удаление",
+        "btn_status": "Состояние сервиса",
+        "instance_unknown": "Оператор не указал",
+        "check_never": "Успешных проверок после перезапуска ещё не было",
+        "about_title": "Об этом инстансе",
+        "about_desc": "Оператор / контакт: <b>{operator}</b>\nХостинг: <b>{hosting}</b>\n"
+        "Место входа в Steam: <b>{location}</b>\n\n"
+        '<a href="https://github.com/AuthFailed/steamily">Исходный код</a> · '
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/LICENSE.md">Лицензия PolyForm Noncommercial</a>\n'
+        "Бесплатное некоммерческое использование. Без гарантий доступности и безопасности аккаунта. "
+        "Независимый проект, не связанный с Valve и Telegram.\n\n"
+        "Разрешайте серверную сессию только доверенному оператору. Недостающие сведения уточните у него.",
+        "privacy_title": "Данные и удаление",
+        "privacy_desc": "<b>Что хранится и зачем</b>\nTelegram ID, имя и username; SteamID, семья, статус доступа, "
+        "дата регистрации, страна и настройки нужны для связи аккаунтов, контроля доступа и местных цен. "
+        "Зашифрованный refresh token Steam позволяет проверять Steam и выполнять запрошенные действия; "
+        "ключ расшифровки есть у оператора. Пароль Steam не хранится. Сохранённые диалоги восстанавливают "
+        "меню после перезапуска.\n\n"
+        "<b>Срок хранения и удаление</b>\nКоманда /delete или Настройки → Выйти удаляет аккаунт, токен, ссылку "
+        "на Telegram, настройки, диалоги и личные кеши, отменяет незавершённый вход. Удаление администратором "
+        "работает так же. Для возвращения нужен новый вход в Steam.\n"
+        "Общие снимки семьи, история замеченных участников и владельцев игр, настройки уведомлений остаются, "
+        "пока зарегистрирован другой аккаунт; Steam может вновь передать ваши семейные данные через него. "
+        "Удаление последнего аккаунта удаляет запись семьи и кеши. Публичный кеш магазина не содержит "
+        "идентификаторов аккаунтов и остаётся.\n"
+        "В открытых карточках других пользователей выбранные ID могут оставаться до закрытия или сброса "
+        "диалога либо выхода его владельца; восстановить ваш аккаунт по ним нельзя.\n"
+        "Сообщения Telegram, записи Steam и резервные копии/логи оператора имеют отдельные сроки хранения; "
+        "уточните их у оператора.\n\n"
+        "<b>Безопасность Steam</b>\nВход с сервера может вызвать предупреждение или блокировку аккаунта. "
+        "Подтверждайте только начатый вами вход с местом из /about. Локальное удаление не отзывает сессию "
+        'Steam. Откройте <a href="https://store.steampowered.com/account/authorizeddevices">'
+        "Авторизованные устройства Steam</a> и отзовите её; если не можете найти сессию, выйдите на всех "
+        "устройствах (это затронет и другие ваши сессии).\n\n"
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/docs/public-instance.md">'
+        "Полная политика хранения и использования</a>",
+        "instance_status_title": "Состояние сервиса",
+        "instance_status_desc": "Бот отвечает сейчас.\nПоследняя успешная проверка семьи в Steam: <b>{checked}</b>\n\n"
+        "Для зарегистрированного пользователя показана его семья, иначе — последняя проверка всего инстанса. "
+        "Время сбрасывается при перезапуске. Ответ бота или старая отметка не доказывают доступность Steam сейчас.",
+        "deleted_desc": "<b>Ваши данные в боте удалены.</b>\nОтправьте /start, чтобы начать заново. "
+        "Сессию Steam нужно отдельно отозвать в авторизованных устройствах Steam.",
         "language_title": "Language / Язык",
         "language_desc": "Choose the bot language.\nВыберите язык бота.",
         "main_title": "Семья Steam",
@@ -339,11 +425,15 @@ TEXTS = {
         "purchases_empty": "Открытых запросов нет.",
         "sum_owners": "👥 Есть у всех: {names}",
         "logout_title": "Выход",
-        "logout_desc": "Бот забудет ваш вход в Steam. Войти снова можно в любой момент.",
+        "logout_desc": "Удалить аккаунт, токен, ссылку на Telegram, настройки и диалоги, отменить незавершённый вход. "
+        "Общие данные семьи остаются, пока зарегистрирован другой аккаунт. "
+        "Это не отзывает сессию Steam. Подробнее: /privacy.",
         "btn_logout_yes": "Да, выйти",
         "logged_out": "Вы вышли",
         "login_title": "Вход через Steam",
         "login_desc": (
+            "⚠️ Вход с сервера может привести к блокировке аккаунта. "
+            "Продолжайте, только если доверяете инстансу (/about).\n\n"
             "1. Откройте на телефоне приложение <b>Steam</b> → <b>Steam Guard</b> (значок щита) → "
             "отсканируйте этот QR-код. Если Steam стоит на этом телефоне, просто нажмите "
             "<b>Открыть в Steam</b>.\n"

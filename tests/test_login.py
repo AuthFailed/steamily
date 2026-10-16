@@ -61,6 +61,16 @@ class LoginsTest(unittest.IsolatedAsyncioTestCase):
     async def wait_for_cancel(self, *args):
         await asyncio.Event().wait()
 
+    async def test_forget_drains_pending_login_and_removes_retry_and_qr(self):
+        data = await self.logins.start(1, self.manager)
+        task = self.logins.tasks[1]
+        await self.logins.forget(1)
+        self.assertTrue(task.done())
+        self.assertNotIn(1, self.logins.tasks)
+        self.assertNotIn(1, self.logins.retry_at)
+        self.assertFalse(Path(data["qr"]).exists())
+        self.assertFalse(self.families.register.called)
+
     async def test_same_user_is_reserved_before_steam_begin_returns(self):
         entered, finish = asyncio.Event(), asyncio.Event()
 

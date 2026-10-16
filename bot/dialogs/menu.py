@@ -1,3 +1,5 @@
+import logging
+from datetime import UTC, datetime
 from html import escape
 
 from aiogram import F
@@ -10,7 +12,7 @@ from aiogram_dialog.widgets.kbd import Button, Group, Select, Start, SwitchTo, U
 from aiogram_dialog.widgets.media import DynamicMedia
 from aiogram_dialog.widgets.text import Format
 
-from ..config import LOGIN_LOCATION
+from ..config import INSTANCE_HOSTING, INSTANCE_OPERATOR, LOGIN_LOCATION
 from ..family import Family, alert_settings, role
 from ..i18n import LANGUAGES, Tr, language_of, t
 from ..library import ALERTS
@@ -19,6 +21,20 @@ from ..states import FamilyView, Games, Menu
 from ..ui import GREEN, RED, Header, back_home, look, premium
 
 STATUS_KEYS = {"none": "status_none", "pending": "status_pending", "blocked": "status_blocked"}
+log = logging.getLogger(__name__)
+
+
+async def instance_getter(account, families, lang: str, **kwargs):
+    checked = families.last_family_check.get(account["family_id"]) if account else families.last_steam_check
+    unknown = t(lang, "instance_unknown")
+    return {
+        "operator": escape(INSTANCE_OPERATOR or unknown),
+        "hosting": escape(INSTANCE_HOSTING or unknown),
+        "location": escape(LOGIN_LOCATION or unknown),
+        "checked": datetime.fromtimestamp(checked, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if checked is not None
+        else t(lang, "check_never"),
+    }
 
 
 async def language_getter(**kwargs):
@@ -74,7 +90,7 @@ async def login_getter(dialog_manager: DialogManager, lang: str, **kwargs):
         "waiting": waiting,
         "qr": MediaAttachment(ContentType.PHOTO, path=data["qr"]) if waiting else None,
         "url": data.get("url", ""),
-        "location": LOGIN_LOCATION or t(lang, "location_unknown"),
+        "location": escape(LOGIN_LOCATION or t(lang, "location_unknown")),
         "failure": f"{premium('login')} <b>{t(lang, 'login_title')}</b>\n\n"
         + t(
             lang,
@@ -150,16 +166,20 @@ async def logout_getter(account, db, family: Family | None, **kwargs):
 async def on_logout(callback: CallbackQuery, button: Button, manager: DialogManager):
     families = manager.middleware_data["families"]
     family = manager.middleware_data["family"]
+    await manager.middleware_data["logins"].forget(callback.from_user.id)
     new_owner = await families.leave(callback.from_user.id)
+    manager.middleware_data.update(account=None, family=None, has_language=False)
+    manager.middleware_data["deleted_dialogs"].append(callback.from_user.id)
     if new_owner is not None:
         lang = await families.db.language(new_owner)
         name = escape(family.snapshot["name"]) if family and family.snapshot else ""
-        await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
-        await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
-    # Logout also forgets the language, so the user starts over with the language choice.
-    manager.middleware_data.update(account=None, family=None, has_language=False)
+        try:
+            await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
+            await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
+        except TelegramAPIError:
+            log.warning("Could not notify the new family owner %s", new_owner)
     await callback.answer(t(manager.middleware_data["lang"], "logged_out"))
-    await manager.start(Menu.language, mode=StartMode.RESET_STACK)
+    await manager.start(Menu.deleted, mode=StartMode.RESET_STACK)
 
 
 menu_dialog = Dialog(
@@ -185,6 +205,7 @@ menu_dialog = Dialog(
         Button(Tr("btn_login"), id="login", on_click=on_login, when="needs_login", style=look("login", GREEN)),
         Start(Tr("btn_family"), id="family", state=FamilyView.info, when="loaded", style=look("family")),
         SwitchTo(Tr("btn_settings"), id="settings", state=Menu.settings, style=look("settings")),
+        SwitchTo(Tr("btn_about"), id="about", state=Menu.about),
         getter=main_getter,
         state=Menu.main,
     ),
@@ -222,7 +243,7 @@ menu_dialog = Dialog(
             style=look("notifications"),
         ),
         SwitchTo(Tr("btn_language"), id="to_language", state=Menu.language, style=look("language")),
-        SwitchTo(Tr("btn_logout"), id="logout", state=Menu.logout, when="has_account", style=look("logout", RED)),
+        SwitchTo(Tr("btn_logout"), id="logout", state=Menu.logout, style=look("logout", RED)),
         SwitchTo(Tr("btn_back"), id="settings_back", state=Menu.main),
         getter=settings_getter,
         state=Menu.settings,
@@ -256,5 +277,26 @@ menu_dialog = Dialog(
         SwitchTo(Tr("btn_cancel"), id="cancel_logout", state=Menu.settings, style=look("cancel")),
         getter=logout_getter,
         state=Menu.logout,
+    ),
+    Window(Tr("deleted_desc"), state=Menu.deleted),
+    Window(
+        Header("family", "about"),
+        SwitchTo(Tr("btn_privacy"), id="privacy", state=Menu.privacy),
+        SwitchTo(Tr("btn_status"), id="status", state=Menu.status),
+        SwitchTo(Tr("btn_home"), id="info_home", state=Menu.main),
+        getter=instance_getter,
+        state=Menu.about,
+    ),
+    Window(
+        Header("settings", "privacy"),
+        SwitchTo(Tr("btn_logout"), id="privacy_delete", state=Menu.logout, style=look("logout", RED)),
+        SwitchTo(Tr("btn_back"), id="privacy_back", state=Menu.about),
+        state=Menu.privacy,
+    ),
+    Window(
+        Header("notifications", "instance_status"),
+        SwitchTo(Tr("btn_back"), id="status_back", state=Menu.about),
+        getter=instance_getter,
+        state=Menu.status,
     ),
 )

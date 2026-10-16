@@ -64,9 +64,13 @@ async def set_status(manager: DialogManager, status: str | None) -> None:
             members=family.members if status == "approved" else None,
         )
     else:
-        changed = await db.delete_account(telegram_id, family_id=family.family_id)
+        account = await db.account(telegram_id)
+        if account is None or account["family_id"] != family.family_id:
+            return
+        await manager.middleware_data["logins"].forget(telegram_id)
+        changed = await manager.middleware_data["families"].remove(telegram_id, family_id=family.family_id)
     # Reset the user's own dialogs so they immediately see their new access level.
-    if changed:
+    if changed and status:
         await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
 
 
@@ -80,6 +84,7 @@ async def block(callback: CallbackQuery, button: Button, manager: DialogManager)
 
 async def remove(callback: CallbackQuery, button: Button, manager: DialogManager):
     await set_status(manager, None)
+    manager.dialog_data.pop("telegram_id", None)
     await manager.switch_to(Admin.members)
 
 

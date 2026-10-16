@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from aiogram.types import Chat, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, InlineQuery, Update, User
@@ -11,7 +12,7 @@ from aiogram_dialog.test_tools.keyboard import InlineButtonTextLocator as Btn
 from aiogram_dialog.test_tools.memory_storage import JsonMemoryStorage
 
 from bot.__main__ import create_dispatcher
-from bot.db import SteamAlreadyLinked
+from bot.db import PgStorage, SteamAlreadyLinked
 from bot.family import Families
 from bot.login import qr_png
 from bot.steam import SteamActionError
@@ -36,6 +37,9 @@ class StubLogins:
     def cancel(self, telegram_id):
         self.cancelled.append(telegram_id)
 
+    async def forget(self, telegram_id):
+        self.cancel(telegram_id)
+
 
 @needs_pg
 class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +50,11 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         cls.dp = create_dispatcher(None, None, cls.logins, storage=JsonMemoryStorage(), message_manager=cls.messages)
 
     async def asyncSetUp(self):
+        chart_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(chart_dir.cleanup)
+        chart_patch = patch("bot.charts.CHART_DIR", Path(chart_dir.name))
+        chart_patch.start()
+        self.addCleanup(chart_patch.stop)
         self.db = await fresh_db()
         self.families = Families(self.db, http=None, bot=None)
         self.families.refresh = AsyncMock()  # never call Steam from tests
@@ -100,6 +109,8 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.messages.reset_history()
 
     async def asyncTearDown(self):
+        for family in self.families.items.values():
+            family.cleanup_charts()
         await self.db.pool.close()
 
     def last(self):
@@ -144,11 +155,79 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("«Через мобильное приложение»", self.last().caption)
         self.assertIn("город, где стоит сервер бота", self.last().caption)  # LOGIN_LOCATION not set
 
+    async def test_public_info_before_login_and_safe_instance_values(self):
+        client = self.client(500)
+        with (
+            patch("bot.dialogs.menu.INSTANCE_OPERATOR", "Owner <admin>"),
+            patch("bot.dialogs.menu.INSTANCE_HOSTING", "Provider & region"),
+            patch("bot.dialogs.menu.LOGIN_LOCATION", "Vienna, AT"),
+        ):
+            await client.send("/about")
+        self.assertIn("Owner &lt;admin&gt;", self.last().text)
+        self.assertIn("Provider &amp; region", self.last().text)
+        self.assertIn("Vienna, AT", self.last().text)
+        self.assertIn("github.com/AuthFailed/steamily", self.last().text)
+        self.assertIsNone(await self.db.account(500))
+        await client.click(self.last(), Btn("Privacy and deletion"))
+        self.assertIn("refresh token", self.last().text)
+        self.assertIn("/delete", self.last().text)
+        self.assertIn("authorizeddevices", self.last().text)
+
+    async def test_status_uses_only_successful_check_time(self):
+        client = self.client(500)
+        await client.send("/status")
+        self.assertIn("responding", self.last().text)
+        self.assertIn("No successful check since restart", self.last().text)
+        self.families.last_steam_check = 1_700_000_000.0
+        await client.send("/status")
+        self.assertIn("2023-11-14 22:13:20 UTC", self.last().text)
+        self.assertNotIn(ALICE, self.last().text)
+        self.families.last_family_check[FAMILY] = 1_700_000_060.0
+        await self.client(FRIEND).send("/status")
+        self.assertIn("2023-11-14 22:14:20 UTC", self.last().text)
+
+    async def test_public_info_in_russian_and_preferences_only_deletion(self):
+        client = self.client(NEWCOMER)
+        await self.db.set_language(NEWCOMER, "ru")
+        await client.send("/privacy")
+        self.assertIn("Срок хранения и удаление", self.last().text)
+        await client.send("/about")
+        self.assertIn("Оператор не указал", self.last().text)
+        await client.send("/delete")
+        await client.click(self.last(), Btn("Да, выйти"))
+        self.assertIsNone(await self.db.language(NEWCOMER))
+        self.assertIn("/start", self.last().text)
+
+    async def test_logout_does_not_recreate_saved_dialogs(self):
+        storage = self.dp.fsm.storage
+        self.dp.fsm.storage = PgStorage(self.db)
+        try:
+            client = self.client(FRIEND)
+            await client.send("/start")
+            old_menu = self.last()
+            await client.send("/delete")
+            self.assertIn("saved dialogs", self.last().text)
+            self.assertGreater(await self.db.pool.fetchval("SELECT count(*) FROM fsm"), 0)
+            await client.click(self.last(), Btn("Yes, log out"))
+            self.assertIsNone(await self.db.account(FRIEND))
+            self.assertIsNone(await self.db.language(FRIEND))
+            self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM fsm"), 0)
+            self.assertIn("/start", self.last().text)
+            self.dp.fsm.storage = PgStorage(self.db)
+            self.dp.workflow_data["families"] = Families(self.db, http=None, bot=None)
+            await client.click(old_menu, Btn("Family library"))
+            self.assertIsNone(await self.db.account(FRIEND))
+            self.assertNotIn("Family library", self.buttons())
+            await client.send("/start")
+            self.assertIn("Choose the bot language", self.last().text)
+        finally:
+            self.dp.fsm.storage = storage
+
     async def test_newcomer_logs_in_from_qr_screen(self):
         client = self.client(NEWCOMER)
         await client.send("/start")
         self.assertIn("Log in with your Steam account", self.last().text)
-        self.assertEqual(self.buttons(), ["Log in with Steam", "Settings"])
+        self.assertEqual(self.buttons(), ["Log in with Steam", "Settings", "About this bot"])
         with patch("bot.dialogs.menu.LOGIN_LOCATION", "Vienna, Wien, AT"):
             await client.click(self.last(), Btn("Log in with Steam"))
         self.assertEqual(self.logins.started[-1], NEWCOMER)
@@ -164,7 +243,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
     async def test_pending_member_waits(self):
         await self.client(PENDING).send("/start")
         self.assertIn("Waiting for the family owner", self.last().text)
-        self.assertEqual(self.buttons(), ["Settings"])
+        self.assertEqual(self.buttons(), ["Settings", "About this bot"])
 
     async def test_revoked_member_cannot_use_old_menu_or_library_buttons(self):
         client = self.client(FRIEND)
@@ -189,10 +268,9 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
 
         await client.click(menu, Btn("Family library"))
         self.assertNotIn("Games: <b>20</b>", self.last().text)
-        self.assertEqual(self.buttons(), ["Log in with Steam", "Settings"])
+        self.assertEqual(self.buttons(), ["Log in with Steam", "Settings", "About this bot"])
 
     async def test_revoked_owner_cannot_submit_old_family_action(self):
-        self.families.owner_token = AsyncMock(return_value="token")
         client = self.client(OWNER)
         await self.open_bot_members(client)
         await client.click(self.last(), Btn("✏️ Rename family"))
@@ -218,6 +296,30 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(member, Btn("Block"))
         self.assertEqual((await self.db.account(FRIEND))["status"], "approved")
         self.assertIn("Family library", self.buttons())
+
+    async def test_command_for_another_bot_cannot_bypass_owner_access(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn("✏️ Rename family"))
+        await self.families.make_owner(FAMILY, FRIEND)
+        self.families.owner_token = AsyncMock(return_value="token")
+        with (
+            patch("bot.dialogs.family.rename_family", AsyncMock()) as rename,
+            patch.object(
+                client.bot,
+                "me",
+                AsyncMock(
+                    return_value=User(
+                        id=1,
+                        is_bot=True,
+                        first_name="Bot",
+                        username="this_bot",
+                    )
+                ),
+            ),
+        ):
+            await client.send("/about@another_bot")
+        rename.assert_not_awaited()
 
     async def test_old_bot_management_card_cannot_change_migrated_member(self):
         await self.db.ensure_family("10", "New family")
@@ -522,7 +624,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
     async def test_settings_language_and_member_logout(self):
         client = self.client(FRIEND)
         await client.send("/start")
-        self.assertEqual(self.buttons(), ["Family library", "Family", "Settings"])
+        self.assertEqual(self.buttons(), ["Family library", "Family", "Settings", "About this bot"])
         self.assertEqual(self.button("Settings").icon_custom_emoji_id, "5341715473882955310")
         await client.click(self.last(), Btn("Settings"))
         self.assertEqual(self.buttons(), ["Language", "Log out", "◀️ Back"])  # alerts toggle is for owners
@@ -534,6 +636,8 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("Да, выйти"))
         self.assertIsNone(await self.db.account(FRIEND))
         self.assertIsNone(await self.db.language(FRIEND))  # settings removed
+        self.assertIn("/start", self.last().text)
+        await client.send("/start")
         self.assertIn("Choose the bot language", self.last().text)  # starts over
 
     async def test_owner_toggles_alerts_and_hands_over_on_logout(self):

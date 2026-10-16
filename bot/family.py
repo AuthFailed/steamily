@@ -1,13 +1,16 @@
 import asyncio
 import logging
 import random
+import tempfile
 import time
 from html import escape
+from pathlib import Path
 
 import aiohttp
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
+from . import charts
 from .db import Db
 from .library import ALERTS, family_events, format_event, format_notification, presence_events, reconcile
 from .steam import (
@@ -36,6 +39,22 @@ class Family:
         self.family_id = family_id
         self.snapshot: dict | None = None
         self.stores = stores if stores is not None else {}
+        self._charts: tempfile.TemporaryDirectory | None = None
+        self._charts_removed = False
+
+    @property
+    def chart_dir(self) -> Path:
+        if self._charts_removed:
+            raise FileNotFoundError("This family's charts were removed")
+        if self._charts is None:
+            charts.CHART_DIR.mkdir(exist_ok=True)
+            self._charts = tempfile.TemporaryDirectory(dir=charts.CHART_DIR)
+        return Path(self._charts.name)
+
+    def cleanup_charts(self) -> None:
+        self._charts_removed = True
+        if self._charts is not None:
+            self._charts.cleanup()
 
     @property
     def apps(self) -> list[dict]:
@@ -60,6 +79,9 @@ class Families:
         self.stores: dict[str, dict] = {}
         self.stats_cache: dict[str, tuple[float, dict]] = {}
         self.presence: dict[str, dict] = {}  # last seen online/playing state per family
+        self.last_steam_check: float | None = None
+        self.last_family_check: dict[str, float] = {}
+        self._cache_generation = 0
         self.bot_username = ""
 
     def get(self, family_id: str) -> Family:
@@ -70,7 +92,17 @@ class Families:
         if not auth or auth.refresh_token != refresh_token:
 
             async def save(token, renewed_at):
-                await self.db.set_refresh_token(telegram_id, token, renewed_at)
+                current = await self.db.account(telegram_id)
+                if (
+                    self.auths.get(telegram_id) is not auth
+                    or not current
+                    or current["steam_id"] != steam_id
+                    or self.db.refresh_token(current) != auth.refresh_token
+                ):
+                    raise TokenRejected("This bot login was removed")
+                await self.db.set_refresh_token(
+                    telegram_id, token, renewed_at, expected_refresh_token=current["refresh_token"]
+                )
 
             auth = self.auths[telegram_id] = SteamAuth(self.http, refresh_token, steam_id, save, last_renewal)
         return auth
@@ -101,11 +133,15 @@ class Families:
         await self._reconcile_accounts(family_id, snapshot["members"])
         family = self.get(family_id)
         family.snapshot = snapshot
+        self._checked(family_id)
         if changed_family:
-            try:
-                await self.refresh(account["family_id"])
-            except Exception:
-                log.exception("Old family %s refresh after migration failed", account["family_id"])
+            if await self.db.prune_family(account["family_id"]) or not await self.db.family(account["family_id"]):
+                self._forget_family(account["family_id"])
+            else:
+                try:
+                    await self.refresh(account["family_id"])
+                except Exception:
+                    log.exception("Old family %s refresh after migration failed", account["family_id"])
         try:  # the login itself succeeded; store details can catch up on the next poll
             await self.refresh(family_id)
         except Exception:
@@ -136,15 +172,48 @@ class Families:
                 new_owner = random.choice(approved or others)["telegram_id"]
             await self.make_owner(account["family_id"], new_owner)
         await self.db.delete_user(telegram_id)
-        self.auths.pop(telegram_id, None)
+        await self._forget(account, telegram_id)
         return new_owner
+
+    async def remove(self, telegram_id: int, *, family_id: str) -> bool:
+        account = await self.db.account(telegram_id)
+        changed = await self.db.delete_account(telegram_id, family_id=family_id)
+        if changed:
+            await self._forget(account, telegram_id)
+        return changed
+
+    async def _forget(self, account, telegram_id: int) -> None:
+        self.auths.pop(telegram_id, None)
+        self._cache_generation += 1
+        if account:
+            self.stats_cache.pop(account["steam_id"], None)
+            family_id = account["family_id"]
+            if not await self.db.family_accounts(family_id):
+                self._forget_family(family_id)
+
+    def _forget_family(self, family_id: str) -> None:
+        family = self.items.pop(family_id, None)
+        if family is not None:
+            family.cleanup_charts()
+        self.presence.pop(family_id, None)
+        self.last_family_check.pop(family_id, None)
+        self.stats_cache.clear()  # Stats may include former members absent from the latest snapshot.
+        self._cache_generation += 1
+
+    def _checked(self, family_id: str) -> None:
+        self.last_steam_check = self.last_family_check[family_id] = time.time()
 
     async def _revoke_account(self, account) -> None:
         family_id, telegram_id = account["family_id"], account["telegram_id"]
-        if (await self.db.family(family_id))["owner_telegram_id"] == telegram_id:
+        row = await self.db.family(family_id)
+        if row is None:
+            return
+        if row["owner_telegram_id"] == telegram_id:
             await self.make_owner(family_id, None)
         if await self.db.revoke_account(telegram_id, account["steam_id"], family_id):
             self.auths.pop(telegram_id, None)
+            self.stats_cache.pop(account["steam_id"], None)
+            self._cache_generation += 1
         family = self.get(family_id)
         if family.snapshot:
             family.snapshot = {**family.snapshot, "members": [m for m in family.members if m != account["steam_id"]]}
@@ -155,7 +224,10 @@ class Families:
             if account["steam_id"] not in members:
                 await self._revoke_account(account)
         current = [a for a in accounts if a["steam_id"] in members and a["status"] != "blocked"]
-        owner = (await self.db.family(family_id))["owner_telegram_id"]
+        row = await self.db.family(family_id)
+        if row is None:
+            return
+        owner = row["owner_telegram_id"]
         if owner not in {a["telegram_id"] for a in current}:
             approved = [a for a in current if a["status"] == "approved"]
             successor = (approved or current)[0]["telegram_id"] if current else None
@@ -163,10 +235,22 @@ class Families:
 
     async def owner_token(self, account) -> str:
         """Access token of the acting user's own Steam account, for changes to the family."""
+        current = await self.db.account(account["telegram_id"])
+        if (
+            not current
+            or current["steam_id"] != account["steam_id"]
+            or current["family_id"] != account["family_id"]
+            or current["status"] == "blocked"
+            or not current["refresh_token"]
+        ):
+            raise TokenRejected("This bot login was removed")
         auth = self.auth(
-            account["telegram_id"], self.db.refresh_token(account), account["steam_id"], account["token_renewed_at"]
+            current["telegram_id"], self.db.refresh_token(current), current["steam_id"], current["token_renewed_at"]
         )
-        return await auth.get_access_token()
+        token = await auth.get_access_token()
+        if self.auths.get(account["telegram_id"]) is not auth:
+            raise TokenRejected("This bot login was removed")
+        return token
 
     async def any_token(self, family_id: str) -> str | None:
         for account in await self.db.family_accounts(family_id):
@@ -182,9 +266,11 @@ class Families:
         cached = self.stats_cache.get(steam_id)
         if cached and time.monotonic() - cached[0] < STATS_MAX_AGE:
             return cached[1]
+        generation = self._cache_generation
         token = await self.any_token(family_id)
         stats = await member_stats(self.http, token, steam_id) if token else {}
-        self.stats_cache[steam_id] = (time.monotonic(), stats)
+        if generation == self._cache_generation and token:
+            self.stats_cache[steam_id] = (time.monotonic(), stats)
         return stats
 
     async def refresh(self, family_id: str) -> None:
@@ -194,6 +280,8 @@ class Families:
         if snapshot is None:
             return
         row = await self.db.family(family_id)
+        if row is None or self.items.get(family_id) is not family:
+            return
         family.snapshot = snapshot
         self.presence.setdefault(family_id, snapshot.get("players", {}))
 
@@ -225,11 +313,8 @@ class Families:
 
     async def _fill_country(self, account) -> None:
         """For accounts that logged in before countries were stored."""
-        auth = self.auth(
-            account["telegram_id"], self.db.refresh_token(account), account["steam_id"], account["token_renewed_at"]
-        )
         try:
-            country = await fetch_user_country(self.http, await auth.get_access_token(), account["steam_id"])
+            country = await fetch_user_country(self.http, await self.owner_token(account), account["steam_id"])
         except TokenRejected:
             return  # _fetch handles rejected tokens
         if country:
@@ -240,28 +325,36 @@ class Families:
         for account in await self.db.family_accounts(family_id):
             if account["status"] == "blocked" or not account["refresh_token"]:
                 continue
-            auth = self.auth(
-                account["telegram_id"], self.db.refresh_token(account), account["steam_id"], account["token_renewed_at"]
-            )
             try:
-                token = await auth.get_access_token()
+                token = await self.owner_token(account)
             except TokenRejected as error:
                 log.warning("Steam rejected account %s, it must log in again: %s", account["telegram_id"], error)
-                await self.db.set_refresh_token(account["telegram_id"], None)
+                current = await self.db.account(account["telegram_id"])
+                if current and current["refresh_token"] == account["refresh_token"]:
+                    await self.db.set_refresh_token(
+                        account["telegram_id"], None, expected_refresh_token=current["refresh_token"]
+                    )
                 continue
+            auth = self.auths.get(account["telegram_id"])
             try:
                 snapshot = await fetch_family_snapshot(self.http, token)
             except NoFamily:
-                await self._revoke_account(account)
+                if auth is not None and self.auths.get(account["telegram_id"]) is auth:
+                    await self._revoke_account(account)
                 continue
             except RuntimeError as error:
                 log.warning("Account %s cannot read family %s: %s", account["telegram_id"], family_id, error)
+                continue
+            if auth is None or self.auths.get(account["telegram_id"]) is not auth:
                 continue
             if account["steam_id"] not in snapshot["members"]:
                 log.warning("Steam returned a family without account %s", account["telegram_id"])
                 continue
             if snapshot["family_id"] == family_id:
                 await self._reconcile_accounts(family_id, snapshot["members"])
+                if self.auths.get(account["telegram_id"]) is not auth:
+                    continue
+                self._checked(family_id)
                 return snapshot
             await self._revoke_account(account)
         log.warning("Family %s has no working Steam login", family_id)
@@ -278,6 +371,8 @@ class Families:
     async def check_presence(self, family_id: str) -> None:
         """Online and now-playing alerts; Steam is asked once for all members of the family."""
         row = await self.db.family(family_id)
+        if row is None:
+            return
         alerts = alert_settings(row)
         family = self.items.get(family_id)
         if not row["notify_chat"] or not (alerts["online"] or alerts["playing"]) or not family or not family.snapshot:
@@ -286,9 +381,15 @@ class Families:
         if token is None:
             return
         presence = await fetch_presence(self.http, token, family.members)
+        if self.items.get(family_id) is not family:
+            return
         for event in presence_events(self.presence.get(family_id, {}), presence):
             if alerts[event["kind"]]:
                 await self.send_alert(row, format_event(event, family.snapshot["names"], family.apps, row["language"]))
+                if self.items.get(family_id) is not family:
+                    return
+        if self.items.get(family_id) is not family:
+            return
         self.presence[family_id] = presence
         for steam_id, now in presence.items():  # keeps the 🟢 marks in menus fresh too
             family.snapshot.setdefault("players", {}).setdefault(steam_id, {}).update(now)

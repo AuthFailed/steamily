@@ -5,6 +5,7 @@ from html import escape
 import aiohttp
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.dispatcher.flags import get_flag
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message
@@ -12,6 +13,7 @@ from aiogram_dialog import DIALOG_EVENT_NAME, DialogManager, ShowMode, StartMode
 from aiogram_dialog.api.exceptions import OutdatedIntent, UnknownIntent
 from aiogram_dialog.utils import remove_intent_id
 
+from . import charts
 from .config import poll_seconds, required
 from .db import Db, PgStorage
 from .dialogs.admin import admin_dialog
@@ -51,13 +53,21 @@ class AccountMiddleware(BaseMiddleware):
             await data["db"].set_telegram_profile(user.id, user.username, user.full_name)  # kept current for links
         data["account"] = account
         data["family"] = data["families"].get(account["family_id"]) if account else None
-        return await handler(event, data)
+        data["deleted_dialogs"] = deleted_dialogs = []
+        try:
+            return await handler(event, data)
+        finally:
+            for telegram_id in deleted_dialogs:
+                # Dialog middleware saves the final screen after its callback returns.
+                await data["db"].delete_dialogs(telegram_id)
 
 
 class AccessMiddleware(BaseMiddleware):
     """Rechecks access before processing buttons or text from an already open dialog."""
 
     async def __call__(self, handler, event, data: dict):
+        if get_flag(data, "public_info"):
+            return await handler(event, data)
         manager: DialogManager = data.get("dialog_manager")
         if manager is None or not manager.has_context():
             return await handler(event, data)
@@ -93,6 +103,14 @@ class AccessMiddleware(BaseMiddleware):
 async def start(message: Message, dialog_manager: DialogManager, logins: Logins, has_language: bool):
     logins.cancel(message.from_user.id)
     await dialog_manager.start(Menu.main if has_language else Menu.language, mode=StartMode.RESET_STACK)
+
+
+@router.message(Command("about", "privacy", "status", "delete"), F.chat.type == "private", flags={"public_info": True})
+async def public_info(message: Message, dialog_manager: DialogManager, logins: Logins):
+    logins.cancel(message.from_user.id)
+    command = message.text.split()[0].split("@")[0]
+    state = {"/about": Menu.about, "/privacy": Menu.privacy, "/status": Menu.status, "/delete": Menu.logout}[command]
+    await dialog_manager.start(state, mode=StartMode.RESET_STACK)
 
 
 @router.message(Command("link"), F.chat.type != "private")
@@ -146,6 +164,7 @@ def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     bot = Bot(required("TELEGRAM_BOT_TOKEN"), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    charts.reset_cache()
     db = await Db.connect(required("DATABASE_URL"), required("SECRET_KEY"))
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as http:
         families = Families(db, http, bot)

@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 from html import escape
+from pathlib import Path
 
 from aiogram import F
 from aiogram.enums import ContentType
@@ -85,7 +86,7 @@ async def on_stat(callback: CallbackQuery, widget, manager: DialogManager, key: 
     await manager.switch_to(FamilyView.stat)
 
 
-def render_stat(key: str, family: Family, store: dict, lang: str) -> str:
+def render_stat(key: str, family: Family, store: dict, lang: str, directory: Path) -> str:
     title = t(lang, f"stat_{key}")
     names = {m: family.name(m) for m in family.members}
     by_member = None
@@ -99,29 +100,42 @@ def render_stat(key: str, family: Family, store: dict, lang: str) -> str:
                 key=lambda item: -item[1],
             ),
             " " + library.currency(store),
+            directory=directory,
         )
     elif key == "exclusive":
         by_member = library.exclusive_per_member(family.apps, family.members)
     elif key == "added":
-        return charts.columns(title, library.added_per_month(family.apps))
+        return charts.columns(title, library.added_per_month(family.apps), directory=directory)
     elif key == "genres":
         tag_names = store.get("tag_names", {})
         return charts.bars(
-            title, [(tag_names[tag], count) for tag, count in library.tag_counts(family.apps, store)[:10]]
+            title,
+            [(tag_names[tag], count) for tag, count in library.tag_counts(family.apps, store)[:10]],
+            directory=directory,
         )
     elif key == "borrowed_games":
         return charts.bars(
-            title, library.borrowed_hours_per_game(family.snapshot.get("playtime", []), family.apps), " h"
+            title,
+            library.borrowed_hours_per_game(family.snapshot.get("playtime", []), family.apps),
+            " h",
+            directory=directory,
         )
     elif key == "borrowed_members":
         hours = library.borrowed_hours_per_member(family.snapshot.get("playtime", []), family.members)
-        return charts.bars(title, sorted(((names[m], h) for m, h in hours.items()), key=lambda item: -item[1]), " h")
-    return charts.bars(title, sorted(((names[m], n) for m, n in by_member.items()), key=lambda item: -item[1]))
+        return charts.bars(
+            title,
+            sorted(((names[m], h) for m, h in hours.items()), key=lambda item: -item[1]),
+            " h",
+            directory=directory,
+        )
+    return charts.bars(
+        title, sorted(((names[m], n) for m, n in by_member.items()), key=lambda item: -item[1]), directory=directory
+    )
 
 
 async def stat_getter(dialog_manager: DialogManager, family: Family, lang: str, **kwargs):
     key = dialog_manager.dialog_data["stat"]
-    path = await asyncio.to_thread(render_stat, key, family, viewer_store(dialog_manager), lang)
+    path = await asyncio.to_thread(render_stat, key, family, viewer_store(dialog_manager), lang, family.chart_dir)
     return {
         "chart": MediaAttachment(ContentType.PHOTO, path=path),
         "stat_name": t(lang, f"stat_{key}"),
