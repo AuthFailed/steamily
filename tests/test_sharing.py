@@ -9,7 +9,12 @@ from bot.steam import parse_snapshot
 class SharingTest(unittest.TestCase):
     def setUp(self):
         library = json.loads((Path(__file__).parent / "fixtures" / "shared_library_apps.json").read_text())
-        family = {"response": {"family_group": {"members": [{"steamid": member} for member in ("a", "b", "c")]}}}
+        family = {
+            "response": {
+                "family_groupid": "9",
+                "family_group": {"members": [{"steamid": member} for member in ("a", "b", "c")]},
+            }
+        }
         self.apps = parse_snapshot(family, library, {})["apps"]
 
     def test_parser_preserves_exclusions_and_defaults_omitted_reason(self):
