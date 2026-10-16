@@ -275,6 +275,26 @@ class Families:
         except TelegramAPIError as error:  # e.g. the bot was removed from the group
             log.warning("Alert to family %s group failed: %s", row["family_id"], error)
 
+    async def send_presence_alert(self, family_id: str, event: dict, publisher) -> None:
+        # Keep events structured until delivery: queued text would outlive consent and membership.
+        snapshot = await self._fetch(family_id)
+        if snapshot is None:
+            return
+        family = self.get(family_id)
+        family.snapshot = snapshot
+        row = await self.db.family(family_id)
+        account = await self.db.account(publisher["telegram_id"])
+        if (
+            row is None
+            or not row["notify_chat"]
+            or not alert_settings(row)[event["kind"]]
+            or account is None
+            or account["publication_version"] != publisher["publication_version"]
+            or not publication_allowed(family, event["steamid"], {account["steam_id"]: account}, "publish_presence")
+        ):
+            return
+        await self.send_alert(row, format_event(event, snapshot["names"], family.apps, row["language"]))
+
     async def check_presence(self, family_id: str) -> None:
         """Online and now-playing alerts; Steam is asked once for all members of the family."""
         row = await self.db.family(family_id)
@@ -285,10 +305,11 @@ class Families:
         token = await self.any_token(family_id)
         if token is None:
             return
+        accounts = await accounts_by_steam(self.db, family_id)
         presence = await fetch_presence(self.http, token, family.members)
         for event in presence_events(self.presence.get(family_id, {}), presence):
-            if alerts[event["kind"]]:
-                await self.send_alert(row, format_event(event, family.snapshot["names"], family.apps, row["language"]))
+            if alerts[event["kind"]] and publication_allowed(family, event["steamid"], accounts, "publish_presence"):
+                await self.send_presence_alert(family_id, event, accounts[event["steamid"]])
         self.presence[family_id] = presence
         for steam_id, now in presence.items():  # keeps the 🟢 marks in menus fresh too
             family.snapshot.setdefault("players", {}).setdefault(steam_id, {}).update(now)
@@ -312,12 +333,25 @@ class Families:
             await asyncio.sleep(interval)
 
 
+def publication_allowed(family: Family, steam_id: str, accounts: dict, setting: str) -> bool:
+    account = accounts.get(steam_id)
+    return bool(
+        account
+        and steam_id in family.members
+        and account["steam_id"] == steam_id
+        and account["family_id"] == family.family_id
+        and account["status"] == "approved"
+        and account["refresh_token"]
+        and account.get(setting, False)
+    )
+
+
 def person_link(family: Family, steam_id: str, accounts: dict) -> str:
-    """Steam profile link, plus the member's Telegram when they use the bot. accounts: steam_id -> account row."""
+    """Steam link, plus Telegram only with the active member's consent; no rendered identity cache."""
     url = profile_url(steam_id, (family.snapshot or {}).get("players", {}))
     steam = f'<a href="{url}">{escape(family.name(steam_id))}</a>'
     account = accounts.get(steam_id)
-    if account is None:
+    if not publication_allowed(family, steam_id, accounts, "publish_telegram"):
         return steam
     if account["tg_username"]:
         telegram = f'<a href="https://t.me/{account["tg_username"]}">@{escape(account["tg_username"])}</a>'

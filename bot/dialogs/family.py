@@ -17,7 +17,7 @@ from aiogram_dialog.widgets.media import DynamicMedia
 from aiogram_dialog.widgets.text import Format
 
 from .. import charts, library
-from ..family import Families, Family, accounts_by_steam, person_link, role
+from ..family import Families, Family, accounts_by_steam, person_link, publication_allowed, role
 from ..i18n import Tr, t
 from ..states import Admin, FamilyView, Games
 from ..steam import (
@@ -53,7 +53,10 @@ async def info_getter(dialog_manager: DialogManager, family: Family, account, db
     players = family.snapshot.get("players", {})
     lines = []
     for member in sorted(family.members, key=lambda m: family.snapshot.get("joined", {}).get(m) or 0):
-        marks = (" 👑" if member == owner else "") + (" 🟢" if players.get(member, {}).get("online") else "")
+        visible = member == account["steam_id"] or publication_allowed(family, member, accounts, "publish_presence")
+        marks = (" 👑" if member == owner else "") + (
+            " 🟢" if visible and players.get(member, {}).get("online") else ""
+        )
         child = f" ({t(lang, 'role_child')})" if family.snapshot.get("roles", {}).get(member) == 2 else ""
         lines.append(f"• {person_link(family, member, accounts)}{child}{marks}")
     free = family.snapshot.get("free_spots", 0)
@@ -130,14 +133,15 @@ async def stat_getter(dialog_manager: DialogManager, family: Family, lang: str, 
 
 
 # Members
-async def members_getter(family: Family, **kwargs):
+async def members_getter(family: Family, account, db, **kwargs):
+    accounts = await accounts_by_steam(db, family.family_id)
     players = family.snapshot.get("players", {})
-    return {
-        "members": [
-            (m, ("🟢 " if players.get(m, {}).get("online") else "") + family.name(m))
-            for m in sorted(family.members, key=lambda m: family.name(m).lower())
-        ]
-    }
+    members = []
+    for member in sorted(family.members, key=lambda m: family.name(m).lower()):
+        visible = member == account["steam_id"] or publication_allowed(family, member, accounts, "publish_presence")
+        prefix = "🟢 " if visible and players.get(member, {}).get("online") else ""
+        members.append((member, prefix + family.name(member)))
+    return {"members": members}
 
 
 async def on_member(callback: CallbackQuery, widget, manager: DialogManager, steam_id: str):
@@ -149,20 +153,23 @@ async def member_getter(
     dialog_manager: DialogManager, family: Family, families: Families, account, db, lang: str, **kwargs
 ):
     steam_id = dialog_manager.dialog_data["member"]
-    links = person_link(family, steam_id, await accounts_by_steam(db, family.family_id))
     store = viewer_store(dialog_manager)
-    player = family.snapshot.get("players", {}).get(steam_id, {})
     stats = await families.member_stats(family.family_id, steam_id)
+    accounts = await accounts_by_steam(db, family.family_id)
+    player = family.snapshot.get("players", {}).get(steam_id, {})
+    visible = steam_id == account["steam_id"] or publication_allowed(family, steam_id, accounts, "publish_presence")
     unknown = t(lang, "private")
     own = [a for a in family.apps if steam_id in a["owners"]]
     hours_borrowed = library.borrowed_hours_per_member(family.snapshot.get("playtime", []), [steam_id])[steam_id]
     in_family = steam_id in family.members
     return {
         "member_name": escape(family.name(steam_id)),
-        "links": links,
-        "status": t(lang, "online")
-        if player.get("online")
-        else t(lang, "last_online", when=date(player.get("last_online"))),
+        "links": person_link(family, steam_id, accounts),
+        "status": (
+            t(lang, "online") if player.get("online") else t(lang, "last_online", when=date(player.get("last_online")))
+        )
+        if visible
+        else unknown,
         "level": stats.get("level") if stats.get("level") is not None else unknown,
         "created": date(player.get("created")),
         "steam_games": stats.get("games") if stats.get("games") is not None else unknown,

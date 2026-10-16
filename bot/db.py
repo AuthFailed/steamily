@@ -45,6 +45,9 @@ ALTER TABLE families ADD COLUMN IF NOT EXISTS alerts JSONB;
 -- The Telegram side of a registered member, for links next to their Steam profile.
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tg_username TEXT;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tg_name TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS publish_presence BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS publish_telegram BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS publication_version TEXT NOT NULL DEFAULT gen_random_uuid()::text;
 CREATE TABLE IF NOT EXISTS fsm (
     key   TEXT PRIMARY KEY,
     state TEXT,
@@ -156,7 +159,7 @@ class Db:
     ) -> None:
         await self.check_steam_link(telegram_id, steam_id)
         try:
-            # Approval belongs to a Steam account in one family.
+            # Approval and publication consent belong to a Steam account in one family.
             await self.pool.execute(
                 """
             INSERT INTO accounts (telegram_id, steam_id, family_id, refresh_token, country, token_renewed_at)
@@ -164,7 +167,13 @@ class Db:
             ON CONFLICT (telegram_id) DO UPDATE SET family_id = $3, refresh_token = $4, country = $5,
                 token_renewed_at = $6,
                 status = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
-                    THEN accounts.status ELSE 'pending' END, steam_id = $2
+                    THEN accounts.status ELSE 'pending' END,
+                publish_presence = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
+                    THEN accounts.publish_presence ELSE FALSE END,
+                publish_telegram = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
+                    THEN accounts.publish_telegram ELSE FALSE END,
+                publication_version = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
+                    THEN accounts.publication_version ELSE gen_random_uuid()::text END, steam_id = $2
             """,
                 telegram_id,
                 steam_id,
@@ -182,7 +191,8 @@ class Db:
         result = await self.pool.execute(
             """
             UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
-                refresh_token = NULL, token_renewed_at = 0
+                refresh_token = NULL, token_renewed_at = 0, publish_presence = FALSE, publish_telegram = FALSE,
+                publication_version = gen_random_uuid()::text
             WHERE telegram_id = $1 AND steam_id = $2 AND family_id = $3
             """,
             telegram_id,
@@ -213,13 +223,42 @@ class Db:
     async def set_country(self, telegram_id: int, country: str) -> None:
         await self.pool.execute("UPDATE accounts SET country = $2 WHERE telegram_id = $1", telegram_id, country)
 
+    async def set_publication(
+        self, telegram_id: int, steam_id: str, family_id: str, setting: str, on: bool, *, expected_version: str
+    ) -> bool:
+        if setting not in {"publish_presence", "publish_telegram"}:
+            return False
+        return (
+            await self.pool.fetchval(
+                f"""
+            UPDATE accounts SET {setting} = $4,
+                publication_version = CASE WHEN {setting} IS DISTINCT FROM $4
+                    THEN gen_random_uuid()::text ELSE publication_version END
+            WHERE telegram_id = $1 AND steam_id = $2 AND family_id = $3
+                AND status = 'approved' AND refresh_token IS NOT NULL AND publication_version = $5
+            RETURNING telegram_id
+            """,
+                telegram_id,
+                steam_id,
+                family_id,
+                on,
+                expected_version,
+            )
+            is not None
+        )
+
     async def set_status(
         self, telegram_id: int, status: str, *, family_id: str | None = None, members: list[str] | None = None
     ) -> bool:
         return (
             await self.pool.fetchval(
                 """
-            UPDATE accounts SET status = $2 WHERE telegram_id = $1
+            UPDATE accounts SET status = $2,
+                publish_presence = CASE WHEN $2 = 'approved' THEN publish_presence ELSE FALSE END,
+                publish_telegram = CASE WHEN $2 = 'approved' THEN publish_telegram ELSE FALSE END,
+                publication_version = CASE WHEN $2 = 'approved'
+                    THEN publication_version ELSE gen_random_uuid()::text END
+            WHERE telegram_id = $1
                 AND ($3::text IS NULL OR family_id = $3)
                 AND ($4::text[] IS NULL OR steam_id = ANY($4))
             RETURNING telegram_id

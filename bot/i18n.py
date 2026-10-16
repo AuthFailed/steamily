@@ -32,11 +32,26 @@ TEXTS = {
         "btn_home": "Home",
         "btn_cancel": "Cancel",
         "family_title": "Family",
-        "family_desc": "Who is in your Steam family right now. The name opens their Steam profile, the second link "
-        "their Telegram (for members who use the bot).",
+        "family_desc": "Who is in your Steam family right now. Names open Steam profiles; Telegram links appear "
+        "only with each member's permission.",
         "btn_settings": "Settings",
         "settings_title": "Settings",
         "settings_desc": "Your language, alerts and Steam account.",
+        "publication_desc": "<b>What the bot may publish about you</b>\n"
+        "Both choices start off for everyone: existing and new accounts, and unregistered Steam relatives.\n"
+        "Presence covers online/last seen and playing status; Telegram covers your links, mentions and identifiers "
+        "in family screens, cards, shared results and group alerts. Each choice is independent.\n"
+        "This controls the bot's disclosures only. Your Steam name, profile and library remain visible according "
+        "to Steam privacy settings.\n"
+        "Logout, deletion, leaving the family or changing Steam account/family resets permission; joining again "
+        "requires opting in again.\n"
+        "Newly opened cards and inline searches use your latest choices. Already delivered or forwarded messages "
+        "and previously offered inline results cannot reliably be recalled or changed.\n",
+        "btn_publish_presence_on": "Publish my presence: on",
+        "btn_publish_presence_off": "Publish my presence: off",
+        "btn_publish_telegram_on": "Publish my Telegram: on",
+        "btn_publish_telegram_off": "Publish my Telegram: off",
+        "publication_unavailable": "Could not verify your account and current family. Reopen Settings and try again.",
         "btn_requests_on": "New member alerts: on",
         "btn_requests_off": "New member alerts: off",
         "logout_owner_handover": "👑 You own this family in the bot. After you log out, a random other family member "
@@ -256,11 +271,27 @@ TEXTS = {
         "btn_home": "Домой",
         "btn_cancel": "Отмена",
         "family_title": "Семья",
-        "family_desc": "Кто сейчас в вашей семье Steam. Имя ведёт в профиль Steam, вторая ссылка — в Telegram "
-        "(у тех, кто пользуется ботом).",
+        "family_desc": "Кто сейчас в вашей семье Steam. Имена ведут в профили Steam; ссылки на Telegram видны "
+        "только с разрешения каждого участника.",
         "btn_settings": "Настройки",
         "settings_title": "Настройки",
         "settings_desc": "Язык, уведомления и ваш аккаунт Steam.",
+        "publication_desc": "<b>Что бот может публиковать о вас</b>\n"
+        "Оба разрешения изначально выключены у всех: старых и новых аккаунтов и участников семьи без регистрации.\n"
+        "Активность — это онлайн, последний вход и запущенная игра; Telegram — ваши ссылки, упоминания и "
+        "идентификаторы в меню семьи, карточках, отправленных результатах и уведомлениях группы. "
+        "Разрешения независимы.\n"
+        "Настройки управляют только публикациями бота. Имя, профиль и библиотека Steam остаются видны "
+        "согласно настройкам приватности Steam.\n"
+        "Выход из бота, удаление, выход из семьи или смена аккаунта Steam/семьи сбрасывают разрешения; "
+        "после возвращения их нужно включить снова.\n"
+        "Новые карточки и поиск через inline учитывают ваши последние настройки. Уже доставленные или "
+        "пересланные сообщения и ранее предложенные inline-результаты нельзя надёжно отозвать или изменить.\n",
+        "btn_publish_presence_on": "Публиковать мою активность: вкл",
+        "btn_publish_presence_off": "Публиковать мою активность: выкл",
+        "btn_publish_telegram_on": "Публиковать мой Telegram: вкл",
+        "btn_publish_telegram_off": "Публиковать мой Telegram: выкл",
+        "publication_unavailable": "Не удалось проверить ваш аккаунт и текущую семью. Откройте Настройки заново.",
         "btn_requests_on": "Уведомления о новых участниках: вкл",
         "btn_requests_off": "Уведомления о новых участниках: выкл",
         "logout_owner_handover": "👑 Вы владелец этой семьи в боте. После выхода владельцем станет случайный другой "

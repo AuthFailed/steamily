@@ -21,6 +21,17 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.db.pool.close()
 
+    async def publication(self, telegram_id, steam_id, family_id, setting, on):
+        account = await self.db.account(telegram_id)
+        return await self.db.set_publication(
+            telegram_id,
+            steam_id,
+            family_id,
+            setting,
+            on,
+            expected_version=account["publication_version"] if account else "missing",
+        )
+
     async def test_refresh_token_is_encrypted_and_status_survives_relogin(self):
         await self.db.save_account(10, "1", "9", "secret-token", "KZ")
         raw = await self.db.pool.fetchval("SELECT refresh_token FROM accounts WHERE telegram_id = 10")
@@ -37,6 +48,159 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
 
         await self.db.set_refresh_token(10, None)
         self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
+
+    async def test_publication_upgrade_defaults_off_and_preserves_existing_accounts(self):
+        await self.db.save_account(10, "1", "9", "legacy-token", "KZ")
+        await self.db.set_status(10, "approved")
+        await self.db.pool.execute(
+            "ALTER TABLE accounts DROP COLUMN publish_presence, DROP COLUMN publish_telegram, "
+            "DROP COLUMN publication_version"
+        )
+        await self.db.pool.execute(SCHEMA)
+        account = await self.db.account(10)
+        self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
+        self.assertTrue(account["publication_version"])
+        legacy_version = account["publication_version"]
+        self.assertEqual((account["status"], self.db.refresh_token(account)), ("approved", "legacy-token"))
+
+        await self.db.save_account(20, "2", "9", "new-token")
+        account = await self.db.account(20)
+        self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
+        self.assertNotEqual(account["publication_version"], legacy_version)
+        with self.assertRaises(asyncpg.NotNullViolationError):
+            await self.db.pool.execute("UPDATE accounts SET publication_version = NULL WHERE telegram_id = 10")
+        for setting in ("publish_presence", "publish_telegram"):
+            with self.subTest(setting=setting):
+                with self.assertRaises(asyncpg.NotNullViolationError):
+                    await self.db.pool.execute(f"UPDATE accounts SET {setting} = NULL WHERE telegram_id = 10")
+                self.assertTrue(await self.publication(10, "1", "9", setting, True))
+        before = (await self.db.account(10))["publication_version"]
+        await self.db.pool.execute(SCHEMA)
+        account = await self.db.account(10)
+        self.assertEqual((account["publish_presence"], account["publish_telegram"]), (True, True))
+        self.assertEqual(account["publication_version"], before)
+
+    async def test_publication_version_rejects_stale_clicks_and_changes_only_with_consent(self):
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.set_status(10, "approved")
+        initial = (await self.db.account(10))["publication_version"]
+        self.assertTrue(
+            await self.db.set_publication(10, "1", "9", "publish_presence", False, expected_version=initial)
+        )
+        self.assertEqual((await self.db.account(10))["publication_version"], initial)
+        self.assertTrue(await self.db.set_publication(10, "1", "9", "publish_presence", True, expected_version=initial))
+        enabled = (await self.db.account(10))["publication_version"]
+        self.assertNotEqual(enabled, initial)
+        self.assertFalse(
+            await self.db.set_publication(10, "1", "9", "publish_presence", False, expected_version=initial)
+        )
+        self.assertTrue(await self.publication(10, "1", "9", "publish_presence", False))
+        self.assertTrue(await self.publication(10, "1", "9", "publish_presence", True))
+        self.assertNotEqual((await self.db.account(10))["publication_version"], enabled)
+        self.assertFalse(
+            await self.db.set_publication(10, "1", "9", "publish_telegram", True, expected_version=enabled)
+        )
+
+    async def test_concurrent_publication_callbacks_accept_only_one_version(self):
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.set_status(10, "approved")
+        version = (await self.db.account(10))["publication_version"]
+        results = await asyncio.gather(
+            self.db.set_publication(10, "1", "9", "publish_presence", True, expected_version=version),
+            self.db.set_publication(10, "1", "9", "publish_telegram", True, expected_version=version),
+        )
+        self.assertCountEqual(results, [True, False])
+        account = await self.db.account(10)
+        self.assertEqual(sum((account["publish_presence"], account["publish_telegram"])), 1)
+
+    async def test_publication_flags_and_accounts_are_independent_and_persistent(self):
+        for telegram_id, steam_id in ((10, "1"), (20, "2")):
+            await self.db.save_account(telegram_id, steam_id, "9", "token")
+            await self.db.set_status(telegram_id, "approved")
+        self.assertTrue(await self.publication(10, "1", "9", "publish_presence", True))
+        self.assertTrue(await self.publication(20, "2", "9", "publish_telegram", True))
+        self.assertTrue(await self.publication(10, "1", "9", "publish_presence", False))
+        self.assertTrue(await self.publication(10, "1", "9", "publish_presence", True))
+        restarted = await Db.connect(TEST_DATABASE_URL, Fernet.generate_key().decode())
+        try:
+            first, second = await restarted.account(10), await restarted.account(20)
+            self.assertEqual((first["publish_presence"], first["publish_telegram"]), (True, False))
+            self.assertEqual((second["publish_presence"], second["publish_telegram"]), (False, True))
+        finally:
+            await restarted.pool.close()
+
+    async def test_publication_rejects_invalid_stale_unapproved_and_expired_accounts(self):
+        await self.db.save_account(10, "1", "9", "token")
+        for status in ("pending", "blocked"):
+            await self.db.set_status(10, status)
+            self.assertFalse(await self.publication(10, "1", "9", "publish_presence", True))
+        await self.db.set_status(10, "approved")
+        for telegram_id, steam_id, family_id, setting in (
+            (20, "1", "9", "publish_presence"),
+            (10, "2", "9", "publish_presence"),
+            (10, "1", "other", "publish_presence"),
+            (10, "1", "9", "status"),
+        ):
+            with self.subTest(telegram_id=telegram_id, steam_id=steam_id, family_id=family_id, setting=setting):
+                self.assertFalse(await self.publication(telegram_id, steam_id, family_id, setting, True))
+        await self.db.set_refresh_token(10, None)
+        self.assertFalse(await self.publication(10, "1", "9", "publish_presence", True))
+        account = await self.db.account(10)
+        self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
+        self.assertEqual(account["status"], "approved")
+
+    async def test_publication_survives_same_login_and_resets_for_changed_identity_or_family(self):
+        await self.db.ensure_family("other", "Other")
+        await self.db.save_account(10, "1", "9", "token")
+        for steam_id, family_id in (("2", "9"), ("2", "other")):
+            await self.db.set_status(10, "approved")
+            account = await self.db.account(10)
+            for setting in ("publish_presence", "publish_telegram"):
+                await self.publication(10, account["steam_id"], account["family_id"], setting, True)
+            version = (await self.db.account(10))["publication_version"]
+            await self.db.save_account(10, account["steam_id"], account["family_id"], "same-login")
+            account = await self.db.account(10)
+            self.assertEqual((account["publish_presence"], account["publish_telegram"]), (True, True))
+            self.assertEqual(account["publication_version"], version)
+            await self.db.set_refresh_token(10, None)
+            self.assertFalse(
+                await self.publication(10, account["steam_id"], account["family_id"], "publish_presence", False)
+            )
+            await self.db.save_account(10, account["steam_id"], account["family_id"], "reauthenticated")
+            restored = await self.db.account(10)
+            self.assertEqual((restored["publish_presence"], restored["publish_telegram"]), (True, True))
+            self.assertEqual(restored["publication_version"], version)
+            await self.db.save_account(10, steam_id, family_id, "new-login")
+            changed = await self.db.account(10)
+            self.assertEqual((changed["publish_presence"], changed["publish_telegram"]), (False, False))
+            self.assertNotEqual(changed["publication_version"], version)
+            self.assertFalse(
+                await self.publication(10, account["steam_id"], account["family_id"], "publish_presence", True)
+            )
+
+    async def test_publication_revocation_and_moderation_require_new_consent(self):
+        await self.db.save_account(10, "1", "9", "token")
+        for action in ("pending", "blocked", "revoke", "delete_account", "delete_user"):
+            with self.subTest(action=action):
+                await self.db.save_account(10, "1", "9", "token")
+                await self.db.set_status(10, "approved")
+                for setting in ("publish_presence", "publish_telegram"):
+                    await self.publication(10, "1", "9", setting, True)
+                version = (await self.db.account(10))["publication_version"]
+                if action in ("pending", "blocked"):
+                    await self.db.set_status(10, action)
+                elif action == "revoke":
+                    self.assertTrue(await self.db.revoke_account(10, "1", "9"))
+                else:
+                    await getattr(self.db, action)(10)
+                await self.db.save_account(10, "1", "9", "relogin")
+                await self.db.set_status(10, "approved")
+                account = await self.db.account(10)
+                self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
+                self.assertNotEqual(account["publication_version"], version)
+                self.assertFalse(
+                    await self.db.set_publication(10, "1", "9", "publish_presence", True, expected_version=version)
+                )
 
     async def test_duplicate_steam_link_preserves_accounts_and_settings(self):
         await self.db.ensure_family("8", "Other family")
