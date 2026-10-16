@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message
 from aiogram_dialog import DIALOG_EVENT_NAME, DialogManager, ShowMode, StartMode, setup_dialogs
+from aiogram_dialog.api.entities import DialogUpdateEvent
 from aiogram_dialog.api.exceptions import OutdatedIntent, UnknownIntent
 from aiogram_dialog.utils import remove_intent_id
 
@@ -41,14 +42,19 @@ class AccountMiddleware(BaseMiddleware):
         )
         if chat is None or source.from_user is None:
             return None
-        if chat.type != "private" and not (isinstance(source, Message) and (source.text or "").startswith("/link")):
+        private = chat.type == "private" or isinstance(source, DialogUpdateEvent) and chat.id == source.from_user.id
+        if not private and not (isinstance(source, Message) and (source.text or "").startswith("/link")):
             return None
         language = await data["db"].language(source.from_user.id)
         data["has_language"] = language is not None
         data["lang"] = language or ("ru" if (source.from_user.language_code or "").startswith("ru") else DEFAULT)
         account = await data["db"].account(source.from_user.id)
         user = source.from_user
-        if account and (account["tg_username"], account["tg_name"]) != (user.username, user.full_name):
+        if (
+            account
+            and isinstance(source, (Message, CallbackQuery))
+            and (account["tg_username"], account["tg_name"]) != (user.username, user.full_name)
+        ):
             await data["db"].set_telegram_profile(user.id, user.username, user.full_name)  # kept current for links
         data["account"] = account
         data["family"] = data["families"].get(account["family_id"]) if account else None
@@ -131,6 +137,18 @@ async def stale_button(event: ErrorEvent, dialog_manager: DialogManager, lang: s
     if event.update.callback_query:
         await event.update.callback_query.answer(t(lang, "stale"))
     await dialog_manager.start(Menu.main, mode=StartMode.RESET_STACK, show_mode=ShowMode.SEND)
+
+
+@router.errors(F.update.event_type == DIALOG_EVENT_NAME)
+async def background_dialog_failed(event: ErrorEvent):
+    update = event.update.event
+    log.error(
+        "Background dialog delivery failed for user %s in chat %s",
+        update.from_user.id,
+        update.chat.id,
+        exc_info=event.exception,
+    )
+    return True
 
 
 def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, **dialog_options) -> Dispatcher:
