@@ -1,0 +1,70 @@
+import unittest
+
+from aiogram.fsm.storage.base import StorageKey
+
+from bot.db import PgStorage
+from bot.states import Menu
+from tests.pg import fresh_db, needs_pg
+
+
+@needs_pg
+class DbTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.db = await fresh_db()
+        await self.db.ensure_family("9", "Fam")
+        await self.db.update_family("9", state={"members": ["1"], "ownership": {}}, notify_chat=-100)
+
+    async def asyncTearDown(self):
+        await self.db.pool.close()
+
+    async def test_refresh_token_is_encrypted_and_status_survives_relogin(self):
+        await self.db.save_account(10, "1", "9", "secret-token", "KZ")
+        raw = await self.db.pool.fetchval("SELECT refresh_token FROM accounts WHERE telegram_id = 10")
+        self.assertNotIn(b"secret-token", raw)
+        account = await self.db.account(10)
+        self.assertEqual(self.db.refresh_token(account), "secret-token")
+        self.assertEqual((account["status"], account["country"]), ("pending", "KZ"))
+
+        await self.db.set_status(10, "approved")
+        await self.db.save_account(10, "1", "9", "new-token")  # same Steam account: keeps approval
+        self.assertEqual((await self.db.account(10))["status"], "approved")
+        await self.db.save_account(10, "2", "9", "other")  # different Steam account: back to pending
+        self.assertEqual((await self.db.account(10))["status"], "pending")
+
+        await self.db.set_refresh_token(10, None)
+        self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
+
+    async def test_family_settings_and_store_cache(self):
+        family = await self.db.family("9")
+        self.assertEqual((family["name"], family["notify_chat"], family["language"]), ("Fam", -100, "en"))
+        self.assertEqual(family["state"], {"members": ["1"], "ownership": {}})
+        await self.db.ensure_family("9", "Renamed")  # existing settings stay
+        await self.db.update_family("9", language="ru", alerts={"online": True})
+        family = await self.db.family("9")
+        self.assertEqual(
+            (family["name"], family["notify_chat"], family["language"], family["alerts"]),
+            ("Renamed", -100, "ru", {"online": True}),
+        )
+        with self.assertRaises(AssertionError):
+            await self.db.update_family("9", owner="evil")
+
+        self.assertEqual(await self.db.store_cache("DE"), {})
+        await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
+        self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
+
+    async def test_fsm_storage(self):
+        storage = PgStorage(self.db)
+        key = StorageKey(bot_id=1, chat_id=2, user_id=3)
+        self.assertIsNone(await storage.get_state(key))
+        self.assertEqual(await storage.get_data(key), {})
+        await storage.set_state(key, Menu.main)
+        await storage.set_data(key, {"stack": ["a"]})
+        self.assertEqual(await storage.get_state(key), Menu.main.state)
+        self.assertEqual(await storage.get_data(key), {"stack": ["a"]})
+        await storage.set_state(key, None)
+        self.assertIsNone(await storage.get_state(key))
+        self.assertEqual(await storage.get_data(key), {"stack": ["a"]})
+
+
+if __name__ == "__main__":
+    unittest.main()

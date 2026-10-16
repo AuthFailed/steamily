@@ -1,0 +1,40 @@
+from aiogram.fsm.state import State, StatesGroup
+
+
+class Menu(StatesGroup):
+    language = State()
+    main = State()
+    login = State()
+    settings = State()
+    group_alerts = State()
+    logout = State()
+
+
+class Games(StatesGroup):
+    list = State()
+    pages = State()
+    sort = State()
+    filters = State()
+    genre = State()
+    players = State()
+    game = State()
+
+
+class Admin(StatesGroup):
+    members = State()
+    member = State()
+
+
+class FamilyView(StatesGroup):
+    info = State()
+    stats = State()
+    stat = State()
+    members = State()
+    member = State()
+    remove = State()
+    manage = State()
+    invite = State()
+    invite_role = State()
+    invites = State()
+    rename = State()
+    purchases = State()

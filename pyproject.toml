@@ -1,0 +1,13 @@
+[project]
+name = "steam-family-bot"
+version = "1.0.0"
+description = "Telegram bot for Steam Families: shared library, stats, alerts and family management"
+requires-python = ">=3.13"
+license = { file = "LICENSE.md" }
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
