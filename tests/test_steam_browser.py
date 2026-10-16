@@ -9,7 +9,7 @@ import aiohttp
 from multidict import CIMultiDict
 from yarl import URL
 
-from bot.steam_auth import SteamError, TokenRejected, decode
+from bot.steam_auth import SteamError, TokenRejected, decode, encode
 from scripts import steam_browser_session as browser
 
 ALICE = "76561198000000001"
@@ -97,13 +97,34 @@ class BrowserLoginTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(login["url"], "https://s.team/q/def")
             self.assertEqual(await browser.poll_browser_login(None, login), token())
         self.assertEqual(rpc.await_args_list[0].args[1], "BeginAuthSessionViaQR")
-        fields = dict(rpc.await_args_list[0].args[2])
-        self.assertEqual(set(fields), {3})
+        fields = decode(encode(rpc.await_args_list[0].args[2]))
+        self.assertEqual(set(fields), {3, 4})
+        self.assertEqual(fields[4], b"Community")
         self.assertEqual(decode(fields[3]), {1: browser.BROWSER_HEADERS["user-agent"].encode(), 2: 2})
         for request in rpc.await_args_list:
             self.assertEqual(request.kwargs, {"headers": browser.BROWSER_HEADERS})
         self.assertNotIn("cookie", browser.BROWSER_HEADERS)
         self.assertNotIn("android", browser.BROWSER_HEADERS["user-agent"].lower())
+
+    async def test_poll_updates_optional_qr_rotation_fields_independently(self):
+        old_url, new_url = "https://s.team/q/abc", "https://s.team/q/def"
+        for response, expected_id, expected_url in [
+            ({1: 8}, 8, old_url),
+            ({2: new_url.encode()}, 7, new_url),
+            ({1: 0, 2: b""}, 7, old_url),
+            ({1: 0, 2: new_url.encode()}, 7, new_url),
+            ({1: 8, 2: b""}, 8, old_url),
+        ]:
+            login = {"client_id": 7, "request_id": b"request", "url": old_url, "interval": 5.0}
+            rpc = AsyncMock(return_value=response)
+            with self.subTest(response=response), patch.object(browser, "call", rpc):
+                self.assertIsNone(await browser.poll_browser_login(None, login))
+                self.assertEqual(login["client_id"], expected_id)
+                self.assertEqual(login["url"], expected_url)
+                self.assertEqual(login["request_id"], b"request")
+                rpc.assert_awaited_once_with(
+                    None, "PollAuthSessionStatus", [(1, 7), (2, b"request")], headers=browser.BROWSER_HEADERS
+                )
 
     async def test_qr_errors_do_not_expose_server_text_or_urls(self):
         with patch.object(browser, "call", AsyncMock(side_effect=SteamError(401, "secret-token"))):

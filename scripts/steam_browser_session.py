@@ -97,7 +97,7 @@ async def begin_browser_login(http: aiohttp.ClientSession) -> dict:
     """Start one browser QR attempt using a private, newly created session."""
     try:
         device = encode([(1, BROWSER_HEADERS["user-agent"]), (2, 2)])
-        start = await call(http, "BeginAuthSessionViaQR", [(3, device)], headers=BROWSER_HEADERS)
+        start = await call(http, "BeginAuthSessionViaQR", [(3, device), (4, "Community")], headers=BROWSER_HEADERS)
         interval = struct.unpack("<f", start[4])[0] if 4 in start else 5.0
         if not math.isfinite(interval) or interval <= 0:
             raise ValueError
@@ -121,8 +121,10 @@ async def poll_browser_login(http: aiohttp.ClientSession, login: dict) -> str | 
         poll = await call(
             http, "PollAuthSessionStatus", [(1, login["client_id"]), (2, login["request_id"])], headers=BROWSER_HEADERS
         )
-        if 1 in poll:
-            login["client_id"], login["url"] = poll[1], poll[2].decode()
+        if poll.get(1):
+            login["client_id"] = poll[1]
+        if poll.get(2):
+            login["url"] = poll[2].decode()
         return poll[3].decode() if 3 in poll else None
     except (SteamError, aiohttp.ClientError, TimeoutError, KeyError, ValueError, TypeError, AttributeError):
         raise RuntimeError("Steam could not check browser login") from None
