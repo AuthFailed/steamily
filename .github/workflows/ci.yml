@@ -80,6 +80,7 @@ jobs:
           path: |
             coverage.xml
             htmlcov/
+
   build:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

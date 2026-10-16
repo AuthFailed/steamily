@@ -778,15 +778,27 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         for status in ("left", "kicked"):
             with self.subTest(status=status):
                 await self.db.update_family(FAMILY, notify_chat=-800)
-                await self.families.send_alert(await self.db.family(FAMILY), "Before removal")
+                await self.db.enqueue_alerts(FAMILY, [{"text": "Before removal"}])
+                await self.families.deliver_alerts(FAMILY)
                 self.families.bot.send_message.assert_awaited_once_with(-800, "Before removal", parse_mode=None)
                 self.families.bot.reset_mock()
+                await self.db.enqueue_alerts(FAMILY, [{"text": "Pending at removal"}])
+                self.assertEqual(
+                    await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts WHERE family_id = $1", FAMILY), 1
+                )
 
                 await self.membership(FRIEND, -800, "member", status)
 
                 row = await self.db.family(FAMILY)
                 self.assertIsNone(row["notify_chat"])
-                await self.families.send_alert(row, "After removal")
+                self.assertEqual(
+                    await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts WHERE family_id = $1", FAMILY), 0
+                )
+                await self.db.enqueue_alerts(FAMILY, [{"text": "After removal"}])
+                self.assertEqual(
+                    await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts WHERE family_id = $1", FAMILY), 0
+                )
+                await self.families.deliver_alerts(FAMILY)
                 self.families.bot.send_message.assert_not_awaited()
 
     async def test_removal_from_old_group_keeps_the_new_group_linked(self):
@@ -794,12 +806,13 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await self.membership(OWNER, -800, "left", "member")
         await self.membership(OWNER, -900, "left", "member")
         self.families.bot.reset_mock()
+        await self.db.enqueue_alerts(FAMILY, [{"text": "New group alert"}])
 
         await self.membership(FRIEND, -800, "member", "kicked")
 
         row = await self.db.family(FAMILY)
         self.assertEqual(row["notify_chat"], -900)
-        await self.families.send_alert(row, "New group alert")
+        await self.families.deliver_alerts(FAMILY)
         self.families.bot.send_message.assert_awaited_once_with(-900, "New group alert", parse_mode=None)
 
     async def test_empty_inline_query_lists_recent_family_games_without_store_search(self):
