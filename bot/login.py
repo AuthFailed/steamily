@@ -7,6 +7,7 @@ import logging
 import tempfile
 import time
 from html import escape
+from math import ceil
 from pathlib import Path
 
 import qrcode
@@ -22,7 +23,15 @@ from .steam_auth import begin_qr_login, jwt_payload, poll_qr_login
 
 log = logging.getLogger(__name__)
 LOGIN_TIMEOUT = 300
+LOGIN_COOLDOWN = 15
+MAX_ACTIVE_LOGINS = 10
 QR_DIR = Path(tempfile.gettempdir()) / "steam-qr"
+
+
+class LoginRejected(Exception):
+    def __init__(self, reason: str, retry_after: int = 0):
+        super().__init__(reason)
+        self.reason, self.retry_after = reason, retry_after
 
 
 def qr_png(url: str) -> bytes:
@@ -43,46 +52,91 @@ class Logins:
     def __init__(self, families: Families, bot: Bot):
         self.families, self.bot = families, bot
         self.tasks: dict[int, asyncio.Task] = {}
+        self.retry_at: dict[int, float] = {}
+        self.closed = False
 
     def cancel(self, telegram_id: int) -> None:
-        if task := self.tasks.pop(telegram_id, None):
+        if task := self.tasks.get(telegram_id):
             task.cancel()
 
     async def start(self, telegram_id: int, manager: BaseDialogManager) -> dict:
         """Starts a QR session; returns the dialog data for the login window and keeps polling in the background."""
-        self.cancel(telegram_id)
-        login = await begin_qr_login(self.families.http)
-        qr = qr_file(login["url"])
-        self.tasks[telegram_id] = asyncio.create_task(self._wait(telegram_id, login, qr, manager))
-        return {"login": "waiting", "qr": qr, "url": login["url"]}
+        now = time.monotonic()
+        self.retry_at = {user: until for user, until in self.retry_at.items() if until > now}
+        if self.closed:
+            raise LoginRejected("login_stopping")
+        if telegram_id in self.retry_at:
+            raise LoginRejected("login_cooldown", ceil(self.retry_at[telegram_id] - now))
+        if telegram_id in self.tasks:
+            raise LoginRejected("login_active")
+        if len(self.tasks) >= MAX_ACTIVE_LOGINS:
+            raise LoginRejected("login_busy", LOGIN_COOLDOWN)
+
+        # Reserve before the first await, including requests still waiting for Steam to begin.
+        self.tasks[telegram_id] = task = asyncio.current_task()
+        self.retry_at[telegram_id] = now + LOGIN_COOLDOWN
+        try:
+            async with asyncio.timeout(LOGIN_TIMEOUT):
+                login = await begin_qr_login(self.families.http)
+            if not self._current(telegram_id):
+                raise asyncio.CancelledError
+            qr = qr_file(login["url"])
+            poller = asyncio.create_task(self._wait(telegram_id, login, qr, manager))
+            self.tasks[telegram_id] = poller
+            poller.add_done_callback(lambda done: self._finished(telegram_id, qr, done))
+            return {"login": "waiting", "qr": qr, "url": login["url"]}
+        finally:
+            if self.tasks.get(telegram_id) is task:
+                del self.tasks[telegram_id]
+
+    def _current(self, telegram_id: int) -> bool:
+        task = asyncio.current_task()
+        return self.tasks.get(telegram_id) is task and not task.cancelling()
+
+    def _finished(self, telegram_id: int, qr: str, task: asyncio.Task) -> None:
+        if self.tasks.get(telegram_id) is task:
+            del self.tasks[telegram_id]
+        Path(qr).unlink(missing_ok=True)  # also runs when cancelled before the coroutine's first step
+
+    async def close(self) -> None:
+        self.closed = True
+        tasks = list(self.tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _wait(self, telegram_id: int, login: dict, qr: str, manager: BaseDialogManager) -> None:
         result = "failed"
         try:
-            deadline = time.monotonic() + LOGIN_TIMEOUT
-            refresh_token = None
-            while refresh_token is None and time.monotonic() < deadline:
-                await asyncio.sleep(login["interval"])
-                old_url = login["url"]
-                refresh_token = await poll_qr_login(self.families.http, login)
-                if refresh_token is None and login["url"] != old_url:
-                    old_qr, qr = qr, qr_file(login["url"])
-                    await manager.update({"qr": qr, "url": login["url"]})  # edits the photo in place
-                    Path(old_qr).unlink(missing_ok=True)
-            if refresh_token is None:
-                result = "timeout"
-                return
+            async with asyncio.timeout(LOGIN_TIMEOUT):
+                refresh_token = None
+                while refresh_token is None:
+                    await asyncio.sleep(login["interval"])
+                    old_url = login["url"]
+                    refresh_token = await poll_qr_login(self.families.http, login)
+                    if not self._current(telegram_id):
+                        raise asyncio.CancelledError
+                    if refresh_token is None and login["url"] != old_url:
+                        old_qr, qr = qr, qr_file(login["url"])
+                        try:
+                            await manager.update({"qr": qr, "url": login["url"]})  # edits the photo in place
+                        finally:
+                            Path(old_qr).unlink(missing_ok=True)
 
-            steam_id = jwt_payload(refresh_token)["sub"]
-            try:
-                family = await self.families.register(telegram_id, refresh_token, steam_id)
-            except NoFamily:
-                result = "no_family"
-                return
-            if (await self.families.db.account(telegram_id))["status"] == "pending":
-                await self._tell_owner(family, steam_id)
-            result = None
-            await manager.start(Menu.main, mode=StartMode.RESET_STACK)
+                steam_id = jwt_payload(refresh_token)["sub"]
+                try:
+                    family = await self.families.register(telegram_id, refresh_token, steam_id)
+                except NoFamily:
+                    result = "no_family"
+                    return
+                if not self._current(telegram_id):
+                    raise asyncio.CancelledError
+                if (await self.families.db.account(telegram_id))["status"] == "pending":
+                    await self._tell_owner(family, steam_id)
+                result = None
+                await manager.start(Menu.main, mode=StartMode.RESET_STACK)
+        except TimeoutError:
+            result = "timeout"
         except asyncio.CancelledError:
             result = None
             raise
@@ -90,9 +144,7 @@ class Logins:
             log.exception("Steam login failed for %s", telegram_id)
         finally:
             Path(qr).unlink(missing_ok=True)
-            if self.tasks.get(telegram_id) is asyncio.current_task():
-                del self.tasks[telegram_id]
-            if result:
+            if result and self._current(telegram_id):
                 try:
                     await manager.update({"login": result})
                 except Exception:  # the user already left the login screen
