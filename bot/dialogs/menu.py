@@ -118,13 +118,17 @@ async def unlink_group(callback: CallbackQuery, button: Button, manager: DialogM
     await manager.middleware_data["db"].update_family(manager.middleware_data["account"]["family_id"], notify_chat=None)
 
 
-async def logout_getter(account, db, **kwargs):
+async def logout_getter(account, db, family: Family | None, **kwargs):
     others = []
     if role(account) == "owner":
         others = [
             a
             for a in await db.family_accounts(account["family_id"])
-            if a["telegram_id"] != account["telegram_id"] and a["status"] != "blocked"
+            if a["telegram_id"] != account["telegram_id"]
+            and a["status"] != "blocked"
+            and family is not None
+            and a["steam_id"] in family.members
+            and a["refresh_token"]
         ]
     return {
         "owner_handover": role(account) == "owner" and bool(others),

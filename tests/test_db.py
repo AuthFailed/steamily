@@ -52,6 +52,17 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
         self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
 
+    async def test_changing_family_requires_new_approval(self):
+        await self.db.ensure_family("other", "Other")
+        for status in ("approved", "blocked"):
+            with self.subTest(status=status):
+                await self.db.save_account(10, "1", "9", "old")
+                await self.db.set_status(10, status)
+                await self.db.save_account(10, "1", "9", "same-family")
+                self.assertEqual((await self.db.account(10))["status"], status)
+                await self.db.save_account(10, "1", "other", "new-family")
+                self.assertEqual((await self.db.account(10))["status"], "pending")
+
     async def test_token_and_renewal_time_are_saved_together(self):
         await self.db.save_account(10, "1", "9", "first", "KZ", token_renewed_at=100_000.0)
         await self.db.set_refresh_token(10, "rotated", 186_400.0)

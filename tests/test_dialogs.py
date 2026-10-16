@@ -110,6 +110,23 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
     def client(self, user_id, chat_id=None, chat_type="private"):
         return BotClient(self.dp, user_id=user_id, chat_id=chat_id or user_id, chat_type=chat_type)
 
+    async def fetch_members(self, members):
+        family = self.families.get(FAMILY)
+        snapshot = {**family.snapshot, "members": members}
+
+        async def access_token(auth):
+            return auth.steam_id
+
+        async def steam_snapshot(http, steam_id):
+            return snapshot if steam_id in members else {**snapshot, "family_id": "other", "members": [steam_id]}
+
+        with (
+            patch("bot.family.SteamAuth.get_access_token", access_token),
+            patch("bot.family.fetch_family_snapshot", steam_snapshot),
+        ):
+            family.snapshot = await self.families._fetch(FAMILY)
+        self.assertIsNotNone(family.snapshot)
+
     async def test_first_start_asks_language_then_shows_russian(self):
         client = self.client(500)
         await client.send("/start")
@@ -147,6 +164,115 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await self.client(PENDING).send("/start")
         self.assertIn("Waiting for the family owner", self.last().text)
         self.assertEqual(self.buttons(), ["Settings"])
+
+    async def test_revoked_member_cannot_use_old_menu_or_library_buttons(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        menu = self.last()
+        await client.click(menu, Btn("Family library"))
+        library = self.last()
+        await self.fetch_members([ALICE, CAROL])
+
+        await client.click(library, Btn("Game 01 · \\$1.00"))
+        self.assertNotIn("store.steampowered.com", self.last().text)
+        self.assertIn("Log in with Steam", self.buttons())
+        await client.click(menu, Btn("Family library"))
+        self.assertNotIn("Games: <b>20</b>", self.last().text)
+        self.assertNotIn("Family library", self.buttons())
+
+    async def test_revoked_member_cannot_open_library_from_old_main_menu(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        menu = self.last()
+        await self.fetch_members([ALICE, CAROL])
+
+        await client.click(menu, Btn("Family library"))
+        self.assertNotIn("Games: <b>20</b>", self.last().text)
+        self.assertEqual(self.buttons(), ["Log in with Steam", "Settings"])
+
+    async def test_revoked_owner_cannot_submit_old_family_action(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn("✏️ Rename family"))
+        await self.fetch_members([BOB, CAROL])
+
+        with patch("bot.dialogs.family.rename_family", AsyncMock()) as rename:
+            await client.send("Unauthorized name")
+        rename.assert_not_awaited()
+        self.assertNotIn("Manage family", self.last().text)
+        self.assertIn("Log in with Steam", self.buttons())
+
+        await self.client(FRIEND).send("/start")
+        self.assertIn("Family library", self.buttons())
+
+    async def test_former_owner_cannot_use_old_bot_management_buttons(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("✅ Bob"))
+        member = self.last()
+        await self.families.make_owner(FAMILY, FRIEND)
+
+        await client.click(member, Btn("Block"))
+        self.assertEqual((await self.db.account(FRIEND))["status"], "approved")
+        self.assertIn("Family library", self.buttons())
+
+    async def test_old_bot_management_card_cannot_change_migrated_member(self):
+        await self.db.ensure_family("10", "New family")
+        client = self.client(OWNER)
+        for action in ("Approve", "Block", "Remove"):
+            with self.subTest(action=action):
+                await self.db.save_account(PENDING, CAROL, FAMILY, "token")
+                await self.db.set_status(PENDING, "pending")
+                await self.open_bot_members(client)
+                await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+                await client.click(self.last(), Btn("⏳ Carol"))
+                member = self.last()
+                await self.db.save_account(PENDING, CAROL, "10", "new-token")
+
+                await client.click(member, Btn(action))
+                account = await self.db.account(PENDING)
+                self.assertIsNotNone(account)
+                self.assertEqual((account["family_id"], account["status"]), ("10", "pending"))
+                self.assertEqual(self.db.refresh_token(account), "new-token")
+
+    async def test_old_approve_button_cannot_reapprove_departed_member(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("⏳ Carol"))
+        member = self.last()
+        await self.fetch_members([ALICE, BOB])
+
+        await client.click(member, Btn("Approve"))
+        self.assertEqual((await self.db.account(PENDING))["status"], "pending")
+
+    async def test_inline_search_denies_revoked_member_and_keeps_survivor(self):
+        await self.fetch_members([ALICE, CAROL])
+        answer = AsyncMock()
+        with (
+            patch("bot.inline.store_cards", AsyncMock(return_value={})),
+            patch("aiogram.types.InlineQuery.answer", answer),
+        ):
+            for telegram_id in (FRIEND, OWNER):
+                await self.dp.feed_update(
+                    self.client(telegram_id).bot,
+                    Update(
+                        update_id=telegram_id,
+                        inline_query=InlineQuery(
+                            id=str(telegram_id),
+                            from_user=User(id=telegram_id, is_bot=False, first_name="U"),
+                            query="",
+                            offset="",
+                        ),
+                    ),
+                )
+        revoked, survivor = answer.await_args_list
+        self.assertEqual(revoked.args[0], [])
+        self.assertEqual(revoked.kwargs["button"].start_parameter, "login")
+        self.assertTrue(survivor.args[0])
+        self.assertIn("Alice", survivor.args[0][0].input_message_content.message_text)
 
     async def test_group_chats_ignore_everything_but_link(self):
         await self.client(OWNER, chat_id=-5, chat_type="supergroup").send("/start")

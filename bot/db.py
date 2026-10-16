@@ -129,14 +129,15 @@ class Db:
         country: str | None = None,
         token_renewed_at: float = 0.0,
     ) -> None:
-        # Re-login keeps the approval status unless the Steam account changed.
+        # Approval belongs to a Steam account in one family.
         await self.pool.execute(
             """
             INSERT INTO accounts (telegram_id, steam_id, family_id, refresh_token, country, token_renewed_at)
             VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (telegram_id) DO UPDATE SET family_id = $3, refresh_token = $4, country = $5,
                 token_renewed_at = $6,
-                status = CASE WHEN accounts.steam_id = $2 THEN accounts.status ELSE 'pending' END, steam_id = $2
+                status = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
+                    THEN accounts.status ELSE 'pending' END, steam_id = $2
         """,
             telegram_id,
             steam_id,
@@ -145,6 +146,19 @@ class Db:
             country,
             token_renewed_at,
         )
+
+    async def revoke_account(self, telegram_id: int, steam_id: str, family_id: str) -> bool:
+        result = await self.pool.execute(
+            """
+            UPDATE accounts SET status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END,
+                refresh_token = NULL, token_renewed_at = 0
+            WHERE telegram_id = $1 AND steam_id = $2 AND family_id = $3
+            """,
+            telegram_id,
+            steam_id,
+            family_id,
+        )
+        return result == "UPDATE 1"
 
     async def set_refresh_token(
         self, telegram_id: int, refresh_token: str | None, token_renewed_at: float = 0.0
@@ -168,11 +182,37 @@ class Db:
     async def set_country(self, telegram_id: int, country: str) -> None:
         await self.pool.execute("UPDATE accounts SET country = $2 WHERE telegram_id = $1", telegram_id, country)
 
-    async def set_status(self, telegram_id: int, status: str) -> None:
-        await self.pool.execute("UPDATE accounts SET status = $2 WHERE telegram_id = $1", telegram_id, status)
+    async def set_status(
+        self, telegram_id: int, status: str, *, family_id: str | None = None, members: list[str] | None = None
+    ) -> bool:
+        return (
+            await self.pool.fetchval(
+                """
+            UPDATE accounts SET status = $2 WHERE telegram_id = $1
+                AND ($3::text IS NULL OR family_id = $3)
+                AND ($4::text[] IS NULL OR steam_id = ANY($4))
+            RETURNING telegram_id
+            """,
+                telegram_id,
+                status,
+                family_id,
+                members,
+            )
+            is not None
+        )
 
-    async def delete_account(self, telegram_id: int) -> None:
-        await self.pool.execute("DELETE FROM accounts WHERE telegram_id = $1", telegram_id)
+    async def delete_account(self, telegram_id: int, *, family_id: str | None = None) -> bool:
+        return (
+            await self.pool.fetchval(
+                """
+            DELETE FROM accounts WHERE telegram_id = $1 AND ($2::text IS NULL OR family_id = $2)
+            RETURNING telegram_id
+            """,
+                telegram_id,
+                family_id,
+            )
+            is not None
+        )
 
     # Families
     async def family(self, family_id: str) -> asyncpg.Record | None:

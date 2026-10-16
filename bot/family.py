@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 from .db import Db
 from .library import ALERTS, family_events, format_event, format_notification, presence_events, reconcile
 from .steam import (
+    NoFamily,
     fetch_family_snapshot,
     fetch_presence,
     fetch_user_country,
@@ -83,13 +84,24 @@ class Families:
         snapshot = await fetch_family_snapshot(self.http, access_token)
         country = await fetch_user_country(self.http, access_token, steam_id)
         family_id = snapshot["family_id"]
+        if steam_id not in snapshot["members"]:
+            raise RuntimeError("Steam returned a family without the signed-in account")
+        changed_family = account and account["family_id"] != family_id
+        if changed_family:
+            await self._revoke_account(account)
+        elif account and account["steam_id"] != steam_id and account["owner_telegram_id"] == telegram_id:
+            await self.make_owner(account["family_id"], None)
         await self.db.ensure_family(family_id, snapshot["name"])
         await self.db.save_account(telegram_id, steam_id, family_id, auth.refresh_token, country, auth.last_renewal)
         self.auths.pop(telegram_id, None)
-        if (await self.db.family(family_id))["owner_telegram_id"] is None:  # nobody owns it: the next to register does
-            await self.make_owner(family_id, telegram_id)
+        await self._reconcile_accounts(family_id, snapshot["members"])
         family = self.get(family_id)
         family.snapshot = snapshot
+        if changed_family:
+            try:
+                await self.refresh(account["family_id"])
+            except Exception:
+                log.exception("Old family %s refresh after migration failed", account["family_id"])
         try:  # the login itself succeeded; store details can catch up on the next poll
             await self.refresh(family_id)
         except Exception:
@@ -110,7 +122,10 @@ class Families:
             others = [
                 a
                 for a in await self.db.family_accounts(account["family_id"])
-                if a["telegram_id"] != telegram_id and a["status"] != "blocked"
+                if a["telegram_id"] != telegram_id
+                and a["status"] != "blocked"
+                and a["steam_id"] in self.get(account["family_id"]).members
+                and a["refresh_token"]
             ]
             approved = [a for a in others if a["status"] == "approved"]
             if others:
@@ -119,6 +134,28 @@ class Families:
         await self.db.delete_user(telegram_id)
         self.auths.pop(telegram_id, None)
         return new_owner
+
+    async def _revoke_account(self, account) -> None:
+        family_id, telegram_id = account["family_id"], account["telegram_id"]
+        if (await self.db.family(family_id))["owner_telegram_id"] == telegram_id:
+            await self.make_owner(family_id, None)
+        if await self.db.revoke_account(telegram_id, account["steam_id"], family_id):
+            self.auths.pop(telegram_id, None)
+        family = self.get(family_id)
+        if family.snapshot:
+            family.snapshot = {**family.snapshot, "members": [m for m in family.members if m != account["steam_id"]]}
+
+    async def _reconcile_accounts(self, family_id: str, members: list[str]) -> None:
+        accounts = await self.db.family_accounts(family_id)
+        for account in accounts:
+            if account["steam_id"] not in members:
+                await self._revoke_account(account)
+        current = [a for a in accounts if a["steam_id"] in members and a["status"] != "blocked"]
+        owner = (await self.db.family(family_id))["owner_telegram_id"]
+        if owner not in {a["telegram_id"] for a in current}:
+            approved = [a for a in current if a["status"] == "approved"]
+            successor = (approved or current)[0]["telegram_id"] if current else None
+            await self.make_owner(family_id, successor)
 
     async def owner_token(self, account) -> str:
         """Access token of the acting user's own Steam account, for changes to the family."""
@@ -147,12 +184,13 @@ class Families:
         return stats
 
     async def refresh(self, family_id: str) -> None:
-        row = await self.db.family(family_id)
+        family = self.get(family_id)
+        previous = family.snapshot  # revocation also removes confirmed departures from the cached membership
         snapshot = await self._fetch(family_id)
         if snapshot is None:
             return
-        family = self.get(family_id)
-        previous, family.snapshot = family.snapshot, snapshot
+        row = await self.db.family(family_id)
+        family.snapshot = snapshot
         self.presence.setdefault(family_id, snapshot.get("players", {}))
 
         events, state = reconcile(row["state"], snapshot)
@@ -170,9 +208,6 @@ class Families:
 
         # Prices in the currency of every member who uses the bot.
         accounts = await self.db.family_accounts(family_id)
-        if row["owner_telegram_id"] is None and accounts:  # families registered before owners were stored
-            approved = [a for a in accounts if a["status"] == "approved"]
-            await self.make_owner(family_id, (approved or accounts)[0]["telegram_id"])
         for account in accounts:
             if account["country"] is None and account["refresh_token"] and account["status"] != "blocked":
                 await self._fill_country(account)
@@ -212,11 +247,19 @@ class Families:
                 continue
             try:
                 snapshot = await fetch_family_snapshot(self.http, token)
-            except RuntimeError as error:  # e.g. this member left every family
+            except NoFamily:
+                await self._revoke_account(account)
+                continue
+            except RuntimeError as error:
                 log.warning("Account %s cannot read family %s: %s", account["telegram_id"], family_id, error)
                 continue
-            if snapshot["family_id"] == family_id:  # a member may have moved to another family
+            if account["steam_id"] not in snapshot["members"]:
+                log.warning("Steam returned a family without account %s", account["telegram_id"])
+                continue
+            if snapshot["family_id"] == family_id:
+                await self._reconcile_accounts(family_id, snapshot["members"])
                 return snapshot
+            await self._revoke_account(account)
         log.warning("Family %s has no working Steam login", family_id)
         return None
 
