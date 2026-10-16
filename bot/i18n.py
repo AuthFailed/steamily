@@ -134,6 +134,13 @@ TEXTS = {
         "login_timeout": "⌛ The login timed out.",
         "login_failed": "❌ Steam login failed.",
         "login_no_family": "❌ This Steam account isn't in a Steam Family.",
+        "login_already_linked": (
+            "❌ This Steam account is already linked to another Telegram account.\n\n"
+            "Use the Telegram account you linked originally. To move the link, open <b>Settings → Log out</b> "
+            "in that account first, then sign in here. Logging out deletes that account's bot data and settings "
+            "and may pass family ownership to another member.\n\n"
+            "If you cannot access that Telegram account, contact the bot operator."
+        ),
         "btn_retry": "Try again",
         "owner_new_member": "👋 <b>{name}</b> logged in and waits for access: "
         "open Family → Manage family → Bot members.",
@@ -349,6 +356,13 @@ TEXTS = {
         "login_timeout": "⌛ Время на вход истекло.",
         "login_failed": "❌ Не удалось войти через Steam.",
         "login_no_family": "❌ Этот аккаунт Steam не состоит в семье Steam.",
+        "login_already_linked": (
+            "❌ Этот аккаунт Steam уже привязан к другому аккаунту Telegram.\n\n"
+            "Войдите с аккаунта Telegram, который привязали изначально. Для переноса сначала откройте там "
+            "<b>Настройки → Выйти</b>, затем войдите здесь. При выходе данные и настройки этого аккаунта в боте "
+            "удалятся, а роль владельца семьи может перейти другому участнику.\n\n"
+            "Если доступа к тому аккаунту Telegram нет, обратитесь к оператору бота."
+        ),
         "btn_retry": "Попробовать снова",
         "owner_new_member": "👋 <b>{name}</b> вошёл в бота и ждёт доступа: "
         "откройте Семья → Управление семьёй → Участники бота.",

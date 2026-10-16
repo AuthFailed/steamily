@@ -1,10 +1,14 @@
+import asyncio
 import unittest
+from unittest.mock import patch
 
+import asyncpg
 from aiogram.fsm.storage.base import StorageKey
+from cryptography.fernet import Fernet
 
-from bot.db import SCHEMA, PgStorage
+from bot.db import SCHEMA, Db, PgStorage, SteamAlreadyLinked
 from bot.states import Menu
-from tests.pg import fresh_db, needs_pg
+from tests.pg import TEST_DATABASE_URL, fresh_db, needs_pg
 
 
 @needs_pg
@@ -33,6 +37,144 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
 
         await self.db.set_refresh_token(10, None)
         self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
+
+    async def test_duplicate_steam_link_preserves_accounts_and_settings(self):
+        await self.db.ensure_family("8", "Other family")
+        for telegram_id, steam_id, family_id, status in ((10, "1", "9", "approved"), (20, "2", "8", "blocked")):
+            await self.db.save_account(telegram_id, steam_id, family_id, "old-token", "KZ", 123.0)
+            await self.db.set_status(telegram_id, status)
+            await self.db.set_telegram_profile(telegram_id, f"user{telegram_id}", "Existing profile")
+            await self.db.set_language(telegram_id, "ru")
+            await self.db.set_notify_requests(telegram_id, False)
+            await self.db.update_family(family_id, owner_telegram_id=telegram_id, alerts={"online": False})
+
+        before = await self.snapshot_links()
+        with self.assertRaises(SteamAlreadyLinked):
+            await self.db.save_account(30, "1", "8", "new-token", "US")
+        with self.assertRaises(SteamAlreadyLinked):
+            await self.db.save_account(20, "1", "9", "replacement-token", "US", 999.0)
+        self.assertEqual(await self.snapshot_links(), before)
+
+    async def test_every_status_and_expired_token_reserve_the_steam_link(self):
+        for status in ("pending", "approved", "blocked"):
+            with self.subTest(status=status):
+                await self.db.save_account(10, "1", "9", "token")
+                await self.db.set_status(10, status)
+                await self.db.set_refresh_token(10, None)
+                with self.assertRaises(SteamAlreadyLinked):
+                    await self.db.save_account(20, "1", "9", "another-token")
+                self.assertIsNone(await self.db.account(20))
+                self.assertEqual((await self.db.account(10))["status"], status)
+                await self.db.delete_account(10)
+
+    async def test_explicit_account_deletion_releases_the_steam_link(self):
+        await self.db.save_account(10, "1", "9", "old-token")
+        await self.db.delete_account(10)
+        await self.db.save_account(20, "1", "9", "new-token")
+        await self.db.delete_user(20)
+        await self.db.save_account(30, "1", "9", "latest-token")
+        self.assertEqual(self.db.refresh_token(await self.db.account(30)), "latest-token")
+
+    async def test_steam_uniqueness_also_blocks_direct_sql_writes(self):
+        await self.db.save_account(10, "1", "9", "token")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')")
+        await self.db.save_account(20, "2", "9", "other-token")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.db.pool.execute("UPDATE accounts SET steam_id = '1' WHERE telegram_id = 20")
+        self.assertEqual((await self.db.account(20))["steam_id"], "2")
+
+    async def test_check_steam_link_allows_only_an_unlinked_or_same_telegram_account(self):
+        await self.db.check_steam_link(10, "1")
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.check_steam_link(10, "1")
+        with self.assertRaises(SteamAlreadyLinked):
+            await self.db.check_steam_link(20, "1")
+
+    async def test_unrelated_unique_constraint_errors_are_not_reported_as_link_conflicts(self):
+        await self.db.save_account(10, "1", "9", "token", "KZ")
+        await self.db.pool.execute("CREATE UNIQUE INDEX accounts_country_test ON accounts (country)")
+        with self.assertRaises(asyncpg.UniqueViolationError) as caught:
+            await self.db.save_account(20, "2", "9", "other-token", "KZ")
+        self.assertEqual(caught.exception.constraint_name, "accounts_country_test")
+        self.assertIsNone(await self.db.account(20))
+
+    async def test_concurrent_saves_use_separate_connections_and_report_link_conflict(self):
+        barrier = asyncio.Barrier(2)
+
+        class RacingDb(Db):
+            async def check_steam_link(self, telegram_id, steam_id):
+                await super().check_steam_link(telegram_id, steam_id)
+                await barrier.wait()
+
+        async with self.db.pool.acquire() as first, self.db.pool.acquire() as second:
+            key = Fernet.generate_key().decode()
+            first_db, second_db = RacingDb(first, key), RacingDb(second, key)
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    first_db.save_account(10, "1", "9", "first-token"),
+                    second_db.save_account(20, "1", "9", "second-token"),
+                    return_exceptions=True,
+                ),
+                timeout=5,
+            )
+        self.assertEqual(sum(result is None for result in results), 1)
+        self.assertEqual(sum(isinstance(result, SteamAlreadyLinked) for result in results), 1)
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM accounts WHERE steam_id = '1'"), 1)
+
+    async def snapshot_links(self):
+        return {
+            table: await self.db.pool.fetch(f"SELECT * FROM {table} ORDER BY 1")
+            for table in ("accounts", "families", "telegram_users")
+        }
+
+    async def test_unique_steam_schema_upgrade_is_idempotent_and_keeps_existing_data(self):
+        await self.db.save_account(10, "1", "9", "legacy-token", "KZ", 123.0)
+        await self.db.set_status(10, "approved")
+        await self.db.set_telegram_profile(10, "owner", "Original owner")
+        await self.db.set_language(10, "ru")
+        await self.db.update_family("9", owner_telegram_id=10)
+        before = await self.snapshot_links()
+        await self.db.pool.execute("DROP INDEX IF EXISTS accounts_steam_id_key")
+        await self.db.pool.execute(SCHEMA)
+        await self.db.pool.execute(SCHEMA)
+        self.assertEqual(await self.snapshot_links(), before)
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')")
+
+    async def test_legacy_duplicates_abort_startup_without_changes_and_allow_reviewed_resolution(self):
+        await self.db.save_account(10, "1", "9", "legacy-token", "KZ")
+        await self.db.set_status(10, "approved")
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.set_language(10, "ru")
+        await self.db.pool.execute("DROP INDEX IF EXISTS accounts_steam_id_key")
+        await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')")
+        before = await self.snapshot_links()
+        created_pools = []
+        create_pool = asyncpg.create_pool
+
+        async def track_pool(*args, **kwargs):
+            pool = await create_pool(*args, **kwargs)
+            created_pools.append(pool)
+            return pool
+
+        try:
+            with patch("bot.db.asyncpg.create_pool", side_effect=track_pool):
+                with self.assertRaisesRegex(asyncpg.RaiseError, "docs/steam-account-links.md"):
+                    await Db.connect(TEST_DATABASE_URL, Fernet.generate_key().decode())
+            self.assertTrue(created_pools[0].is_closing())
+            self.assertEqual(await self.snapshot_links(), before)
+        finally:
+            for pool in created_pools:
+                await pool.close()
+
+        await self.db.delete_account(20)  # An operator explicitly reviewed this losing link.
+        await self.db.pool.execute(SCHEMA)
+        await self.db.pool.execute(SCHEMA)
+        self.assertEqual((await self.db.account(10))["owner_telegram_id"], 10)
+        self.assertEqual(self.db.refresh_token(await self.db.account(10)), "legacy-token")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')")
 
     async def test_family_settings_and_store_cache(self):
         family = await self.db.family("9")

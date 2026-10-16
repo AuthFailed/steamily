@@ -50,7 +50,22 @@ CREATE TABLE IF NOT EXISTS fsm (
     state TEXT,
     data  JSONB NOT NULL DEFAULT '{}'
 );
+DO $$
+BEGIN
+    -- Keep the duplicate check and index creation atomic against account writes.
+    LOCK TABLE accounts IN SHARE ROW EXCLUSIVE MODE;
+    IF EXISTS (SELECT 1 FROM accounts GROUP BY steam_id HAVING count(*) > 1) THEN
+        RAISE EXCEPTION 'Duplicate Steam account links prevent startup. See docs/steam-account-links.md for recovery.'
+            USING HINT = 'SELECT steam_id, array_agg(telegram_id ORDER BY telegram_id) FROM accounts '
+                         'GROUP BY steam_id HAVING count(*) > 1;';
+    END IF;
+    CREATE UNIQUE INDEX IF NOT EXISTS accounts_steam_id_key ON accounts (steam_id);
+END $$;
 """
+
+
+class SteamAlreadyLinked(ValueError):
+    """The Steam account is already linked to another Telegram account."""
 
 
 class Db:
@@ -64,8 +79,12 @@ class Db:
             await connection.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
         pool = await asyncpg.create_pool(dsn, init=init)
-        await pool.execute(SCHEMA)
-        return cls(pool, secret_key)
+        try:
+            await pool.execute(SCHEMA)
+            return cls(pool, secret_key)
+        except BaseException:
+            await pool.close()
+            raise
 
     # Telegram users' language, chosen before anything else
     async def language(self, telegram_id: int) -> str | None:
@@ -120,6 +139,12 @@ class Db:
             family_id,
         )
 
+    async def check_steam_link(self, telegram_id: int, steam_id: str) -> None:
+        if await self.pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM accounts WHERE steam_id = $1 AND telegram_id <> $2)", steam_id, telegram_id
+        ):
+            raise SteamAlreadyLinked("Steam account is already linked to another Telegram account.")
+
     async def save_account(
         self,
         telegram_id: int,
@@ -129,22 +154,28 @@ class Db:
         country: str | None = None,
         token_renewed_at: float = 0.0,
     ) -> None:
-        # Re-login keeps the approval status unless the Steam account changed.
-        await self.pool.execute(
-            """
+        await self.check_steam_link(telegram_id, steam_id)
+        try:
+            # Re-login keeps the approval status unless the Steam account changed.
+            await self.pool.execute(
+                """
             INSERT INTO accounts (telegram_id, steam_id, family_id, refresh_token, country, token_renewed_at)
             VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (telegram_id) DO UPDATE SET family_id = $3, refresh_token = $4, country = $5,
                 token_renewed_at = $6,
                 status = CASE WHEN accounts.steam_id = $2 THEN accounts.status ELSE 'pending' END, steam_id = $2
-        """,
-            telegram_id,
-            steam_id,
-            family_id,
-            self.fernet.encrypt(refresh_token.encode()),
-            country,
-            token_renewed_at,
-        )
+            """,
+                telegram_id,
+                steam_id,
+                family_id,
+                self.fernet.encrypt(refresh_token.encode()),
+                country,
+                token_renewed_at,
+            )
+        except asyncpg.UniqueViolationError as error:
+            if error.constraint_name != "accounts_steam_id_key":
+                raise
+            raise SteamAlreadyLinked("Steam account is already linked to another Telegram account.") from error
 
     async def set_refresh_token(
         self, telegram_id: int, refresh_token: str | None, token_renewed_at: float = 0.0
