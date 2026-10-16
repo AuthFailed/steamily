@@ -23,8 +23,8 @@ from aiogram_dialog.widgets.link_preview import LinkPreview
 from aiogram_dialog.widgets.text import Format
 
 from ..family import Family, accounts_by_steam, person_link
-from ..i18n import Tr, t
-from ..library import PRICES, SORTS, query, tag_counts
+from ..i18n import Tr, sharing_warning, t
+from ..library import PRICES, SORTS, query, shareable_copies, tag_counts
 from ..states import Games
 from ..ui import BLUE, Header, back_home, home, look
 
@@ -145,11 +145,21 @@ async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: s
     tags = ", ".join(tag_names[str(tag)] for tag in info.get("tags", []) if str(tag) in tag_names)
     accounts = await accounts_by_steam(db, family.family_id)
     owners = "".join(f"\n• {person_link(family, o, accounts)}" for o in game["owners"])
+    shareable = shareable_copies(game)
+    access = (
+        "owned"
+        if dialog_manager.middleware_data["account"]["steam_id"] in game["owners"]
+        else ("borrowed" if shareable else "unavailable")
+    )
     lines = [
         f"💲 {escape(info.get('price_text') or t(lang, 'price_unknown'))}",
         f"🏷 {escape(tags)}" if tags else None,
         t(lang, "multiplayer" if info.get("multiplayer") else "singleplayer"),
         t(lang, "copies_line", n=len(game["owners"]), owners=owners),
+        t(lang, "shareable_copies_line", n=shareable),
+        t(lang, "access_" + access),
+        sharing_warning(lang, game.get("exclude_reason", 0)),
+        t(lang, "availability_unknown"),
         f"\nhttps://store.steampowered.com/app/{appid}/",
     ]
     return {

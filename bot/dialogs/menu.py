@@ -1,3 +1,4 @@
+import logging
 from html import escape
 
 import aiohttp
@@ -18,9 +19,11 @@ from ..library import ALERTS
 from ..login import LoginRejected
 from ..states import FamilyView, Games, Menu
 from ..ui import GREEN, RED, Header, back_home, look, premium
+from . import require_owner
 
 STATUS_KEYS = {"none": "status_none", "pending": "status_pending", "blocked": "status_blocked"}
 PUBLICATION_SETTINGS = {"p": "publish_presence", "t": "publish_telegram"}
+log = logging.getLogger(__name__)
 
 
 async def language_getter(**kwargs):
@@ -89,7 +92,9 @@ async def login_getter(dialog_manager: DialogManager, lang: str, **kwargs):
     }
 
 
-async def settings_getter(account, db, lang: str = "en", **kwargs):
+async def settings_getter(dialog_manager: DialogManager, account, db, lang: str = "en", **kwargs):
+    if account:
+        dialog_manager.dialog_data.setdefault("family_id", account["family_id"])
     is_owner = role(account) == "owner"
     can_publish = bool(account and account["status"] == "approved" and account["refresh_token"])
     return {
@@ -147,6 +152,8 @@ async def set_publication(callback: CallbackQuery, widget, manager: DialogManage
 
 
 async def toggle_requests(callback: CallbackQuery, button: Button, manager: DialogManager):
+    if await require_owner(manager) is None:
+        return
     db = manager.middleware_data["db"]
     await db.set_notify_requests(callback.from_user.id, not await db.notify_requests(callback.from_user.id))
 
@@ -169,14 +176,20 @@ async def group_alerts_getter(account, db, families, bot, lang: str, **kwargs):
 
 
 async def toggle_alert(callback: CallbackQuery, widget, manager: DialogManager, kind: str):
+    account = await require_owner(manager)
+    if account is None:
+        return
     db = manager.middleware_data["db"]
-    family_id = manager.middleware_data["account"]["family_id"]
+    family_id = account["family_id"]
     alerts = alert_settings(await db.family(family_id))
     await db.update_family(family_id, alerts={**alerts, kind: not alerts[kind]})
 
 
 async def unlink_group(callback: CallbackQuery, button: Button, manager: DialogManager):
-    await manager.middleware_data["db"].update_family(manager.middleware_data["account"]["family_id"], notify_chat=None)
+    account = await require_owner(manager)
+    if account is None:
+        return
+    await manager.middleware_data["db"].update_family(account["family_id"], notify_chat=None)
 
 
 async def logout_getter(account, db, family: Family | None, **kwargs):
@@ -201,15 +214,27 @@ async def on_logout(callback: CallbackQuery, button: Button, manager: DialogMana
     families = manager.middleware_data["families"]
     family = manager.middleware_data["family"]
     new_owner = await families.leave(callback.from_user.id)
-    if new_owner is not None:
-        lang = await families.db.language(new_owner)
-        name = escape(family.snapshot["name"]) if family and family.snapshot else ""
-        await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
-        await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
     # Logout also forgets the language, so the user starts over with the language choice.
     manager.middleware_data.update(account=None, family=None, has_language=False)
-    await callback.answer(t(manager.middleware_data["lang"], "logged_out"))
-    await manager.start(Menu.language, mode=StartMode.RESET_STACK)
+    try:
+        await callback.answer(t(manager.middleware_data["lang"], "logged_out"))
+    except Exception:
+        log.exception("Could not answer logout callback for %s", callback.from_user.id)
+    try:
+        await manager.start(Menu.language, mode=StartMode.RESET_STACK)
+    except Exception:
+        log.exception("Could not reset menu after logout for %s", callback.from_user.id)
+    if new_owner is not None:
+        try:
+            lang = await families.db.language(new_owner)
+            name = escape(family.snapshot["name"]) if family and family.snapshot else ""
+            await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
+        except Exception:
+            log.exception("Could not notify new owner %s after logout", new_owner)
+        try:
+            await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
+        except Exception:
+            log.exception("Could not refresh new owner %s menu after logout", new_owner)
 
 
 menu_dialog = Dialog(

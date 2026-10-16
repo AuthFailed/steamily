@@ -1,5 +1,6 @@
 """Inline mode: `@bot game name` in any chat finds games and posts a card in the sender's language and currency."""
 
+import asyncio
 import logging
 from html import escape
 
@@ -16,16 +17,19 @@ from aiogram.types import (
 
 from .db import Db
 from .family import DEFAULT_COUNTRY, Families, accounts_by_steam, person_link, role
-from .i18n import DEFAULT, t
+from .i18n import DEFAULT, sharing_warning, t
 from .library import family_matches
 from .steam import search_store, store_cards
 
 log = logging.getLogger(__name__)
 router = Router()
 MAX_RESULTS = 15
+STORE_TIMEOUT = 2  # two optional Store calls must leave time to answer the inline query
 
 
-def card_text(lang: str, name: str, description: str, price: str | None, owners: list[str], url: str) -> str:
+def card_text(
+    lang: str, name: str, description: str, price: str | None, owners: list[str], url: str, exclude_reason: int
+) -> str:
     """owners: ready HTML links, one list line each."""
     owners_line = (
         t(lang, "inline_owners", names="".join(f"\n• {o}" for o in owners))
@@ -38,6 +42,7 @@ def card_text(lang: str, name: str, description: str, price: str | None, owners:
         "",
         f"💲 {escape(price or t(lang, 'price_unknown'))}",
         owners_line,
+        sharing_warning(lang, exclude_reason) or None,
         "",
         url,
     ]
@@ -63,12 +68,18 @@ async def search(query: InlineQuery, db: Db, families: Families):
     country = account["country"] or DEFAULT_COUNTRY
     term = query.query.strip()[:100]
     in_family = family_matches(family.apps, term)
-    from_store = await search_store(families.http, term, lang, country) if term else []
+    try:
+        async with asyncio.timeout(STORE_TIMEOUT):
+            from_store = await search_store(families.http, term, lang, country) if term else []
+    except Exception as error:
+        log.warning("Store search for inline query failed (%s)", type(error).__name__)
+        from_store = []
     appids = list(dict.fromkeys(in_family + from_store))[:MAX_RESULTS]
     try:
-        cards = await store_cards(families.http, appids, lang, country)
-    except Exception:  # still answer with what the family library knows
-        log.exception("Store details for inline search failed")
+        async with asyncio.timeout(STORE_TIMEOUT):
+            cards = await store_cards(families.http, appids, lang, country)
+    except Exception as error:  # still answer with what the family library knows
+        log.warning("Store details for inline search failed (%s)", type(error).__name__)
         cards = {}
 
     accounts = await accounts_by_steam(db, family.family_id)
@@ -87,6 +98,7 @@ async def search(query: InlineQuery, db: Db, families: Families):
         return
     names = {a["appid"]: a["name"] for a in family.apps}
     owners = {a["appid"]: a["owners"] for a in family.apps}
+    reasons = {a["appid"]: a.get("exclude_reason", 0) for a in family.apps}
     results = []
     for appid in appids:
         card = cards.get(appid) or {"name": names.get(appid), "description": "", "price_text": None, "thumbnail": None}
@@ -119,6 +131,7 @@ async def search(query: InlineQuery, db: Db, families: Families):
                         card["price_text"],
                         [person_link(family, o, accounts) for o in who],
                         url,
+                        reasons.get(appid, 0),
                     ),
                     parse_mode="HTML",
                     link_preview_options=LinkPreviewOptions(url=url, prefer_large_media=True),

@@ -34,7 +34,9 @@ class PublicationSettingsTest(unittest.IsolatedAsyncioTestCase):
             notify_requests=AsyncMock(return_value=True),
         )
         self.families = SimpleNamespace(_fetch=AsyncMock(return_value={"family_id": FAMILY, "members": [STEAM]}))
-        self.manager = SimpleNamespace(middleware_data={"db": self.db, "families": self.families, "lang": "en"})
+        self.manager = SimpleNamespace(
+            middleware_data={"db": self.db, "families": self.families, "lang": "en"}, dialog_data={}
+        )
         self.callback = SimpleNamespace(from_user=SimpleNamespace(id=TELEGRAM), answer=AsyncMock())
 
     async def click(self, item_id):
@@ -42,7 +44,7 @@ class PublicationSettingsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_settings_offer_independent_default_off_choices_in_both_languages(self):
         for lang in LANGUAGES:
-            data = await settings_getter(account(), self.db, lang=lang)
+            data = await settings_getter(self.manager, account(), self.db, lang=lang)
             self.assertTrue(data["can_publish"])
             self.assertEqual(
                 data["publication_items"],
@@ -52,16 +54,22 @@ class PublicationSettingsTest(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertTrue(t(lang, "publication_desc"))
-        data = await settings_getter(account(publish_presence=True), self.db)
+        data = await settings_getter(self.manager, account(publish_presence=True), self.db)
         self.assertEqual(data["publication_items"][0][0], f"p:{VERSION}:0")
         self.assertEqual(data["publication_items"][1][0], f"t:{VERSION}:1")
         self.assertLessEqual(len(f"12345678:publication:p:{VERSION}:1".encode()), 64)
 
     async def test_pending_blocked_logged_out_and_expired_accounts_have_no_controls(self):
         for row in (None, account(status="pending"), account(status="blocked"), account(refresh_token=None)):
-            data = await settings_getter(row, self.db)
+            data = await settings_getter(self.manager, row, self.db)
             self.assertFalse(data["can_publish"])
             self.assertEqual(data["publication_items"], [])
+
+    async def test_settings_keep_original_dialog_family_binding(self):
+        await settings_getter(self.manager, account(), self.db)
+        self.assertEqual(self.manager.dialog_data["family_id"], FAMILY)
+        await settings_getter(self.manager, account(family_id="other-family"), self.db)
+        self.assertEqual(self.manager.dialog_data["family_id"], FAMILY)
 
     async def test_enable_checks_fresh_membership_and_saves_only_sender_choice(self):
         for code, setting in (("p", "publish_presence"), ("t", "publish_telegram")):

@@ -1,16 +1,31 @@
 """Clicks through the real dialogs with aiogram-dialog's test client, backed by a test Postgres (no Steam)."""
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
-from aiogram.types import Chat, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, InlineQuery, Update, User
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.methods import SendMessage
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    ChatMemberLeft,
+    ChatMemberMember,
+    ChatMemberUpdated,
+    InlineQuery,
+    Message,
+    Update,
+    User,
+)
+from aiogram_dialog.api.entities import DialogAction, DialogUpdateEvent
+from aiogram_dialog.manager.updater import Updater
 from aiogram_dialog.test_tools import BotClient, MockMessageManager
 from aiogram_dialog.test_tools.keyboard import InlineButtonTextLocator as Btn
 from aiogram_dialog.test_tools.memory_storage import JsonMemoryStorage
 
-from bot.__main__ import create_dispatcher
+from bot.__main__ import AccountMiddleware, create_dispatcher
 from bot.db import SteamAlreadyLinked
 from bot.family import Families
 from bot.login import qr_png
@@ -35,6 +50,23 @@ class StubLogins:
 
     def cancel(self, telegram_id):
         self.cancelled.append(telegram_id)
+
+
+class AccountMiddlewareTest(unittest.IsolatedAsyncioTestCase):
+    async def test_background_updates_in_unloaded_groups_are_rejected(self):
+        event = DialogUpdateEvent(
+            from_user=User(id=PENDING, is_bot=False, first_name=""),
+            chat=Chat(id=-100, type=""),
+            action=DialogAction.UPDATE,
+            data={},
+            intent_id=None,
+            stack_id=None,
+            thread_id=None,
+            business_connection_id=None,
+        )
+        handler = AsyncMock()
+        await AccountMiddleware()(handler, event, {})
+        handler.assert_not_awaited()
 
 
 @needs_pg
@@ -98,9 +130,22 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
             },
         }
         self.messages.reset_history()
+        self.background_updates = []
+        process_update = Updater._process_update
+
+        async def track_background(updater, bot, update):
+            self.background_updates.append(asyncio.current_task())
+            return await process_update(updater, bot, update)
+
+        background = patch.object(Updater, "_process_update", track_background)
+        background.start()
+        self.addCleanup(background.stop)
 
     async def asyncTearDown(self):
-        await self.db.pool.close()
+        try:
+            await asyncio.gather(*self.background_updates)
+        finally:
+            await self.db.pool.close()
 
     def last(self):
         return self.messages.last_message()
@@ -198,9 +243,13 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("✏️ Rename family"))
         await self.fetch_members([BOB, CAROL])
 
-        with patch("bot.dialogs.family.rename_family", AsyncMock()) as rename:
+        with (
+            patch("bot.dialogs.family.rename_family", AsyncMock()) as rename,
+            patch.object(Message, "answer", AsyncMock()) as answer,
+        ):
             await client.send("Unauthorized name")
         rename.assert_not_awaited()
+        answer.assert_awaited_once()
         self.assertNotIn("Manage family", self.last().text)
         self.assertIn("Log in with Steam", self.buttons())
 
@@ -416,6 +465,82 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("◀️ Back"))
         self.assertIn("Manage family", self.last().text)  # back where it was opened
 
+    async def test_approval_refreshes_member_menu_without_erasing_telegram_profile(self):
+        await self.client(PENDING).send("/start")
+        await self.db.set_telegram_profile(PENDING, "carol_tg", "Carol T")
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("⏳ Carol"))
+        completed = asyncio.Event()
+        escaped = []
+        process_update = Updater._process_update
+
+        async def process_background(updater, bot, update):
+            try:
+                await process_update(updater, bot, update)
+            except Exception as error:
+                escaped.append(error)
+            finally:
+                completed.set()
+
+        with patch.object(Updater, "_process_update", process_background):
+            await client.click(self.last(), Btn("Approve"))
+            await asyncio.wait_for(completed.wait(), timeout=2)
+        self.assertFalse(escaped)
+        account = await self.db.account(PENDING)
+        self.assertEqual(account["status"], "approved")
+        self.assertEqual((account["tg_username"], account["tg_name"]), ("carol_tg", "Carol T"))
+        member_menu = [message for message in self.messages.sent_messages if message.chat.id == PENDING][-1]
+        buttons = [button.text for row in member_menu.reply_markup.inline_keyboard for button in row]
+        self.assertIn("Family library", buttons)
+
+    async def test_failed_approval_background_delivery_is_logged_without_failing_approval(self):
+        await self.client(PENDING).send("/start")
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("⏳ Carol"))
+        completed = asyncio.Event()
+        escaped = []
+        process_update = Updater._process_update
+        show_message = self.messages.show_message
+
+        async def process_background(updater, bot, update):
+            try:
+                await process_update(updater, bot, update)
+            except Exception as error:
+                escaped.append(error)
+            finally:
+                completed.set()
+
+        async def show_for_reachable_user(bot, new_message, old_message):
+            if new_message.chat.id == PENDING:
+                raise TelegramForbiddenError(
+                    method=SendMessage(chat_id=PENDING, text="menu"), message="bot was blocked by the user"
+                )
+            return await show_message(bot, new_message, old_message)
+
+        with (
+            patch.object(Updater, "_process_update", process_background),
+            patch.object(self.messages, "show_message", side_effect=show_for_reachable_user) as show,
+            patch.object(self.db, "set_status", wraps=self.db.set_status) as save_status,
+            self.assertLogs("bot.__main__", level="ERROR") as logged,
+        ):
+            await client.click(self.last(), Btn("Approve"))
+            await asyncio.wait_for(completed.wait(), timeout=2)
+        self.assertFalse(escaped)
+        self.assertTrue(any(call.args[1].chat.id == PENDING for call in show.await_args_list))
+        self.assertTrue(any(str(PENDING) in message for message in logged.output))
+        save_status.assert_awaited_once_with(
+            PENDING, "approved", family_id=FAMILY, members=self.families.get(FAMILY).members
+        )
+        self.assertEqual((await self.db.account(PENDING))["status"], "approved")
+        owner_menu = [message for message in self.messages.sent_messages if message.chat.id == OWNER][-1]
+        buttons = [button.text for row in owner_menu.reply_markup.inline_keyboard for button in row]
+        self.assertIn("Block", buttons)
+        self.assertNotIn("Approve", buttons)
+
     async def test_owner_group_alert_settings(self):
         self.families.bot_username = "family_steambot"
         client = self.client(OWNER)
@@ -447,6 +572,156 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
             await client.click(self.last(), Btn("✅ New games"))
         alerts = (await self.db.family(FAMILY))["alerts"]
         self.assertEqual((alerts["online"], alerts["games"]), (True, False))
+
+    async def test_stale_admin_card_cannot_change_a_target_in_another_family(self):
+        client = self.client(OWNER)
+        await self.db.ensure_family("8", "Other")
+        for button in ("Approve", "Block", "Remove"):
+            with self.subTest(button=button):
+                await self.db.save_account(PENDING, CAROL, FAMILY, "token")
+                await self.db.set_status(PENDING, "pending")
+                await self.open_bot_members(client)
+                await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+                await client.click(self.last(), Btn("⏳ Carol"))
+                card = self.last()
+                await self.db.save_account(PENDING, CAROL, "8", "token")
+                with patch.object(CallbackQuery, "answer", AsyncMock()) as answer:
+                    await client.click(card, Btn(button))
+                account = await self.db.account(PENDING)
+                self.assertIsNotNone(account)
+                self.assertEqual((account["family_id"], account["status"]), ("8", "pending"))
+                self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+
+    async def test_stale_admin_card_denies_a_former_owner(self):
+        client = self.client(OWNER)
+        for button in ("Approve", "Block", "Remove"):
+            with self.subTest(button=button):
+                await self.db.save_account(PENDING, CAROL, FAMILY, "token")
+                await self.db.set_status(PENDING, "pending")
+                await self.families.make_owner(FAMILY, OWNER)
+                await self.open_bot_members(client)
+                await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+                await client.click(self.last(), Btn("⏳ Carol"))
+                card = self.last()
+                await self.families.make_owner(FAMILY, FRIEND)
+                with patch.object(CallbackQuery, "answer", AsyncMock()) as answer:
+                    await client.click(card, Btn(button))
+                account = await self.db.account(PENDING)
+                self.assertIsNotNone(account)
+                self.assertEqual(account["status"], "pending")
+                self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+
+    async def test_owner_only_settings_deny_role_revocation(self):
+        client = self.client(OWNER)
+        await self.db.update_family(FAMILY, notify_chat=-500)
+        for button in ("New member alerts: on", "✅ New games", "✂️ Unlink group"):
+            with self.subTest(button=button):
+                await self.families.make_owner(FAMILY, OWNER)
+                await self.db.set_notify_requests(OWNER, True)
+                await client.send("/start")
+                await client.click(self.last(), Btn("Settings"))
+                if button != "New member alerts: on":
+                    with patch.object(
+                        type(client.bot), "get_chat", AsyncMock(return_value=Chat(id=-500, type="group", title="Group"))
+                    ):
+                        await client.click(self.last(), Btn("Group notifications"))
+                card = self.last()
+                before = dict(await self.db.family(FAMILY))
+                await self.families.make_owner(FAMILY, FRIEND)
+                with (
+                    patch.object(CallbackQuery, "answer", AsyncMock()) as answer,
+                    patch.object(
+                        type(client.bot), "get_chat", AsyncMock(return_value=Chat(id=-500, type="group", title="Group"))
+                    ),
+                ):
+                    await client.click(card, Btn(button))
+                after = await self.db.family(FAMILY)
+                self.assertEqual(after["notify_chat"], before["notify_chat"])
+                self.assertEqual(after["alerts"], before["alerts"])
+                self.assertTrue(await self.db.notify_requests(OWNER))
+                self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+
+    async def test_saved_steam_rename_denies_owner_revocation(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn("✏️ Rename family"))
+        await self.families.make_owner(FAMILY, FRIEND)
+        with (
+            patch("bot.dialogs.family.rename_family", AsyncMock()) as rename,
+            patch.object(Message, "answer", AsyncMock()) as answer,
+        ):
+            await client.send("Changed name")
+        rename.assert_not_awaited()
+        answer.assert_awaited_once()
+        self.assertIn("Family library", self.buttons())
+
+    async def test_saved_invite_input_denies_owner_revocation_before_steam_lookup(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn("➕ Invite member"))
+        await self.families.make_owner(FAMILY, FRIEND)
+        with (
+            patch("bot.dialogs.family.resolve_profile", AsyncMock()) as resolve,
+            patch.object(Message, "answer", AsyncMock()) as answer,
+        ):
+            await client.send("https://steamcommunity.com/id/someone")
+        resolve.assert_not_awaited()
+        answer.assert_awaited_once()
+        self.assertIn("Family library", self.buttons())
+
+    async def test_purchase_requests_deny_owner_revocation_before_steam_lookup(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        card = self.last()
+        await self.families.make_owner(FAMILY, FRIEND)
+        self.families.owner_token = AsyncMock(return_value="token")
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock()) as requests,
+            patch.object(CallbackQuery, "answer", AsyncMock()) as answer,
+        ):
+            await client.click(card, Btn("🛒 Purchase requests"))
+        requests.assert_not_awaited()
+        self.families.owner_token.assert_not_awaited()
+        self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+        self.assertIn("Family library", self.buttons())
+
+    async def test_saved_steam_invite_cannot_follow_owner_to_another_family(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn("➕ Invite member"))
+        with patch("bot.dialogs.family.resolve_profile", AsyncMock(return_value="76561198000000042")):
+            await client.send("https://steamcommunity.com/id/someone")
+        card = self.last()
+        await self.db.ensure_family("8", "Other")
+        await self.db.save_account(OWNER, ALICE, "8", "token")
+        await self.families.make_owner("8", OWNER)
+        self.families.get("8").snapshot = {**self.families.get(FAMILY).snapshot, "family_id": "8"}
+        self.families.owner_token = AsyncMock(return_value="token")
+        with (
+            patch("bot.dialogs.family.invite_member", AsyncMock()) as invite,
+            patch.object(CallbackQuery, "answer", AsyncMock()) as answer,
+        ):
+            await client.click(card, Btn("Child"))
+        invite.assert_not_awaited()
+        self.families.owner_token.assert_not_awaited()
+        self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+
+    async def test_purchase_requests_denies_a_deleted_account_and_keeps_home_usable(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        card = self.last()
+        await self.db.delete_account(OWNER)
+        self.families.owner_token = AsyncMock(return_value="token")
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock()) as requests,
+            patch.object(CallbackQuery, "answer", AsyncMock()) as answer,
+        ):
+            await client.click(card, Btn("🛒 Purchase requests"))
+        requests.assert_not_awaited()
+        self.families.owner_token.assert_not_awaited()
+        self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+        self.assertIn("Log in with Steam", self.buttons())
 
     async def test_adding_bot_to_group_links_it_for_the_owner(self):
         self.families.bot = AsyncMock()
@@ -486,6 +761,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
             await self.families.register(NEWCOMER, "duplicate", ALICE)
         await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
         await self.db.set_language(FRIEND, "ru")
+        self.families.get(FAMILY).apps[2]["exclude_reason"] = 1
         cards = {
             3: {"name": "Game 03", "description": "Desc", "price_text": "300₸", "thumbnail": "https://img/3.jpg"},
             999: {"name": "Other", "description": "", "price_text": "1 000₸", "thumbnail": None},
@@ -511,6 +787,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.id for r in results], ["3", "999"])  # family game first
         card = results[0].input_message_content.message_text
         self.assertIn("300₸", card)
+        self.assertIn("Семейный доступ исключён: исключено издателем", card)
         self.assertIn(
             'Есть в семье у:\n• <a href="https://steamcommunity.com/id/alice/">Alice</a> · '
             '<a href="https://t.me/alice_tg">@alice_tg</a>\n• <a href="https://steamcommunity.com/profiles/'
@@ -520,6 +797,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(results[0].reply_markup.inline_keyboard[0][0].url, "https://store.steampowered.com/app/3/")
         self.assertIn("В семье ни у кого нет", results[1].input_message_content.message_text)
+        self.assertNotIn("Семейный доступ исключён", results[1].input_message_content.message_text)
 
         answer.reset_mock()
         with patch("aiogram.types.InlineQuery.answer", answer):
