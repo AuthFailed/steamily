@@ -8,6 +8,10 @@ class Menu(StatesGroup):
     settings = State()
     group_alerts = State()
     logout = State()
+    deleted = State()
+    about = State()
+    privacy = State()
+    status = State()
 
 
 class Games(StatesGroup):

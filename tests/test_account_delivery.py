@@ -30,8 +30,13 @@ class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.family = SimpleNamespace(family_id="9", members={"alice", "bob"}, snapshot={"name": "Fam"})
         self.families = SimpleNamespace(
-            db=self.db, bot=AsyncMock(), leave=AsyncMock(return_value=200), get=MagicMock(return_value=self.family)
+            db=self.db,
+            bot=AsyncMock(),
+            leave=AsyncMock(return_value=200),
+            remove=AsyncMock(return_value=True),
+            get=MagicMock(return_value=self.family),
         )
+        self.logins = SimpleNamespace(forget=AsyncMock())
         self.background = SimpleNamespace(start=AsyncMock())
         self.manager = MagicMock(
             middleware_data={
@@ -41,6 +46,8 @@ class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 "account": {"telegram_id": 100},
                 "has_language": True,
                 "lang": "en",
+                "logins": self.logins,
+                "deleted_dialogs": [],
             },
             dialog_data={"telegram_id": 200, "family_id": "9"},
             start=AsyncMock(),
@@ -55,7 +62,8 @@ class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
         for key in ("account", "family"):
             self.assertIsNone(self.manager.middleware_data[key])
         self.assertFalse(self.manager.middleware_data["has_language"])
-        self.manager.start.assert_awaited_once_with(Menu.language, mode=StartMode.RESET_STACK)
+        self.manager.start.assert_awaited_once_with(Menu.deleted, mode=StartMode.RESET_STACK)
+        self.assertEqual(self.manager.middleware_data["deleted_dialogs"], [100])
 
     async def test_unreachable_successor_does_not_interrupt_logout_or_menu_refresh(self):
         menu_opened = []
@@ -125,23 +133,26 @@ class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.manager.middleware_data["account"])
 
     async def test_member_mutation_succeeds_once_despite_background_menu_failure(self):
-        for handler, status in ((approve, "approved"), (block, "blocked"), (remove, None)):
+        for handler, status in ((approve, "approved"), (block, "blocked")):
             for error in (RuntimeError("dialog unavailable"), TimeoutError("delivery timeout")):
                 with self.subTest(status=status, error=type(error).__name__):
                     self.setUp()
                     self.background.start.side_effect = error
                     with self.assertLogs("bot.dialogs.admin", level="ERROR"):
                         await handler(self.callback, None, self.manager)
-                    if status:
-                        self.db.set_status.assert_awaited_once_with(
-                            200, status, family_id="9", members=self.family.members if status == "approved" else None
-                        )
-                        self.db.delete_account.assert_not_awaited()
-                    else:
-                        self.db.delete_account.assert_awaited_once_with(200, family_id="9")
-                        self.db.set_status.assert_not_awaited()
-                        self.manager.switch_to.assert_awaited_once_with(Admin.members)
+                    self.db.set_status.assert_awaited_once_with(
+                        200, status, family_id="9", members=self.family.members if status == "approved" else None
+                    )
+                    self.families.remove.assert_not_awaited()
                     self.background.start.assert_awaited_once_with(Menu.main, mode=StartMode.RESET_STACK)
+
+    async def test_removal_cancels_login_without_recreating_deleted_dialogs(self):
+        await remove(self.callback, None, self.manager)
+        self.logins.forget.assert_awaited_once_with(200)
+        self.families.remove.assert_awaited_once_with(200, family_id="9")
+        self.background.start.assert_not_awaited()
+        self.assertNotIn("telegram_id", self.manager.dialog_data)
+        self.manager.switch_to.assert_awaited_once_with(Admin.members)
 
     async def test_unchanged_member_does_not_receive_a_menu(self):
         self.db.set_status.return_value = False
@@ -150,10 +161,10 @@ class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.background.start.assert_not_awaited()
 
     async def test_member_database_failure_propagates(self):
-        self.db.delete_account.side_effect = RuntimeError("database unavailable")
+        self.families.remove.side_effect = RuntimeError("database unavailable")
         with self.assertRaisesRegex(RuntimeError, "database unavailable"):
             await remove(self.callback, None, self.manager)
-        self.db.delete_account.assert_awaited_once_with(200, family_id="9")
+        self.families.remove.assert_awaited_once_with(200, family_id="9")
         self.background.start.assert_not_awaited()
         self.manager.switch_to.assert_not_awaited()
 

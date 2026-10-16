@@ -4,6 +4,9 @@ Observed library/membership state and its outgoing messages commit together in
 Postgres. Pending acquisition, membership and removal alerts survive restarts
 and are delivered even when the family has no working Steam login. Refreshes
 and deliveries are serialized per family in the single bot process.
+Removing the last registered account deletes the family's pending queue as part
+of [local data deletion](public-instance.md); an expired Steam login alone does
+not remove a registered account.
 
 Delivery checks run every 5 seconds, with at most 20 messages per family per
 pass. Network/server errors wait 60 seconds; Telegram flood-control errors wait

@@ -5,6 +5,7 @@ from html import escape
 import aiohttp
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.dispatcher.flags import get_flag
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message
@@ -14,6 +15,7 @@ from aiogram_dialog.api.exceptions import OutdatedIntent, UnknownIntent
 from aiogram_dialog.utils import remove_intent_id
 from aiogram_dialog.widgets.kbd import Start, SwitchTo
 
+from . import charts
 from .config import ConfigError, load_config
 from .db import Db, PgStorage
 from .dialogs import deny_action
@@ -78,7 +80,13 @@ class AccountMiddleware(BaseMiddleware):
             await data["db"].set_telegram_profile(user.id, user.username, user.full_name)  # kept current for links
         data["account"] = account
         data["family"] = data["families"].get(account["family_id"]) if account else None
-        return await handler(event, data)
+        data["deleted_dialogs"] = deleted_dialogs = []
+        try:
+            return await handler(event, data)
+        finally:
+            for telegram_id in deleted_dialogs:
+                # Dialog middleware saves the final screen after its callback returns.
+                await data["db"].delete_dialogs(telegram_id)
 
 
 OWNER_STATES = {
@@ -102,7 +110,7 @@ class AccessMiddleware(BaseMiddleware):
         account = data["account"]
         family_id = account["family_id"] if account else None
         user_role = role(account)
-        if manager.has_context():
+        if manager.has_context() and not get_flag(data, "public_info"):
             context = manager.current_context()
             states = [context.state]
             widget_id = ""
@@ -141,6 +149,14 @@ class AccessMiddleware(BaseMiddleware):
 async def start(message: Message, dialog_manager: DialogManager, logins: Logins, has_language: bool):
     logins.cancel(message.from_user.id)
     await dialog_manager.start(Menu.main if has_language else Menu.language, mode=StartMode.RESET_STACK)
+
+
+@router.message(Command("about", "privacy", "status", "delete"), F.chat.type == "private", flags={"public_info": True})
+async def public_info(message: Message, dialog_manager: DialogManager, logins: Logins):
+    logins.cancel(message.from_user.id)
+    command = message.text.split()[0].split("@")[0]
+    state = {"/about": Menu.about, "/privacy": Menu.privacy, "/status": Menu.status, "/delete": Menu.logout}[command]
+    await dialog_manager.start(state, mode=StartMode.RESET_STACK)
 
 
 @router.message(Command("link"), F.chat.type != "private")
@@ -221,6 +237,7 @@ async def main() -> None:
     except ConfigError as error:
         raise SystemExit(str(error)) from None
     STATUS_PATH.unlink(missing_ok=True)
+    charts.reset_cache()
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     try:
         db = await Db.connect(settings.database_url, settings.secret_key)

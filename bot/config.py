@@ -81,3 +81,5 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
 # Steam asks users to pick the location nearest to the sign-in, which is where this bot's server runs,
 # e.g. "Vienna, Wien, AT". Unset, the login steps describe it in general words.
 LOGIN_LOCATION = os.environ.get("LOGIN_LOCATION", "").strip()
+INSTANCE_OPERATOR = os.environ.get("INSTANCE_OPERATOR", "").strip()
+INSTANCE_HOSTING = os.environ.get("INSTANCE_HOSTING", "").strip()
