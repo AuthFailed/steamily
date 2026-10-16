@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from copy import deepcopy
+from itertools import count
 from unittest.mock import AsyncMock, patch
 
 from bot.db import Db
@@ -41,9 +42,28 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
         async def update_family(family_id, **values):
             self.rows[family_id].update(deepcopy(values))
 
+        pending, alert_ids = {}, count(1)
+
+        async def observe_family(family_id, state, name, alerts):
+            await update_family(family_id, state=state, name=name)
+            for alert in alerts:
+                alert_id = next(alert_ids)
+                pending[alert_id] = {
+                    **deepcopy(alert),
+                    "id": alert_id,
+                    "family_id": family_id,
+                    "chat_id": self.rows[family_id]["notify_chat"],
+                    "link_version": 0,
+                }
+
         db = AsyncMock(spec=Db)
         db.family.side_effect = family
         db.update_family.side_effect = update_family
+        db.observe_family.side_effect = observe_family
+        db.pending_alerts.side_effect = lambda family_id, now: [
+            alert for alert in pending.values() if alert["family_id"] == family_id
+        ]
+        db.delete_alert.side_effect = pending.pop
         db.family_accounts.return_value = []
         db.store_cache.return_value = {}
         self.bot = AsyncMock()
@@ -96,7 +116,14 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
             "🎮 New Steam Family game\nPortal 2\nAdded by: Alice\nhttps://store.steampowered.com/app/620/",
             parse_mode=None,
         )
-        self.assertEqual(self.rows["9"]["state"], {"members": [ALICE], "ownership": {"620": [ALICE]}})
+        self.assertEqual(
+            self.rows["9"]["state"],
+            {
+                "members": [ALICE],
+                "ownership": {"620": [ALICE]},
+                "observed": {"members": [ALICE], "apps": [{"appid": 620, "name": "Portal 2"}]},
+            },
+        )
 
     async def test_older_fetch_cannot_overwrite_newer_snapshot_or_saved_name(self):
         fetching, release = asyncio.Event(), asyncio.Event()
