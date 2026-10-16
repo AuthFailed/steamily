@@ -270,6 +270,44 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.save_account(30, "1", "9", "latest-token")
         self.assertEqual(self.db.refresh_token(await self.db.account(30)), "latest-token")
 
+    async def test_status_changes_are_family_scoped_and_report_matches(self):
+        await self.db.save_account(10, "1", "9", "token")
+        self.assertFalse(await self.db.set_status(99, "approved", family_id="9"))
+        self.assertFalse(await self.db.set_status(10, "approved", family_id="8"))
+        self.assertEqual((await self.db.account(10))["status"], "pending")
+        self.assertTrue(await self.db.set_status(10, "approved", family_id="9"))
+        self.assertEqual((await self.db.account(10))["status"], "approved")
+        self.assertTrue(await self.db.set_status(10, "blocked"))
+        self.assertEqual((await self.db.account(10))["status"], "blocked")
+        self.assertFalse(await self.db.set_status(99, "approved"))
+
+    async def test_account_deletion_is_family_scoped_and_reports_matches(self):
+        await self.db.save_account(10, "1", "9", "token")
+        self.assertFalse(await self.db.delete_account(99, family_id="9"))
+        self.assertFalse(await self.db.delete_account(10, family_id="8"))
+        self.assertIsNotNone(await self.db.account(10))
+        self.assertTrue(await self.db.delete_account(10, family_id="9"))
+        self.assertIsNone(await self.db.account(10))
+        await self.db.save_account(10, "1", "9", "token")
+        self.assertTrue(await self.db.delete_account(10))
+        self.assertIsNone(await self.db.account(10))
+        self.assertFalse(await self.db.delete_account(10))
+
+    async def test_scoped_mutations_reject_a_member_who_moved_after_the_caller_read(self):
+        await self.db.ensure_family("8", "Other family")
+        for status in ("approved", None):
+            with self.subTest(status=status):
+                await self.db.save_account(10, "1", "9", "token")
+                stale_account = await self.db.account(10)
+                await self.db.save_account(10, "1", "8", "new-token")
+                moved_account = await self.db.account(10)
+                if status is None:
+                    changed = await self.db.delete_account(10, family_id=stale_account["family_id"])
+                else:
+                    changed = await self.db.set_status(10, status, family_id=stale_account["family_id"])
+                self.assertFalse(changed)
+                self.assertEqual(await self.db.account(10), moved_account)
+
     async def test_steam_uniqueness_also_blocks_direct_sql_writes(self):
         await self.db.save_account(10, "1", "9", "token")
         with self.assertRaises(asyncpg.UniqueViolationError):

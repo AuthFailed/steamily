@@ -16,6 +16,7 @@ from aiogram_dialog.widgets.kbd import Start, SwitchTo
 
 from .config import poll_seconds, required
 from .db import Db, PgStorage
+from .dialogs import deny_action
 from .dialogs.admin import admin_dialog
 from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
@@ -93,20 +94,23 @@ class AccessMiddleware(BaseMiddleware):
                 widget = manager.dialog().find(widget_id)
                 if isinstance(widget, (Start, SwitchTo)):
                     states.append(widget.state)
+            owner_action = any(state in OWNER_STATES for state in states) or (
+                context.state == Menu.settings and widget_id in {"requests_on", "requests_off"}
+            )
             denied = context.dialog_data.get("_family_id") != family_id
-            denied |= any(state in OWNER_STATES for state in states) and user_role != "owner"
+            denied |= owner_action and user_role != "owner"
             denied |= any(state.group in (Games, FamilyView, Admin) for state in states) and user_role not in (
                 "member",
                 "owner",
             )
-            denied |= (
-                context.state == Menu.settings and widget_id in {"requests_on", "requests_off"} and user_role != "owner"
-            )
             if denied:
-                await manager.start(Menu.main, mode=StartMode.RESET_STACK)
+                if owner_action:
+                    await deny_action(manager)
+                else:
+                    await manager.start(Menu.main, mode=StartMode.RESET_STACK)
+                    if isinstance(event, CallbackQuery):
+                        await manager.answer_callback()
                 manager.dialog_data["_family_id"] = family_id
-                if isinstance(event, CallbackQuery):
-                    await manager.answer_callback()
                 return None
         result = await handler(event, data)
         if manager.has_context():
