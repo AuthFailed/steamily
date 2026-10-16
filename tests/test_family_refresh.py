@@ -322,3 +322,25 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.families.get("9").snapshot, snapshot())
         self.assertEqual(self.rows["9"], before)
         self.bot.send_message.assert_not_awaited()
+
+    async def test_queued_refresh_does_not_recreate_a_forgotten_family(self):
+        fetching, release = asyncio.Event(), asyncio.Event()
+
+        async def fetch(family_id):
+            fetching.set()
+            await release.wait()
+            return snapshot([PORTAL])
+
+        self.fetch.side_effect = fetch
+        first = await self.start_refresh()
+        await asyncio.wait_for(fetching.wait(), timeout=2)
+        queued = await self.start_refresh()
+        self.families._forget_family("9")
+        release.set()
+        await self.finish(first, queued)
+
+        self.fetch.assert_awaited_once()
+        self.families.db.observe_family.assert_not_awaited()
+        self.assertNotIn("9", self.families.items)
+        self.assertNotIn("9", self.families.presence)
+        self.assertNotIn("9", self.families.delivery_locks)
