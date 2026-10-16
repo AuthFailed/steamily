@@ -1,3 +1,4 @@
+import logging
 from html import escape
 
 from aiogram import F
@@ -14,6 +15,7 @@ from ..ui import GREEN, RED, Header, back_home, look
 from . import deny_action, require_owner
 
 STATUS_ICONS = {"pending": "⏳", "approved": "✅", "blocked": "⛔"}
+log = logging.getLogger(__name__)
 
 
 async def members_getter(db: Db, family: Family, account, **kwargs):
@@ -77,7 +79,10 @@ async def set_status(manager: DialogManager, status: str | None) -> bool:
         await deny_action(manager, "member_gone")
         return False
     # Reset the user's own dialogs so they immediately see their new access level.
-    await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
+    try:
+        await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
+    except Exception:
+        log.exception("Could not refresh member %s menu after status change", telegram_id)
     return True
 
 

@@ -1,3 +1,4 @@
+import logging
 from html import escape
 
 from aiogram import F
@@ -20,6 +21,7 @@ from ..ui import GREEN, RED, Header, back_home, look, premium
 from . import require_owner
 
 STATUS_KEYS = {"none": "status_none", "pending": "status_pending", "blocked": "status_blocked"}
+log = logging.getLogger(__name__)
 
 
 async def language_getter(**kwargs):
@@ -162,15 +164,27 @@ async def on_logout(callback: CallbackQuery, button: Button, manager: DialogMana
     families = manager.middleware_data["families"]
     family = manager.middleware_data["family"]
     new_owner = await families.leave(callback.from_user.id)
-    if new_owner is not None:
-        lang = await families.db.language(new_owner)
-        name = escape(family.snapshot["name"]) if family and family.snapshot else ""
-        await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
-        await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
     # Logout also forgets the language, so the user starts over with the language choice.
     manager.middleware_data.update(account=None, family=None, has_language=False)
-    await callback.answer(t(manager.middleware_data["lang"], "logged_out"))
-    await manager.start(Menu.language, mode=StartMode.RESET_STACK)
+    try:
+        await callback.answer(t(manager.middleware_data["lang"], "logged_out"))
+    except Exception:
+        log.exception("Could not answer logout callback for %s", callback.from_user.id)
+    try:
+        await manager.start(Menu.language, mode=StartMode.RESET_STACK)
+    except Exception:
+        log.exception("Could not reset menu after logout for %s", callback.from_user.id)
+    if new_owner is not None:
+        try:
+            lang = await families.db.language(new_owner)
+            name = escape(family.snapshot["name"]) if family and family.snapshot else ""
+            await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
+        except Exception:
+            log.exception("Could not notify new owner %s after logout", new_owner)
+        try:
+            await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
+        except Exception:
+            log.exception("Could not refresh new owner %s menu after logout", new_owner)
 
 
 menu_dialog = Dialog(
