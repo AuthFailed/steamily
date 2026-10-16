@@ -17,7 +17,7 @@ from aiogram.types import (
 
 from .db import Db
 from .family import DEFAULT_COUNTRY, Families, accounts_by_steam, person_link, role
-from .i18n import DEFAULT, t
+from .i18n import DEFAULT, sharing_warning, t
 from .library import family_matches
 from .steam import search_store, store_cards
 
@@ -27,7 +27,9 @@ MAX_RESULTS = 15
 STORE_TIMEOUT = 2  # two optional Store calls must leave time to answer the inline query
 
 
-def card_text(lang: str, name: str, description: str, price: str | None, owners: list[str], url: str) -> str:
+def card_text(
+    lang: str, name: str, description: str, price: str | None, owners: list[str], url: str, exclude_reason: int
+) -> str:
     """owners: ready HTML links, one list line each."""
     owners_line = (
         t(lang, "inline_owners", names="".join(f"\n• {o}" for o in owners))
@@ -40,6 +42,7 @@ def card_text(lang: str, name: str, description: str, price: str | None, owners:
         "",
         f"💲 {escape(price or t(lang, 'price_unknown'))}",
         owners_line,
+        sharing_warning(lang, exclude_reason) or None,
         "",
         url,
     ]
@@ -82,6 +85,7 @@ async def search(query: InlineQuery, db: Db, families: Families):
     names = {a["appid"]: a["name"] for a in family.apps}
     accounts = await accounts_by_steam(db, family.family_id)
     owners = {a["appid"]: a["owners"] for a in family.apps}
+    reasons = {a["appid"]: a.get("exclude_reason", 0) for a in family.apps}
     results = []
     for appid in appids:
         card = cards.get(appid) or {"name": names.get(appid), "description": "", "price_text": None, "thumbnail": None}
@@ -114,6 +118,7 @@ async def search(query: InlineQuery, db: Db, families: Families):
                         card["price_text"],
                         [person_link(family, o, accounts) for o in who],
                         url,
+                        reasons.get(appid, 0),
                     ),
                     parse_mode="HTML",
                     link_preview_options=LinkPreviewOptions(url=url, prefer_large_media=True),
