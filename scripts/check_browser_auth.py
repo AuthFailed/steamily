@@ -145,7 +145,7 @@ def save_report(root: Path, report: dict) -> None:
 
 
 async def run(root: Path, resume: bool) -> bool:
-    from scripts.steam_browser_session import (
+    from bot.steam_browser import (
         BROWSER_HEADERS,
         begin_browser_login,
         finalize_login,

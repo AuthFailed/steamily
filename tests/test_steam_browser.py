@@ -9,18 +9,21 @@ import aiohttp
 from multidict import CIMultiDict
 from yarl import URL
 
-from bot.steam_auth import SteamError, TokenRejected, decode, encode
-from scripts import steam_browser_session as browser
+from bot import steam_browser as browser
+from bot.steam_auth import HEADERS, SteamError, TokenRejected, decode, encode
 
 ALICE = "76561198000000001"
 BOB = "76561198000000002"
 LOGIN = "https://login.steampowered.com"
 POINTS = "https://store.steampowered.com/pointssummary/ajaxgetasyncconfig"
+STORE = "https://store.steampowered.com/login/settoken"
 REFRESH_URL = LOGIN + "/jwt/refresh?redir=https%3A%2F%2Fstore.steampowered.com%2Fpointssummary%2Fajaxgetasyncconfig"
 
 
-def token(steam_id=ALICE, exp=None):
+def token(steam_id=ALICE, exp=None, aud=None):
     payload = {"sub": steam_id, "exp": exp if exp is not None else int(time.time()) + 3600}
+    if aud is not None:
+        payload["aud"] = aud
     encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return "x." + encoded + ".y"
 
@@ -137,7 +140,7 @@ class BrowserLoginTest(unittest.IsolatedAsyncioTestCase):
         refresh, durable = token(), cookie()
         http = HTTP(
             Response(
-                {"steamID": ALICE, "transfer_info": [{"url": POINTS, "params": {"nonce": "transfer-secret"}}]},
+                {"steamID": ALICE, "transfer_info": [{"url": STORE, "params": {"nonce": "transfer-secret"}}]},
                 cookies={"steamRefresh_steam": durable},
             ),
             Response({"result": 1}, cookies={"steamLoginSecure": cookie()}),
@@ -159,7 +162,7 @@ class BrowserLoginTest(unittest.IsolatedAsyncioTestCase):
     async def test_finalization_persists_durable_cookie_before_transfer_failure(self):
         durable = cookie()
         http = HTTP(
-            Response({"transfer_info": [{"url": POINTS, "params": {}}]}, cookies={"steamRefresh_steam": durable}),
+            Response({"transfer_info": [{"url": STORE, "params": {}}]}, cookies={"steamRefresh_steam": durable}),
             Response("unavailable", status=500),
         )
 
@@ -181,18 +184,43 @@ class BrowserLoginTest(unittest.IsolatedAsyncioTestCase):
             await browser.finalize_login(http, token(), ALICE, on_refresh=save)
         save.assert_awaited_once_with(durable)
 
-    async def test_finalization_accepts_official_help_domain_transfer(self):
-        destination = "https://help.steampowered.com/login/settoken"
-        durable = cookie()
+    async def test_finalization_only_sends_credentials_to_exact_store_transfer(self):
+        destinations = ["https://help.steampowered.com/login/settoken", "https://unsupported.example/login/settoken"]
+        for destination in destinations:
+            durable = cookie()
+            http = HTTP(
+                Response(
+                    {
+                        "transfer_info": [
+                            {"url": destination, "params": {"auth": "skip-secret"}},
+                            {"url": STORE, "params": {"auth": "store-secret"}},
+                        ]
+                    },
+                    cookies={"steamRefresh_steam": durable},
+                ),
+                Response({"result": 1}, cookies={"steamLoginSecure": cookie()}),
+            )
+            with self.subTest(destination=destination):
+                self.assertEqual(await browser.finalize_login(http, token(), ALICE), durable)
+                self.assertEqual([request[1] for request in http.requests], [LOGIN + "/jwt/finalizelogin", STORE])
+
+    async def test_finalization_requires_a_store_transfer(self):
+        for destination in ["https://help.steampowered.com/login/settoken", POINTS]:
+            http = HTTP(
+                Response(
+                    {"transfer_info": [{"url": destination, "params": {}}]}, cookies={"steamRefresh_steam": cookie()}
+                )
+            )
+            with self.subTest(destination=destination), self.assertRaises(TokenRejected):
+                await browser.finalize_login(http, token(), ALICE)
+            self.assertEqual(len(http.requests), 1)
+
+    async def test_store_transfer_accepts_non_json_body_with_valid_secure_cookie(self):
         http = HTTP(
-            Response(
-                {"transfer_info": [{"url": destination, "params": {"auth": "transfer-secret"}}]},
-                cookies={"steamRefresh_steam": durable},
-            ),
-            Response({"result": 1}, cookies={"steamLoginSecure": cookie()}),
+            Response({"transfer_info": [{"url": STORE, "params": {}}]}, cookies={"steamRefresh_steam": cookie()}),
+            Response("<html>ok</html>", cookies={"steamLoginSecure": cookie()}),
         )
-        self.assertEqual(await browser.finalize_login(http, token(), ALICE), durable)
-        self.assertEqual(http.requests[1][1], destination)
+        self.assertEqual(await browser.finalize_login(http, token(), ALICE), cookie())
 
     async def test_finalization_requires_a_durable_cookie_and_valid_transfers(self):
         for body, cookies in [
@@ -206,20 +234,16 @@ class BrowserLoginTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises((RuntimeError, TokenRejected)):
                     await browser.finalize_login(HTTP(Response(body, cookies=cookies)), token(), ALICE)
 
-    async def test_hostile_transfer_is_rejected_before_any_transfer_request(self):
+    async def test_unsafe_store_destinations_are_rejected_without_requests(self):
         for url in [
-            "https://evil.example/x",
-            "http://store.steampowered.com/x",
-            "https://user:password@store.steampowered.com/x",
-            "https://store.steampowered.com:444/x",
+            "http://store.steampowered.com/login/settoken",
+            "https://user:password@store.steampowered.com/login/settoken",
+            "https://store.steampowered.com:444/login/settoken",
         ]:
             http = HTTP(
-                Response(
-                    {"transfer_info": [{"url": POINTS, "params": {}}, {"url": url, "params": {}}]},
-                    cookies={"steamRefresh_steam": cookie()},
-                )
+                Response({"transfer_info": [{"url": url, "params": {}}]}, cookies={"steamRefresh_steam": cookie()})
             )
-            with self.subTest(url=url), self.assertRaises(RuntimeError):
+            with self.subTest(url=url), self.assertRaises((RuntimeError, TokenRejected)):
                 await browser.finalize_login(http, token(), ALICE)
             self.assertEqual(len(http.requests), 1)
 
@@ -227,7 +251,7 @@ class BrowserLoginTest(unittest.IsolatedAsyncioTestCase):
         for params, secure in [({"steamID": BOB}, cookie()), ({}, cookie(BOB)), ({}, None)]:
             http = HTTP(
                 Response(
-                    {"transfer_info": [{"url": POINTS, "params": params}]}, cookies={"steamRefresh_steam": cookie()}
+                    {"transfer_info": [{"url": STORE, "params": params}]}, cookies={"steamRefresh_steam": cookie()}
                 ),
                 Response({"result": 1}, cookies={"steamLoginSecure": secure} if secure else {}),
             )
@@ -310,22 +334,30 @@ class BrowserRenewalTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("secret", str(error.exception))
             self.assertNotIn(url, str(error.exception))
 
-    async def test_redirect_limit_and_login_page_reject_expired_session(self):
+    async def test_redirect_limit_and_ambiguous_payloads_preserve_session(self):
         http = HTTP(*(Response(status=302, headers={"Location": POINTS}) for _ in range(7)))
         with self.assertRaises(RuntimeError):
             await browser.renew_access_token(http, cookie(), ALICE)
         self.assertLessEqual(len(http.requests), 6)
         for body in [
-            "<html>Log in</html>",
+            "<html>Temporary outage</html>",
             {"success": 1, "data": []},
             {"webapi_token": ""},
             {"success": 0, "webapi_token": token()},
-            {"webapi_token": "malformed"},
-            {"webapi_token": token(BOB)},
-            {"webapi_token": token(exp=1)},
+            {"error": "temporary"},
+            [],
+            None,
         ]:
-            with self.subTest(body=body), self.assertRaises(TokenRejected):
-                await browser.renew_access_token(HTTP(Response(body)), cookie(), ALICE)
+            durable = cookie()
+            save = AsyncMock()
+            with self.subTest(body=body), self.assertRaises(RuntimeError):
+                await browser.renew_access_token(HTTP(Response(body)), durable, ALICE, on_refresh=save)
+            save.assert_not_awaited()
+
+    async def test_inconsistent_or_expired_access_token_is_rejected(self):
+        for access in ["malformed", token(BOB), token(exp=1)]:
+            with self.subTest(access=access), self.assertRaises(TokenRejected):
+                await browser.renew_access_token(HTTP(Response({"webapi_token": access})), cookie(), ALICE)
 
     async def test_bad_input_or_rotated_cookie_is_rejected(self):
         for durable in ["garbage", cookie(BOB), BOB + "%7C%7C" + token(), "", token(exp=1)]:
@@ -370,6 +402,72 @@ class BrowserRenewalTest(unittest.IsolatedAsyncioTestCase):
                 await browser.renew_access_token(HTTP(response), cookie(), ALICE)
             self.assertNotIn("secret", str(error.exception))
             self.assertIsNone(error.exception.__cause__)
+
+
+class SessionRevocationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_revoke_sends_only_this_browser_refresh_jwt_and_permanent_action(self):
+        raw = token(aud=["web", "derive"])
+        for credential in [raw, ALICE + "%7C%7C" + raw]:
+            rpc = AsyncMock(return_value={})
+            with self.subTest(encoded="%7C" in credential), patch.object(browser, "call", rpc):
+                await browser.revoke_session(None, credential, ALICE)
+            rpc.assert_awaited_once_with(None, "RevokeToken", [(1, raw), (2, 1)], headers=browser.BROWSER_HEADERS)
+
+    async def test_legacy_mobile_refresh_jwt_can_revoke_just_its_session(self):
+        raw = token(aud=["mobile", "derive"])
+        with patch.object(browser, "call", AsyncMock(return_value={})) as rpc:
+            await browser.revoke_session(None, raw, ALICE)
+        rpc.assert_awaited_once_with(None, "RevokeToken", [(1, raw), (2, 1)], headers=HEADERS)
+
+    async def test_raw_mobile_revoke_keeps_legacy_headers_when_web_audience_is_also_present(self):
+        raw = token(aud=["mobile", "web", "derive"])
+        with patch.object(browser, "call", AsyncMock(return_value={})) as rpc:
+            await browser.revoke_session(None, raw, ALICE)
+        rpc.assert_awaited_once_with(None, "RevokeToken", [(1, raw), (2, 1)], headers=HEADERS)
+
+    async def test_revoke_validates_identity_and_refresh_audience_before_network(self):
+        for credential in [
+            token(BOB, aud=["web", "derive"]),
+            token(aud=["web"]),
+            token(aud=["derive"]),
+            token(aud=["derive", {}]),
+            BOB + "%7C%7C" + token(aud=["web", "derive"]),
+            "bad",
+        ]:
+            with self.subTest(credential=credential), patch.object(browser, "call", AsyncMock()) as rpc:
+                with self.assertRaises(TokenRejected):
+                    await browser.revoke_session(None, credential, ALICE)
+                rpc.assert_not_awaited()
+
+    async def test_expired_jwt_is_sent_to_steam_and_definitive_rejection_is_idempotent(self):
+        raw = token(exp=1, aud=["web", "derive"])
+        for status in [401, 403]:
+            with patch.object(browser, "call", AsyncMock(side_effect=SteamError(status, "secret"))) as rpc:
+                await browser.revoke_session(None, raw, ALICE)
+            rpc.assert_awaited_once()
+
+    async def test_explicit_revoked_or_expired_http_200_result_is_idempotent(self):
+        raw = token(aud=["web", "derive"])
+        for eresult in [26, 27]:
+            failure = SteamError(200, "already rejected")
+            failure.eresult = eresult
+            with patch.object(browser, "call", AsyncMock(side_effect=failure)) as rpc:
+                await browser.revoke_session(None, raw, ALICE)
+            rpc.assert_awaited_once()
+
+    async def test_revoke_outage_is_redacted_and_never_retried(self):
+        raw = token(aud=["web", "derive"])
+        for failure in [
+            SteamError(503, "secret-token"),
+            SteamError(200, "secret-token"),
+            aiohttp.ClientError("secret-token"),
+        ]:
+            with patch.object(browser, "call", AsyncMock(side_effect=failure)) as rpc:
+                with self.assertRaises(RuntimeError) as error:
+                    await browser.revoke_session(None, raw, ALICE)
+            self.assertNotIn("secret", str(error.exception))
+            self.assertIsNone(error.exception.__cause__)
+            rpc.assert_awaited_once()
 
 
 if __name__ == "__main__":

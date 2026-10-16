@@ -1,10 +1,11 @@
-"""Steam mobile-app auth over the WebAPI, the same protocol steam-session (Node) used."""
+"""Steam access tokens for browser sessions and previously stored mobile sessions."""
 
 import asyncio
 import base64
 import json
 import struct
 import time
+from urllib.parse import unquote
 
 import aiohttp
 
@@ -14,16 +15,16 @@ HEADERS = {
     "user-agent": "okhttp/4.9.2",
     "cookie": "mobileClient=android; mobileClientVersion=777777 3.10.3",
 }
-MOBILE_APP = 3
-ANDROID_UNKNOWN = -500
 ACCESS_TOKEN_MARGIN = 300
 RENEW_INTERVAL = 24 * 60 * 60
+AUTH_REJECTIONS = {5, 15, 26, 27, 43}  # InvalidPassword, AccessDenied, Revoked, Expired, AccountDisabled.
 
 
 class SteamError(RuntimeError):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, eresult: int | None = None):
         super().__init__(message)
         self.status = status
+        self.eresult = eresult
 
 
 class TokenRejected(Exception):
@@ -99,11 +100,17 @@ async def call(http: aiohttp.ClientSession, method: str, fields, *, headers: dic
         f"{API}/{method}/v1/", data=form, headers=HEADERS if headers is None else headers, allow_redirects=False
     ) as response:
         body = await response.read()
-        eresult = response.headers.get("x-eresult", "1")
-        if response.status != 200 or eresult != "1":
+        raw_result = response.headers.get("x-eresult", "1")
+        try:
+            eresult = int(raw_result)
+        except (TypeError, ValueError):
+            eresult = None
+        if response.status != 200 or eresult != 1:
             message = response.headers.get("x-error_message", "")
             raise SteamError(
-                response.status, f"Steam {method} failed: HTTP {response.status}, EResult {eresult} {message}".strip()
+                response.status,
+                f"Steam {method} failed: HTTP {response.status}, EResult {eresult} {message}".strip(),
+                eresult,
             )
     return decode(body)
 
@@ -121,6 +128,17 @@ def expires_within(token: str | None, seconds: int, now: float | None = None) ->
     return not isinstance(exp, (int, float)) or exp <= (now or time.time()) + seconds
 
 
+def is_browser_token(token: str) -> bool:
+    value = unquote(token)
+    if "||" in value:
+        return True
+    payload = jwt_payload(value)
+    audience = payload.get("aud", []) if isinstance(payload, dict) else []
+    return audience == "web" or (
+        isinstance(audience, list) and "web" in audience and "mobile" not in audience and "client" not in audience
+    )
+
+
 class SteamAuth:
     """Access tokens for one account; on_renew(token, renewed_at) persists credentials together."""
 
@@ -133,8 +151,9 @@ class SteamAuth:
         self.on_renew = on_renew
         self.access_token: str | None = None
         self.last_renewal = last_renewal
-        self._pending_renewal: tuple[str, float, str] | None = None
+        self._pending_renewal: tuple[str, float, str | None] | None = None
         self._lock = asyncio.Lock()
+        self._revoked = False
 
     async def _persist_renewal(self) -> None:
         if self._pending_renewal is not None:
@@ -148,9 +167,13 @@ class SteamAuth:
             return await self._get_access_token()
 
     async def _get_access_token(self) -> str:
+        if self._revoked:
+            raise TokenRejected("This Steam session has been revoked")
         await self._persist_renewal()
         if not expires_within(self.access_token, ACCESS_TOKEN_MARGIN):
             return self.access_token
+        if is_browser_token(self.refresh_token):
+            return await self._get_browser_access_token()
         renew = time.time() - self.last_renewal >= RENEW_INTERVAL
         try:
             response = await call(
@@ -163,11 +186,11 @@ class SteamAuth:
                 ],
             )
         except SteamError as error:
-            if error.status in (200, 401, 403):  # an answer about the token, not an outage
-                raise TokenRejected(str(error)) from error
+            if error.status in (401, 403) or error.status == 200 and error.eresult in AUTH_REJECTIONS:
+                raise TokenRejected("Steam rejected the refresh token") from None
             raise
         if not response.get(1):
-            raise TokenRejected("Steam returned no access token")
+            raise RuntimeError("Steam returned no access token")
         token = response[2].decode() if response.get(2) else self.refresh_token
         renewed_at = time.time() if renew else self.last_renewal
         if self.on_renew and (renew or token != self.refresh_token):
@@ -177,21 +200,35 @@ class SteamAuth:
             self.refresh_token, self.last_renewal, self.access_token = token, renewed_at, response[1].decode()
         return self.access_token
 
+    async def _get_browser_access_token(self) -> str:
+        from .steam_browser import BROWSER_HEADERS, renew_access_token
 
-async def begin_qr_login(http: aiohttp.ClientSession) -> dict:
-    device = encode([(1, "Galaxy S25"), (2, MOBILE_APP), (3, ANDROID_UNKNOWN), (4, 528)])
-    start = await call(http, "BeginAuthSessionViaQR", [(3, device)])
-    return {
-        "client_id": start[1],
-        "request_id": start[3],
-        "url": start[2].decode(),
-        "interval": struct.unpack("<f", start[4])[0] if 4 in start else 5.0,
-    }
+        async def persist_cookie(token):
+            renewed_at = time.time()
+            if self.on_renew is not None:
+                self._pending_renewal = (token, renewed_at, None)
+                await self._persist_renewal()
+            else:
+                self.refresh_token, self.last_renewal = token, renewed_at
+                self.access_token = None
 
+        async with aiohttp.ClientSession(headers=BROWSER_HEADERS, timeout=aiohttp.ClientTimeout(total=30)) as http:
+            access, effective = await renew_access_token(
+                http, self.refresh_token, self.steam_id, on_refresh=persist_cookie
+            )
+        if effective != self.refresh_token:
+            await persist_cookie(effective)
+        self.access_token = access
+        return access
 
-async def poll_qr_login(http: aiohttp.ClientSession, login: dict) -> str | None:
-    """Returns the refresh token once approved; updates login["url"] when Steam rotates the QR code."""
-    poll = await call(http, "PollAuthSessionStatus", [(1, login["client_id"]), (2, login["request_id"])])
-    if 1 in poll:
-        login["client_id"], login["url"] = poll[1], poll[2].decode()
-    return poll[3].decode() if 3 in poll else None
+    async def revoke(self) -> None:
+        """Revoke only this account's latest session, serialized with token renewal."""
+        from .steam_browser import revoke_session
+
+        async with self._lock:
+            if self._revoked:
+                return
+            await self._persist_renewal()
+            await revoke_session(self.http, self.refresh_token, self.steam_id)
+            self._revoked = True
+            self.access_token = None

@@ -50,6 +50,11 @@ async def main_getter(account, family: Family | None, lang: str, **kwargs):
 
 
 async def on_login(callback: CallbackQuery, button: Button, manager: DialogManager):
+    manager.middleware_data["logins"].cancel(callback.from_user.id)
+    await manager.switch_to(Menu.login_intro)
+
+
+async def begin_login(callback: CallbackQuery, button: Button, manager: DialogManager):
     try:
         login = await manager.middleware_data["logins"].start(callback.from_user.id, manager.bg())
     except Exception:
@@ -74,6 +79,10 @@ async def login_getter(dialog_manager: DialogManager, lang: str, **kwargs):
         "failure": f"{premium('login')} <b>{t(lang, 'login_title')}</b>\n\n"
         + t(lang, {"timeout": "login_timeout", "no_family": "login_no_family"}.get(data.get("login"), "login_failed")),
     }
+
+
+async def login_intro_getter(lang: str, **kwargs):
+    return {"location": escape(LOGIN_LOCATION or t(lang, "location_unknown"))}
 
 
 async def settings_getter(account, db, **kwargs):
@@ -135,7 +144,11 @@ async def logout_getter(account, db, **kwargs):
 async def on_logout(callback: CallbackQuery, button: Button, manager: DialogManager):
     families = manager.middleware_data["families"]
     family = manager.middleware_data["family"]
-    new_owner = await families.leave(callback.from_user.id)
+    try:
+        new_owner = await families.leave(callback.from_user.id)
+    except Exception:
+        await callback.answer(t(manager.middleware_data["lang"], "logout_failed"), show_alert=True)
+        return
     if new_owner is not None:
         lang = await families.db.language(new_owner)
         name = escape(family.snapshot["name"]) if family and family.snapshot else ""
@@ -174,11 +187,18 @@ menu_dialog = Dialog(
         state=Menu.main,
     ),
     Window(
+        Header("login", "login_intro"),
+        Button(Tr("btn_login_continue"), id="login_continue", on_click=begin_login, style=look("login", GREEN)),
+        SwitchTo(Tr("btn_cancel"), id="cancel_intro", state=Menu.main, style=look("cancel")),
+        getter=login_intro_getter,
+        state=Menu.login_intro,
+    ),
+    Window(
         DynamicMedia("qr", when="waiting"),
         Header("login", "login", when="waiting"),
         Format("{failure}", when=~F["waiting"]),
         Url(Tr("btn_open_app"), Format("{url}"), id="open_app", when="waiting", style=look("login")),
-        Button(Tr("btn_retry"), id="retry", on_click=on_login, when=~F["waiting"], style=look("retry", GREEN)),
+        Button(Tr("btn_retry"), id="retry", on_click=begin_login, when=~F["waiting"], style=look("retry", GREEN)),
         Button(Tr("btn_cancel"), id="cancel_login", on_click=cancel_login, style=look("cancel")),
         getter=login_getter,
         state=Menu.login,

@@ -9,9 +9,9 @@ def required(name: str) -> str:
 
 
 def poll_seconds() -> int:
-    value = int(os.environ.get("POLL_INTERVAL_SECONDS", "600"))
-    if value < 60:
-        raise RuntimeError("POLL_INTERVAL_SECONDS must be at least 60")
+    value = int(os.environ.get("POLL_INTERVAL_SECONDS", "1800"))
+    if value < 300:
+        raise RuntimeError("POLL_INTERVAL_SECONDS must be at least 300")
     return value
 
 

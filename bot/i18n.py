@@ -114,25 +114,39 @@ TEXTS = {
         "purchases_empty": "No open requests.",
         "sum_owners": "👥 Everyone has it: {names}",
         "logout_title": "Log out",
-        "logout_desc": "The bot forgets your Steam login. You can log in again any time.",
+        "logout_desc": "The bot revokes this Steam session and forgets your login. Other devices stay signed in.",
+        "logout_failed": "Steam logout could not be confirmed. Your login is kept so you can retry. "
+        "You can also remove this session in Steam Guard → Authorized devices.",
         "btn_logout_yes": "Yes, log out",
         "logged_out": "Logged out",
         "login_title": "Log in with Steam",
+        "login_intro_title": "Before you sign in",
+        "login_intro_desc": (
+            "Steamily creates a <b>Steam website session</b> on the bot's server ({location}) and stores it encrypted. "
+            "It reads your family library, playtime and profile for updates; "
+            "family changes run only when you request them.\n\n"
+            "This is a website session, not a family-only permission. "
+            "Steam may warn about a sign-in from another location. "
+            "Approve only a browser session labelled <b>Steamily</b> at the expected server location. "
+            "Account restrictions are still possible.\n\n"
+            "To revoke it, use <b>Settings → Log out</b> here, or remove the Steamily session in "
+            "<b>Steam Guard → Authorized devices</b>."
+        ),
+        "btn_login_continue": "Continue to QR",
         "login_desc": (
             "1. On your phone open the <b>Steam</b> app → <b>Steam Guard</b> (shield icon) → scan this QR code. "
             "If Steam is on this phone, just tap <b>Open in Steam app</b>.\n"
-            "2. Steam warns about an <b>unusual sign-in attempt</b> and asks how you are signing in: "
-            "choose <b>the mobile app</b>.\n"
-            "3. When it asks for the nearest location, choose <b>{location}</b>.\n"
-            "4. When it asks what you are trying to do, choose <b>Other</b>.\n"
-            "5. Confirm the sign-in.\n\n"
-            "<i>Steam changes the code about every 20 seconds, so the picture updates by itself. "
-            "Always scan the current one. Waiting up to 5 minutes…</i>"
+            "2. Check <b>Web browser</b>, the name <b>Steamily</b> "
+            "and the expected server location: <b>{location}</b>. "
+            "Cancel if the details do not match.\n"
+            "3. Approve the browser sign-in.\n\n"
+            "<i>The picture updates when Steam replaces the code. Scan the current one. Waiting up to 5 minutes…</i>"
         ),
         "btn_open_app": "Open in Steam app",
         "location_unknown": "the city where the bot's server is",
         "login_timeout": "⌛ The login timed out.",
-        "login_failed": "❌ Steam login failed.",
+        "login_failed": "❌ Steam login failed. If you approved it, you can remove the Steamily session in "
+        "Steam Guard → Authorized devices.",
         "login_no_family": "❌ This Steam account isn't in a Steam Family.",
         "btn_retry": "Try again",
         "owner_new_member": "👋 <b>{name}</b> logged in and waits for access: "
@@ -328,26 +342,38 @@ TEXTS = {
         "purchases_empty": "Открытых запросов нет.",
         "sum_owners": "👥 Есть у всех: {names}",
         "logout_title": "Выход",
-        "logout_desc": "Бот забудет ваш вход в Steam. Войти снова можно в любой момент.",
+        "logout_desc": "Бот отзовёт этот сеанс Steam и забудет ваш вход. Другие устройства останутся в аккаунте.",
+        "logout_failed": "Не удалось подтвердить выход из Steam. Вход сохранён для повторной попытки. "
+        "Также можно удалить этот сеанс в Steam Guard → Авторизованные устройства.",
         "btn_logout_yes": "Да, выйти",
         "logged_out": "Вы вышли",
         "login_title": "Вход через Steam",
+        "login_intro_title": "Перед входом",
+        "login_intro_desc": (
+            "Steamily создаёт <b>сеанс сайта Steam</b> на сервере бота ({location}) и хранит его в зашифрованном виде. "
+            "Бот читает семейную библиотеку, время в играх и профиль для обновлений; "
+            "изменения семьи выполняются только по вашему запросу.\n\n"
+            "Это сеанс сайта, а не доступ только к семье. Steam может предупредить о входе из другого места. "
+            "Подтверждайте только вход через браузер с именем <b>Steamily</b> из ожидаемого места сервера. "
+            "Ограничения аккаунта всё ещё возможны.\n\n"
+            "Чтобы отозвать сеанс, выберите здесь <b>Настройки → Выйти</b> или удалите сеанс Steamily в "
+            "<b>Steam Guard → Авторизованные устройства</b>."
+        ),
+        "btn_login_continue": "Перейти к QR-коду",
         "login_desc": (
             "1. Откройте на телефоне приложение <b>Steam</b> → <b>Steam Guard</b> (значок щита) → "
             "отсканируйте этот QR-код. Если Steam стоит на этом телефоне, просто нажмите "
             "<b>Открыть в Steam</b>.\n"
-            "2. Steam покажет <b>«Необычная попытка входа в Steam»</b> и спросит, как вы входите: "
-            "выберите <b>«Через мобильное приложение»</b>.\n"
-            "3. Когда он спросит ближайшее местоположение, выберите <b>{location}</b>.\n"
-            "4. На вопрос <b>«Что вы пытаетесь сделать?»</b> выберите <b>«Другое»</b>.\n"
-            "5. Подтвердите вход.\n\n"
-            "<i>Steam меняет код примерно каждые 20 секунд, поэтому картинка обновляется сама. "
-            "Сканируйте всегда текущий. Ждём до 5 минут…</i>"
+            "2. Проверьте способ входа <b>«Веб-браузер»</b>, имя <b>Steamily</b> и ожидаемое место сервера: "
+            "<b>{location}</b>. Отмените вход, если данные не совпадают.\n"
+            "3. Подтвердите вход через браузер.\n\n"
+            "<i>Картинка обновляется, когда Steam меняет код. Сканируйте текущий. Ждём до 5 минут…</i>"
         ),
         "btn_open_app": "Открыть в Steam",
         "location_unknown": "город, где стоит сервер бота",
         "login_timeout": "⌛ Время на вход истекло.",
-        "login_failed": "❌ Не удалось войти через Steam.",
+        "login_failed": "❌ Не удалось войти через Steam. Если вы подтвердили вход, удалите сеанс Steamily в "
+        "Steam Guard → Авторизованные устройства.",
         "login_no_family": "❌ Этот аккаунт Steam не состоит в семье Steam.",
         "btn_retry": "Попробовать снова",
         "owner_new_member": "👋 <b>{name}</b> вошёл в бота и ждёт доступа: "
