@@ -46,6 +46,10 @@ class Family:
         self.family_id = family_id
         self.snapshot: dict | None = None
         self.stores = stores if stores is not None else {}
+        # shortcut: process-local coordination; use distributed locking before running multiple bot workers.
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_started = 0
+        self._refresh_completed = 0
 
     @property
     def apps(self) -> list[dict]:
@@ -70,7 +74,6 @@ class Families:
         self.stores: dict[str, dict] = {}
         self.stats_cache: dict[str, tuple[float, dict]] = {}
         self.presence: dict[str, dict] = {}  # last seen online/playing state per family
-        self.observation_locks = defaultdict(asyncio.Lock)
         self.delivery_locks = defaultdict(asyncio.Lock)
         self.bot_username = ""
 
@@ -200,8 +203,15 @@ class Families:
         return stats
 
     async def refresh(self, family_id: str) -> None:
-        async with self.observation_locks[family_id]:
+        family = self.get(family_id)
+        requested = family._refresh_started
+        async with family._refresh_lock:
+            # Requests during a pass need a trailing fetch; other queued requests can share that pass.
+            if family._refresh_completed > requested:
+                return
+            family._refresh_started += 1
             await self._refresh(family_id)
+            family._refresh_completed = family._refresh_started
 
     async def _refresh(self, family_id: str) -> None:
         family = self.get(family_id)
@@ -346,7 +356,7 @@ class Families:
 
     async def check_presence(self, family_id: str) -> None:
         """Online and now-playing alerts; Steam is asked once for all members of the family."""
-        async with self.observation_locks[family_id]:
+        async with self.get(family_id)._refresh_lock:
             await self._check_presence(family_id)
 
     async def _check_presence(self, family_id: str) -> None:
@@ -378,19 +388,25 @@ class Families:
     async def presence_loop(self, interval: int = PRESENCE_INTERVAL) -> None:
         while True:
             await asyncio.sleep(interval)
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.check_presence(row["family_id"])
-                except Exception:
-                    log.exception("Family %s presence check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.check_presence(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s presence check failed", row["family_id"])
+            except Exception:
+                log.exception("Presence check cycle failed")
 
     async def refresh_loop(self, interval: int) -> None:
         while True:
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.refresh(row["family_id"])
-                except Exception:
-                    log.exception("Family %s check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.refresh(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s check failed", row["family_id"])
+            except Exception:
+                log.exception("Family refresh cycle failed")
             await asyncio.sleep(interval)
 
 
