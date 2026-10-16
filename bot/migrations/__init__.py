@@ -14,6 +14,7 @@ MIGRATIONS = tuple(
         "003_unique_steam_links.sql",
         "004_alert_delivery.sql",
         "005_delete_abandoned_families.sql",
+        "006_member_publication.sql",
     )
 )
 

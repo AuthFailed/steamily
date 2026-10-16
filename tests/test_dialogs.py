@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from datetime import datetime
+from itertools import count
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -376,7 +377,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self_button = self.button("✅ Bob").model_copy(
             update={
                 "text": "Self",
-                "callback_data": self.button("✅ Bob").callback_data.rsplit(":", 1)[0] + f":{OWNER}",
+                "callback_data": self.button("✅ Bob").callback_data.rsplit(":", 1)[0] + f":{ALICE}",
             }
         )
         message = self.last().model_copy(update={"reply_markup": InlineKeyboardMarkup(inline_keyboard=[[self_button]])})
@@ -590,6 +591,14 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         return next(b for row in self.last().reply_markup.inline_keyboard for b in row if b.text == text)
 
     async def test_library_pagination_search_filters_and_game(self):
+        await self.db.set_publication(
+            OWNER,
+            ALICE,
+            FAMILY,
+            "publish_telegram",
+            True,
+            expected_version=(await self.db.account(OWNER))["publication_version"],
+        )
         with self.assertRaises(SteamAlreadyLinked):
             await self.families.register(NEWCOMER, "duplicate", ALICE)
         client = self.client(FRIEND)
@@ -1097,7 +1106,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].title, "Game 20")
         self.assertIn("Price unknown", results[0].input_message_content.message_text)
         self.assertIsNone(results[0].thumbnail_url)
-        self.assertEqual(answer.await_args.kwargs, {"cache_time": 60, "is_personal": True})
+        self.assertEqual(answer.await_args.kwargs, {"cache_time": 0, "is_personal": True})
 
     async def test_inline_card_failure_keeps_known_games_and_omits_unknown_store_games(self):
         answer = AsyncMock()
@@ -1131,6 +1140,14 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(results[0].thumbnail_url)
 
     async def test_inline_search_shows_family_owners_in_senders_currency(self):
+        await self.db.set_publication(
+            OWNER,
+            ALICE,
+            FAMILY,
+            "publish_telegram",
+            True,
+            expected_version=(await self.db.account(OWNER))["publication_version"],
+        )
         with self.assertRaises(SteamAlreadyLinked):
             await self.families.register(NEWCOMER, "duplicate", ALICE)
         await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
@@ -1193,7 +1210,10 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.buttons(), ["Family library", "Family", "Settings", "About this bot"])
         self.assertEqual(self.button("Settings").icon_custom_emoji_id, "5341715473882955310")
         await client.click(self.last(), Btn("Settings"))
-        self.assertEqual(self.buttons(), ["Language", "Log out", "◀️ Back"])  # alerts toggle is for owners
+        self.assertEqual(
+            self.buttons(),
+            ["Publish my presence: off", "Publish my Telegram: off", "Language", "Log out", "◀️ Back"],
+        )
         await client.click(self.last(), Btn("Language"))
         await client.click(self.last(), Btn("🇷🇺 Русский"))
         self.assertIn("Настройки", self.last().text)  # back in settings, now in Russian
@@ -1205,6 +1225,46 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/start", self.last().text)
         await client.send("/start")
         self.assertIn("Choose the bot language", self.last().text)  # starts over
+
+    async def test_two_members_control_their_own_publication_in_real_dialogs(self):
+        # aiogram-dialog's random context IDs can collide when dialogs open within one second.
+        intent_ids = count()
+        self.enterContext(patch("aiogram_dialog.api.entities.stack.new_id", side_effect=lambda: f"t{next(intent_ids)}"))
+        family = self.families.get(FAMILY)
+        family.snapshot["players"][BOB]["online"] = True
+        owner, friend = self.client(OWNER), self.client(FRIEND)
+        with patch.object(self.families, "_fetch", AsyncMock(return_value=family.snapshot)):
+            await owner.send("/start")
+            await owner.click(self.last(), Btn("Settings"))
+            self.assertIn("existing and new accounts", self.last().text)
+            self.assertIn("Already delivered", self.last().text)
+            await owner.click(self.last(), Btn("Publish my Telegram: off"))
+            await friend.send("/start")
+            await friend.click(self.last(), Btn("Settings"))
+            await friend.click(self.last(), Btn("Publish my presence: off"))
+        alice, bob = await self.db.account(OWNER), await self.db.account(FRIEND)
+        self.assertEqual((alice["publish_presence"], alice["publish_telegram"]), (False, True))
+        self.assertEqual((bob["publish_presence"], bob["publish_telegram"]), (True, False))
+
+        await friend.send("/start")
+        await friend.click(self.last(), Btn("Family"))
+        self.assertIn("tg://user?id=100", self.last().text)
+        self.assertNotIn("User_100</a> 👑 🟢", self.last().text)
+        self.assertNotIn("tg://user?id=200", self.last().text)
+        await friend.click(self.last(), Btn("Members"))
+        self.assertIn("Alice", self.buttons())
+        self.assertIn("🟢 Bob", self.buttons())
+
+        await owner.send("/start")
+        await owner.click(self.last(), Btn("Family"))
+        self.assertIn("Bob</a> 🟢", self.last().text)
+        self.assertNotIn("tg://user?id=200", self.last().text)
+        await owner.click(self.last(), Btn("◀️ Back"))
+        await owner.click(self.last(), Btn("Settings"))
+        await owner.click(self.last(), Btn("Publish my Telegram: on"))
+        await friend.send("/start")
+        await friend.click(self.last(), Btn("Family"))
+        self.assertNotIn("tg://user?id=100", self.last().text)
 
     async def test_owner_toggles_alerts_and_hands_over_on_logout(self):
         client = self.client(OWNER)
@@ -1223,6 +1283,30 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("You are now the owner", self.families.bot.send_message.await_args.args[1])
 
     async def test_family_overview_stats_and_member_card(self):
+        await self.db.set_publication(
+            OWNER,
+            ALICE,
+            FAMILY,
+            "publish_presence",
+            True,
+            expected_version=(await self.db.account(OWNER))["publication_version"],
+        )
+        await self.db.set_publication(
+            OWNER,
+            ALICE,
+            FAMILY,
+            "publish_telegram",
+            True,
+            expected_version=(await self.db.account(OWNER))["publication_version"],
+        )
+        await self.db.set_publication(
+            FRIEND,
+            BOB,
+            FAMILY,
+            "publish_telegram",
+            True,
+            expected_version=(await self.db.account(FRIEND))["publication_version"],
+        )
         with self.assertRaises(SteamAlreadyLinked):
             await self.families.register(NEWCOMER, "duplicate", ALICE)
         client = self.client(FRIEND)
@@ -1248,7 +1332,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
             "User_200</a>",
             text,
         )  # Telegram name refreshed from the user's latest message
-        self.assertIn('<a href="tg://user?id=300">Telegram</a> (child)', text)  # no Telegram name saved yet
+        self.assertNotIn("tg://user?id=300", text)  # no permission from the pending member
         self.assertIn("<b>Fam</b> · 3 of 6", text)
         self.assertNotIn("Free spots", text)
         self.assertTrue(shown[-1].link_preview_options.is_disabled)  # no profile picture previews

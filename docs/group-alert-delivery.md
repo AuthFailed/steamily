@@ -16,6 +16,9 @@ applies to newly queued events too.
 Online/playing alerts expire after 5 minutes. Each member has at most one pending
 online alert and one playing alert; a newer transition replaces the older one.
 These alerts describe the latest transition rather than replaying old sessions.
+They require the member's publication permission. Every delivery and retry checks
+fresh membership, current consent/version and the current group link; stale consent
+or missing legacy metadata discards the presence alert. See [publication preferences](publication.md).
 
 When Telegram reports a removed/blocked/missing group, the bot logs the failure,
 unlinks that destination and discards its pending messages. Other permanent

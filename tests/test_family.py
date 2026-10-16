@@ -342,13 +342,24 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
     async def test_presence_and_membership_alerts_go_to_the_group(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
             await self.families.register(1, "refresh", ALICE)
+        await self.db.set_publication(
+            1,
+            ALICE,
+            "9",
+            "publish_presence",
+            True,
+            expected_version=(await self.db.account(1))["publication_version"],
+        )
         await self.db.update_family("9", notify_chat=-100, alerts={"playing": True})
         sent = self.bot.send_message
         sent.reset_mock()
         self.families.presence["9"] = {ALICE: {"online": True, "game": None}}
-        with patch(
-            "bot.family.fetch_presence",
-            AsyncMock(return_value={ALICE: {"online": True, "game": 620, "game_name": "Portal 2"}}),
+        with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))),
+            patch(
+                "bot.family.fetch_presence",
+                AsyncMock(return_value={ALICE: {"online": True, "game": 620, "game_name": "Portal 2"}}),
+            ),
         ):
             await self.families.check_presence("9")
         self.assertEqual(sent.await_args.args[:2], (-100, "🎮 Alice started playing Portal 2"))
@@ -363,8 +374,16 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
     async def test_presence_check_stops_after_logout_during_an_alert(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
             await self.families.register(1, "alice", ALICE)
-        await self.db.update_family("9", notify_chat=-100, alerts={"playing": True})
-        self.families.presence["9"] = {m: {"online": True, "game": None} for m in (ALICE, BOB)}
+        await self.db.set_publication(
+            1,
+            ALICE,
+            "9",
+            "publish_presence",
+            True,
+            expected_version=(await self.db.account(1))["publication_version"],
+        )
+        await self.db.update_family("9", notify_chat=-100, alerts={"online": True, "playing": True})
+        self.families.presence["9"] = {m: {"online": False, "game": None} for m in (ALICE, BOB)}
         current = {m: {"online": True, "game": 620, "game_name": "Portal 2"} for m in (ALICE, BOB)}
         started, released = asyncio.Event(), asyncio.Event()
 
@@ -373,12 +392,14 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             await released.wait()
 
         with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))),
             patch("bot.family.fetch_presence", AsyncMock(return_value=current)),
             patch.object(self.bot, "send_message", side_effect=send) as sent,
         ):
             check = asyncio.create_task(self.families.check_presence("9"))
             try:
                 await asyncio.wait_for(started.wait(), 2)
+                self.assertEqual(len(await self.db.pending_alerts("9", 0)), 2)
                 await self.families.leave(1)
             finally:
                 released.set()

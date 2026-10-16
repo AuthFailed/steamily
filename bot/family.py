@@ -423,9 +423,15 @@ class Families:
                 event = pending[0]
                 chat_id = event["chat_id"]
                 try:
+                    text = event["text"]
+                    if event["coalesce_key"] is not None:
+                        text = await self.presence_alert_text(family_id, event)
+                        if text is None:
+                            await self.db.delete_alert(event["id"])
+                            continue
                     self.health.in_flight += 1
                     try:
-                        await self.bot.send_message(chat_id, event["text"], parse_mode=None)
+                        await self.bot.send_message(chat_id, text, parse_mode=None)
                     except Exception:
                         self.health.failed_notifications += 1
                         self.health.last_notification_failure = time.monotonic()
@@ -493,6 +499,30 @@ class Families:
             self.health.beat("delivery", failed=failed)
             await asyncio.sleep(interval)
 
+    async def presence_alert_text(self, family_id: str, queued) -> str | None:
+        # Keep events structured until delivery: queued text would outlive consent and membership.
+        publisher = queued["publication"]
+        if publisher is None:  # Presence queued before publication controls had no consent to verify.
+            return None
+        event = publisher["event"]
+        async with self.get(family_id).lock:
+            snapshot = await self._fetch(family_id)
+            if snapshot is None:
+                return None
+            family = Family(family_id, self.stores)
+            family.snapshot = snapshot
+            account = await self.db.publication_account(publisher["telegram_id"])
+            if (
+                account is None
+                or account["notify_chat"] != queued["chat_id"]
+                or account["alert_link_version"] != queued["link_version"]
+                or not alert_settings(account)[event["kind"]]
+                or account["publication_version"] != publisher["publication_version"]
+                or not publication_allowed(family, event["steamid"], {account["steam_id"]: account}, "publish_presence")
+            ):
+                return None
+            return format_event(event, snapshot["names"], family.apps, account["language"])
+
     async def check_presence(self, family_id: str) -> None:
         """Online and now-playing alerts; Steam is asked once for all members of the family."""
         family = self.get(family_id)
@@ -512,17 +542,23 @@ class Families:
         token = await self.any_token(family_id)
         if token is None:
             return
+        accounts = await accounts_by_steam(self.db, family_id)
         presence = await fetch_presence(self.http, token, family.members)
         if self.items.get(family_id) is not family:
             return
         pending = []
         for event in presence_events(self.presence.get(family_id, {}), presence):
-            if alerts[event["kind"]]:
+            if alerts[event["kind"]] and publication_allowed(family, event["steamid"], accounts, "publish_presence"):
                 pending.append(
                     {
                         "text": format_event(event, family.snapshot["names"], family.apps, row["language"]),
                         "coalesce_key": f"{event['kind']}:{event['steamid']}",
                         "expires_at": time.time() + PRESENCE_ALERT_TTL,
+                        "publication": {
+                            "event": event,
+                            "telegram_id": accounts[event["steamid"]]["telegram_id"],
+                            "publication_version": accounts[event["steamid"]]["publication_version"],
+                        },
                     }
                 )
         await self.db.enqueue_alerts(family_id, pending)
@@ -575,12 +611,25 @@ class Families:
             await asyncio.sleep(interval)
 
 
+def publication_allowed(family: Family, steam_id: str, accounts: dict, setting: str) -> bool:
+    account = accounts.get(steam_id)
+    return bool(
+        account
+        and steam_id in family.members
+        and account["steam_id"] == steam_id
+        and account["family_id"] == family.family_id
+        and account["status"] == "approved"
+        and account["refresh_token"]
+        and account.get(setting, False)
+    )
+
+
 def person_link(family: Family, steam_id: str, accounts: dict) -> str:
-    """Steam profile link, plus the member's Telegram when they use the bot. accounts: steam_id -> account row."""
+    """Steam link, plus Telegram only with the active member's consent; no rendered identity cache."""
     url = profile_url(steam_id, (family.snapshot or {}).get("players", {}))
     steam = f'<a href="{url}">{escape(family.name(steam_id))}</a>'
     account = accounts.get(steam_id)
-    if account is None:
+    if not publication_allowed(family, steam_id, accounts, "publish_telegram"):
         return steam
     if account["tg_username"]:
         telegram = f'<a href="https://t.me/{account["tg_username"]}">@{escape(account["tg_username"])}</a>'

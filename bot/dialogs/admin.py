@@ -8,7 +8,7 @@ from aiogram_dialog.widgets.kbd import Button, Cancel, ScrollingGroup, Select, S
 from aiogram_dialog.widgets.text import Format
 
 from ..db import Db
-from ..family import Family
+from ..family import Family, publication_allowed
 from ..i18n import Tr, t
 from ..states import Admin, Menu
 from ..ui import GREEN, RED, Header, back_home, look
@@ -21,15 +21,22 @@ log = logging.getLogger(__name__)
 async def members_getter(db: Db, family: Family, account, **kwargs):
     accounts = await db.family_accounts(family.family_id)
     rows = [
-        (str(a["telegram_id"]), f"{STATUS_ICONS[a['status']]} {family.name(a['steam_id'])}")
+        (a["steam_id"], f"{STATUS_ICONS[a['status']]} {family.name(a['steam_id'])}")
         for a in accounts
         if a["telegram_id"] != account["telegram_id"]
     ]  # the owner looking at the list
     return {"accounts": rows, "count": len(rows)}
 
 
-async def on_member(callback: CallbackQuery, widget, manager: DialogManager, telegram_id: str):
-    manager.dialog_data["telegram_id"] = int(telegram_id)
+async def on_member(callback: CallbackQuery, widget, manager: DialogManager, steam_id: str):
+    db: Db = manager.middleware_data["db"]
+    family: Family = manager.middleware_data["family"]
+    account = next((a for a in await db.family_accounts(family.family_id) if a["steam_id"] == steam_id), None)
+    if account is None:
+        manager.dialog_data.pop("telegram_id", None)
+        await manager.switch_to(Admin.members)
+        return
+    manager.dialog_data["telegram_id"] = account["telegram_id"]
     await manager.switch_to(Admin.member)
 
 
@@ -48,7 +55,9 @@ async def member_getter(dialog_manager: DialogManager, db: Db, family: Family, l
     return {
         "name": escape(family.name(steam)),
         "steam": steam,
-        "telegram": account["telegram_id"],
+        "telegram": account["telegram_id"]
+        if publication_allowed(family, steam, {steam: account}, "publish_telegram")
+        else t(lang, "private"),
         "status_text": t(lang, f"status_{account['status']}_short"),
         "warning": "" if not family.members or steam in family.members else t(lang, "member_left"),
         "status": account["status"],

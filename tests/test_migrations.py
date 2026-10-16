@@ -97,6 +97,46 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((family["name"], family["alert_retry_at"], family["alert_link_version"]), ("Existing", 0, 0))
         self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM pending_alerts"), 0)
 
+    async def test_version_five_upgrade_defaults_publication_off_and_preserves_consent_on_restart(self):
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:5]):
+            await migrate(self.connection)
+        key = Fernet.generate_key().decode()
+        token = Fernet(key).encrypt(b"legacy-token")
+        await self.connection.execute("""
+            INSERT INTO families (family_id, name, notify_chat) VALUES ('9', 'Existing', -100);
+            INSERT INTO accounts (telegram_id, steam_id, family_id, status) VALUES (10, '1', '9', 'approved');
+            INSERT INTO pending_alerts (family_id, chat_id, text) VALUES ('9', -100, 'legacy alert');
+        """)
+        await self.connection.execute("UPDATE accounts SET refresh_token = $1 WHERE telegram_id = 10", token)
+        before = await self.versions()
+
+        db = await Db.connect(TEST_DATABASE_URL, key)
+        try:
+            account = await db.account(10)
+            self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
+            self.assertEqual((account["status"], db.refresh_token(account)), ("approved", "legacy-token"))
+            self.assertIsNone((await db.pending_alerts("9", 0))[0]["publication"])
+            self.assertEqual((await self.versions())[:5], before)
+            for setting in ("publish_presence", "publish_telegram"):
+                account = await db.account(10)
+                self.assertTrue(
+                    await db.set_publication(
+                        10, "1", "9", setting, True, expected_version=account["publication_version"]
+                    )
+                )
+            version = (await db.account(10))["publication_version"]
+        finally:
+            await db.pool.close()
+
+        db = await Db.connect(TEST_DATABASE_URL, key)
+        try:
+            account = await db.account(10)
+            self.assertEqual((account["publish_presence"], account["publish_telegram"]), (True, True))
+            self.assertEqual(account["publication_version"], version)
+            self.assertEqual(len(await self.versions()), 6)
+        finally:
+            await db.pool.close()
+
     async def test_unversioned_delivery_queue_and_retry_state_survive_adoption_and_restart(self):
         for path in MIGRATIONS:
             await self.connection.execute(path.read_text())
@@ -158,9 +198,10 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         active = await self.connection.fetchrow("SELECT * FROM families WHERE family_id = 'active'")
         account = await self.connection.fetchrow("SELECT * FROM accounts")
         pending = await self.connection.fetch("SELECT * FROM pending_alerts WHERE family_id = 'active'")
-        await migrate(self.connection)
-        versions = await self.versions()
-        await migrate(self.connection)
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:5]):
+            await migrate(self.connection)
+            versions = await self.versions()
+            await migrate(self.connection)
         self.assertEqual(await self.versions(), versions)
         self.assertEqual(await self.connection.fetchrow("SELECT * FROM families WHERE family_id = 'active'"), active)
         self.assertEqual(await self.connection.fetchrow("SELECT * FROM accounts"), account)

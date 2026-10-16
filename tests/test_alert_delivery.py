@@ -144,6 +144,10 @@ class AlertDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.queued(), [])
 
     async def test_presence_coalesces_and_expires_without_stalling_observation(self):
+        account = await self.db.account(1)
+        await self.db.set_publication(
+            1, ALICE, "9", "publish_presence", True, expected_version=account["publication_version"]
+        )
         await self.db.update_family("9", alerts={"online": True, "playing": True})
         self.families.presence["9"] = {ALICE: {"online": False, "game": None}}
         self.bot.send_message.side_effect = TelegramNetworkError(self.method, "offline")
@@ -267,10 +271,28 @@ class AlertDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([(p["family_id"], p["text"]) for p in pending], [("other", "other family")])
 
     async def test_retry_after_survives_presence_replacement_and_service_migration(self):
-        await self.db.enqueue_alerts("9", [{"text": "online", "coalesce_key": f"online:{ALICE}"}])
+        account = await self.db.account(1)
+        await self.db.set_publication(
+            1, ALICE, "9", "publish_presence", True, expected_version=account["publication_version"]
+        )
+        await self.db.update_family("9", alerts={"online": True})
+        account = await self.db.account(1)
+
+        def presence(kind):
+            return {
+                "text": kind,
+                "coalesce_key": f"online:{ALICE}",
+                "publication": {
+                    "event": {"kind": "online", "type": kind, "steamid": ALICE},
+                    "telegram_id": 1,
+                    "publication_version": account["publication_version"],
+                },
+            }
+
+        await self.db.enqueue_alerts("9", [presence("online")])
 
         async def replace_and_migrate(*args, **kwargs):
-            await self.db.enqueue_alerts("9", [{"text": "offline", "coalesce_key": f"online:{ALICE}"}])
+            await self.db.enqueue_alerts("9", [presence("offline")])
             await self.db.migrate_chat(-100, -200)
             raise TelegramRetryAfter(self.method, "slow down", retry_after=120)
 
@@ -282,7 +304,8 @@ class AlertDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.send_message.await_count, 1)
         self.now.return_value = 1120.0
         await self.families.deliver_alerts("9")
-        self.assertEqual(self.bot.send_message.await_args.args[:2], (-200, "offline"))
+        self.assertEqual(self.bot.send_message.await_args.args[0], -200)
+        self.assertIn("Alice went offline", self.bot.send_message.await_args.args[1])
         self.assertEqual(await self.queued(), [])
 
     async def test_stale_failure_preserves_group_readded_during_send(self):

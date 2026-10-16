@@ -49,6 +49,7 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
             for alert in alerts:
                 alert_id = next(alert_ids)
                 pending[alert_id] = {
+                    "coalesce_key": None,
                     **deepcopy(alert),
                     "id": alert_id,
                     "family_id": family_id,

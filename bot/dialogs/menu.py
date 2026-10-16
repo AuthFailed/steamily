@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime
 from html import escape
 
+import aiohttp
 from aiogram import F
 from aiogram.enums import ContentType
 from aiogram.exceptions import TelegramAPIError
@@ -22,6 +23,7 @@ from ..ui import GREEN, RED, Header, back_home, look, premium
 from . import require_owner
 
 STATUS_KEYS = {"none": "status_none", "pending": "status_pending", "blocked": "status_blocked"}
+PUBLICATION_SETTINGS = {"p": "publish_presence", "t": "publish_telegram"}
 log = logging.getLogger(__name__)
 
 
@@ -104,15 +106,65 @@ async def login_getter(dialog_manager: DialogManager, lang: str, **kwargs):
     }
 
 
-async def settings_getter(dialog_manager: DialogManager, account, db, **kwargs):
+async def settings_getter(dialog_manager: DialogManager, account, db, lang: str = "en", **kwargs):
     if account:
         dialog_manager.dialog_data.setdefault("family_id", account["family_id"])
     is_owner = role(account) == "owner"
+    can_publish = bool(account and account["status"] == "approved" and account["refresh_token"])
     return {
         "has_account": account is not None,
         "is_owner": is_owner,
         "requests_on": is_owner and await db.notify_requests(account["telegram_id"]),
+        "can_publish": can_publish,
+        "publication_items": [
+            (
+                f"{code}:{account['publication_version']}:{int(not account[setting])}",
+                t(lang, f"btn_{setting}_{'on' if account[setting] else 'off'}"),
+            )
+            for code, setting in PUBLICATION_SETTINGS.items()
+        ]
+        if can_publish
+        else [],
     }
+
+
+async def set_publication(callback: CallbackQuery, widget, manager: DialogManager, item_id: str):
+    db = manager.middleware_data["db"]
+    account = await db.account(callback.from_user.id)
+    manager.middleware_data["account"] = account
+    parts = item_id.split(":")
+    valid = (
+        len(parts) == 3
+        and parts[0] in PUBLICATION_SETTINGS
+        and parts[2] in ("0", "1")
+        and account is not None
+        and account["telegram_id"] == callback.from_user.id
+        and account["publication_version"] == parts[1]
+        and account["status"] == "approved"
+        and bool(account["refresh_token"])
+    )
+    if valid and parts[2] == "1":
+        families = manager.middleware_data["families"]
+        try:
+            async with families.get(account["family_id"]).lock:
+                snapshot = await families._fetch(account["family_id"])
+        except (aiohttp.ClientError, TimeoutError, RuntimeError):
+            snapshot = None
+        valid = bool(
+            snapshot and snapshot["family_id"] == account["family_id"] and account["steam_id"] in snapshot["members"]
+        )
+        manager.middleware_data["account"] = await db.account(callback.from_user.id)
+    if not valid or not await db.set_publication(
+        callback.from_user.id,
+        account["steam_id"],
+        account["family_id"],
+        PUBLICATION_SETTINGS[parts[0]],
+        parts[2] == "1",
+        expected_version=parts[1],
+    ):
+        await callback.answer(t(language_of(manager), "publication_unavailable"), show_alert=True)
+        return
+    manager.middleware_data["account"] = await db.account(callback.from_user.id)
 
 
 async def toggle_requests(callback: CallbackQuery, button: Button, manager: DialogManager):
@@ -241,6 +293,15 @@ menu_dialog = Dialog(
     ),
     Window(
         Header("settings", "settings"),
+        Tr("publication_desc", when="can_publish"),
+        Select(
+            Format("{item[1]}"),
+            id="publication",
+            item_id_getter=lambda item: item[0],
+            items="publication_items",
+            on_click=set_publication,
+            when="can_publish",
+        ),
         Button(
             Tr("btn_requests_on"),
             id="requests_off",

@@ -117,7 +117,10 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
         bot = AsyncMock()
         bot.send_message.side_effect = TelegramBadRequest(method="sendMessage", message="private-token")
         db = AsyncMock()
-        db.pending_alerts.side_effect = [[{"id": 1, "chat_id": -100, "text": "hello", "link_version": 1}], []]
+        db.pending_alerts.side_effect = [
+            [{"id": 1, "chat_id": -100, "text": "hello", "link_version": 1, "coalesce_key": None}],
+            [],
+        ]
         families = Families(db, None, bot, health=self.health)
         with self.assertLogs("bot.family", level="WARNING"):
             await families.deliver_alerts("9")

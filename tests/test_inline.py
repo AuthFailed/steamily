@@ -25,21 +25,26 @@ class InlineSearchTest(unittest.IsolatedAsyncioTestCase):
         self.query = SimpleNamespace(
             from_user=SimpleNamespace(id=42, language_code="en"), query="portal", answer=AsyncMock()
         )
+        account = {
+            "telegram_id": 42,
+            "steam_id": ALICE,
+            "owner_telegram_id": 42,
+            "status": "approved",
+            "family_id": "9",
+            "country": "KZ",
+            "refresh_token": b"token",
+            "created_at": 1,
+            "publish_telegram": False,
+            "publish_presence": False,
+        }
         self.db = SimpleNamespace(
             language=AsyncMock(return_value="en"),
-            account=AsyncMock(
-                return_value={
-                    "telegram_id": 42,
-                    "owner_telegram_id": 42,
-                    "status": "approved",
-                    "family_id": "9",
-                    "country": "KZ",
-                }
-            ),
-            family_accounts=AsyncMock(return_value=[]),
+            account=AsyncMock(return_value=account),
+            family_accounts=AsyncMock(return_value=[account]),
         )
         family = Family("9")
         family.snapshot = {
+            "members": [ALICE],
             "apps": [{"appid": 620, "name": "Portal 2", "owners": [ALICE]}],
             "names": {ALICE: "Alice"},
         }
@@ -61,7 +66,7 @@ class InlineSearchTest(unittest.IsolatedAsyncioTestCase):
     async def answer(self):
         await search(self.query, self.db, self.families)
         self.query.answer.assert_awaited_once()
-        self.assertEqual(self.query.answer.await_args.kwargs, {"cache_time": 60, "is_personal": True})
+        self.assertEqual(self.query.answer.await_args.kwargs, {"cache_time": 0, "is_personal": True})
         results = self.query.answer.await_args.args[0]
         self.assertEqual([result.id for result in results], ["620"])
         self.assertEqual(results[0].title, "Portal 2")

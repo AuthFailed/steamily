@@ -59,7 +59,7 @@ async def search(query: InlineQuery, db: Db, families: Families):
     if role(account) not in ("member", "owner") or family is None or family.snapshot is None:
         await query.answer(
             [],
-            cache_time=5,
+            cache_time=0,
             is_personal=True,
             button=InlineQueryResultsButton(text=t(lang, "inline_login"), start_parameter="login"),
         )
@@ -82,8 +82,21 @@ async def search(query: InlineQuery, db: Db, families: Families):
         log.warning("Store details for inline search failed (%s)", type(error).__name__)
         cards = {}
 
-    names = {a["appid"]: a["name"] for a in family.apps}
     accounts = await accounts_by_steam(db, family.family_id)
+    current = accounts.get(account["steam_id"])
+    if (
+        current is None
+        or current["telegram_id"] != query.from_user.id
+        or current["status"] != "approved"
+        or not current["refresh_token"]
+        or current["family_id"] != family.family_id
+        or current["steam_id"] != account["steam_id"]
+        or current["created_at"] != account["created_at"]
+        or current["steam_id"] not in family.members
+    ):
+        await query.answer([], cache_time=0, is_personal=True)
+        return
+    names = {a["appid"]: a["name"] for a in family.apps}
     owners = {a["appid"]: a["owners"] for a in family.apps}
     reasons = {a["appid"]: a.get("exclude_reason", 0) for a in family.apps}
     results = []
@@ -128,4 +141,4 @@ async def search(query: InlineQuery, db: Db, families: Families):
                 ),
             )
         )
-    await query.answer(results, cache_time=60, is_personal=True)
+    await query.answer(results, cache_time=0, is_personal=True)

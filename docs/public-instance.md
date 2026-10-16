@@ -56,9 +56,9 @@ Send `/privacy` for the in-bot summary. The application stores the following:
 
 | Data | Why it is used | Retention |
 | --- | --- | --- |
-| Telegram user ID, username and display name; linked SteamID, family ID, registration time and approval status | Identify the linked account, control access, and show registered members' Telegram profile links | Until logout or administrative removal |
+| Telegram user ID, username and display name; linked SteamID, family ID, registration time and approval status | Identify the linked account, control access, and show Telegram profile links when the member permits publication | Until logout or administrative removal |
 | Encrypted Steam refresh token, token renewal time, temporary access token | Authenticate Steam checks and requested family actions | Until logout or administrative removal; the persisted refresh token is also cleared if Steam rejects it |
-| Language, notification preferences and Steam store country | Render the bot and local prices, and deliver selected alerts | Until logout or administrative removal |
+| Language, notification and publication preferences, publication version and Steam store country | Render the bot and local prices, deliver selected alerts, and reject work using withdrawn publication consent | Until logout or administrative removal |
 | Saved dialog state and data, including login/menu state and temporary user input | Keep dialogs working across updates and restarts | Replaced as dialogs change; all of the user's saved dialog rows are deleted on logout or administrative removal |
 | Telegram or Steam IDs selected in another active user's saved family-management dialog | Keep that user's member selection while they navigate | Retained in that viewer's dialog until it is closed or reset, or the viewer logs out; does not restore the selected person's account or credentials |
 | Current family name/ID, members and roles, invitations, profile names/links, online/game presence, shared library and ownership/acquisition data, and playtime supplied by Steam | Show family information and statistics, detect changes, and send alerts | The latest snapshot replaces the previous one; retained while at least one account remains registered for the family |
@@ -77,7 +77,13 @@ playtime information supplied by Steam.
 
 Family information is visible to the family's authorized bot users and can be
 sent to its configured Telegram notification chat. Steam supplies this data for
-the whole family, including people who have not registered with the bot. Family
+the whole family, including people who have not registered with the bot.
+Publishing a member's presence or Telegram identity requires that member's
+separate permission in Settings; both default to off, including after upgrade.
+Unregistered members cannot opt in through someone else. Logout or loss of family
+access resets these permissions. New cards, inline answers and pending presence
+alerts check current consent, but already delivered messages cannot reliably be
+recalled. See [member publication preferences](publication.md) for details. Family
 data and detection history about a person may therefore remain or be fetched
 again through another registered family member after that person logs out. This
 does not retain their bot account, Telegram profile link, settings or credentials.
