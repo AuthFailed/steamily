@@ -311,19 +311,25 @@ class Families:
     async def presence_loop(self, interval: int = PRESENCE_INTERVAL) -> None:
         while True:
             await asyncio.sleep(interval)
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.check_presence(row["family_id"])
-                except Exception:
-                    log.exception("Family %s presence check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.check_presence(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s presence check failed", row["family_id"])
+            except Exception:
+                log.exception("Presence check cycle failed")
 
     async def refresh_loop(self, interval: int) -> None:
         while True:
-            for row in await self.db.families_with_accounts():
-                try:
-                    await self.refresh(row["family_id"])
-                except Exception:
-                    log.exception("Family %s check failed", row["family_id"])
+            try:
+                for row in await self.db.families_with_accounts():
+                    try:
+                        await self.refresh(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s check failed", row["family_id"])
+            except Exception:
+                log.exception("Family refresh cycle failed")
             await asyncio.sleep(interval)
 
 
