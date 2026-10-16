@@ -15,12 +15,23 @@ from bot.states import Admin, Menu
 class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.db = SimpleNamespace(
+            account=AsyncMock(
+                side_effect=lambda telegram_id: {
+                    "telegram_id": telegram_id,
+                    "steam_id": "alice" if telegram_id == 100 else "bob",
+                    "family_id": "9",
+                    "status": "approved",
+                    "owner_telegram_id": 100,
+                }
+            ),
             language=AsyncMock(return_value="en"),
             set_status=AsyncMock(return_value=True),
             delete_account=AsyncMock(return_value=True),
         )
         self.family = SimpleNamespace(family_id="9", members={"alice", "bob"}, snapshot={"name": "Fam"})
-        self.families = SimpleNamespace(db=self.db, bot=AsyncMock(), leave=AsyncMock(return_value=200))
+        self.families = SimpleNamespace(
+            db=self.db, bot=AsyncMock(), leave=AsyncMock(return_value=200), get=MagicMock(return_value=self.family)
+        )
         self.background = SimpleNamespace(start=AsyncMock())
         self.manager = MagicMock(
             middleware_data={
@@ -31,12 +42,13 @@ class AccountDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 "has_language": True,
                 "lang": "en",
             },
-            dialog_data={"telegram_id": 200},
+            dialog_data={"telegram_id": 200, "family_id": "9"},
             start=AsyncMock(),
             switch_to=AsyncMock(),
         )
         self.manager.bg.return_value = self.background
         self.callback = SimpleNamespace(from_user=SimpleNamespace(id=100), answer=AsyncMock())
+        self.manager.event = self.callback
 
     def assert_logged_out(self):
         self.families.leave.assert_awaited_once_with(100)

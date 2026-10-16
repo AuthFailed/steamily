@@ -15,6 +15,7 @@ from aiogram_dialog.utils import remove_intent_id
 
 from .config import poll_seconds, required
 from .db import Db, PgStorage
+from .dialogs import deny_action
 from .dialogs.admin import admin_dialog
 from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
@@ -85,10 +86,13 @@ class AccessMiddleware(BaseMiddleware):
             FamilyView.purchases,
         )
         if user_role != "owner":
-            denied |= state.group is Admin or state in owner_states
-            denied |= state == Menu.settings and callback in ("requests_on", "requests_off", "group_alerts")
-            denied |= state == FamilyView.info and callback == "manage"
-            denied |= state == FamilyView.member and callback == "remove"
+            owner_action = state.group is Admin or state in owner_states
+            owner_action |= state == Menu.settings and callback in ("requests_on", "requests_off", "group_alerts")
+            owner_action |= state == FamilyView.info and callback == "manage"
+            owner_action |= state == FamilyView.member and callback == "remove"
+            if owner_action:
+                await deny_action(manager)
+                return None
         if denied:
             await manager.start(Menu.main, mode=StartMode.RESET_STACK)
             await manager.answer_callback()
