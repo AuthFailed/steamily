@@ -156,14 +156,22 @@ class Db:
     ) -> None:
         await self.check_steam_link(telegram_id, steam_id)
         try:
-            # Re-login keeps the approval status unless the Steam account changed.
+            # Approval and ownership belong to this Steam account in this family.
             await self.pool.execute(
                 """
+            WITH cleared_owner AS (
+                UPDATE families f SET owner_telegram_id = NULL
+                WHERE owner_telegram_id = $1 AND EXISTS (
+                    SELECT 1 FROM accounts a WHERE a.telegram_id = $1 AND a.family_id = f.family_id
+                    AND (a.family_id <> $3 OR a.steam_id <> $2)
+                ) RETURNING family_id
+            )
             INSERT INTO accounts (telegram_id, steam_id, family_id, refresh_token, country, token_renewed_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            SELECT $1, $2, $3, $4, $5, $6 FROM (SELECT count(*) FROM cleared_owner) AS cleared
             ON CONFLICT (telegram_id) DO UPDATE SET family_id = $3, refresh_token = $4, country = $5,
                 token_renewed_at = $6,
-                status = CASE WHEN accounts.steam_id = $2 THEN accounts.status ELSE 'pending' END, steam_id = $2
+                status = CASE WHEN accounts.steam_id = $2 AND accounts.family_id = $3
+                    THEN accounts.status ELSE 'pending' END, steam_id = $2
             """,
                 telegram_id,
                 steam_id,
@@ -228,26 +236,88 @@ class Db:
 
     async def claim_initial_owner(self, family_id: str, telegram_id: int) -> None:
         async with self.pool.acquire() as connection, connection.transaction():
-            owner = await connection.fetchval(
-                """
-                UPDATE families SET owner_telegram_id = $2
-                WHERE family_id = $1 AND owner_telegram_id IS NULL
-                RETURNING owner_telegram_id
-                """,
+            family = await connection.fetchrow(
+                "SELECT owner_telegram_id FROM families WHERE family_id = $1 FOR UPDATE", family_id
+            )
+            if family is None or family["owner_telegram_id"] is not None:
+                return
+            status = await connection.fetchval(
+                "SELECT status FROM accounts WHERE telegram_id = $1 AND family_id = $2 FOR UPDATE",
+                telegram_id,
+                family_id,
+            )
+            if status is None:
+                raise RuntimeError("Initial owner account is no longer registered in this family")
+            if status == "blocked":
+                return
+            await connection.execute(
+                "UPDATE families SET owner_telegram_id = $2 WHERE family_id = $1",
                 family_id,
                 telegram_id,
             )
-            if owner is not None:
-                approved = await connection.fetchval(
-                    """
-                    UPDATE accounts SET status = 'approved' WHERE telegram_id = $1 AND family_id = $2
-                    RETURNING telegram_id
-                    """,
-                    owner,
-                    family_id,
+            if status != "approved":
+                await connection.execute("UPDATE accounts SET status = 'approved' WHERE telegram_id = $1", telegram_id)
+
+    async def revoke_membership(self, telegram_id: int, family_id: str) -> None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            await connection.fetchval("SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", family_id)
+            account = await connection.fetchval(
+                "SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND family_id = $2 FOR UPDATE",
+                telegram_id,
+                family_id,
+            )
+            if account is None:
+                return
+            await connection.execute(
+                "UPDATE accounts SET status = 'pending' WHERE telegram_id = $1 AND status = 'approved'", telegram_id
+            )
+            await connection.execute(
+                "UPDATE families SET owner_telegram_id = NULL WHERE family_id = $1 AND owner_telegram_id = $2",
+                family_id,
+                telegram_id,
+            )
+
+    async def reconcile_members(self, family_id: str, members: list[str]) -> None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            family = await connection.fetchrow(
+                "SELECT owner_telegram_id FROM families WHERE family_id = $1 FOR UPDATE", family_id
+            )
+            if family is None:
+                return
+            await connection.execute(
+                """
+                UPDATE accounts SET status = 'pending'
+                WHERE family_id = $1 AND status = 'approved' AND NOT (steam_id = ANY($2::text[]))
+                """,
+                family_id,
+                members,
+            )
+            accounts = await connection.fetch(
+                """
+                SELECT telegram_id, status FROM accounts
+                WHERE family_id = $1 AND steam_id = ANY($2::text[]) AND status <> 'blocked'
+                ORDER BY (status = 'approved') DESC, created_at, telegram_id FOR UPDATE
+                """,
+                family_id,
+                members,
+            )
+            owner = next(
+                (
+                    account
+                    for account in accounts
+                    if account["telegram_id"] == family["owner_telegram_id"] and account["status"] == "approved"
+                ),
+                accounts[0] if accounts else None,
+            )
+            if owner is not None and owner["status"] != "approved":
+                await connection.execute(
+                    "UPDATE accounts SET status = 'approved' WHERE telegram_id = $1", owner["telegram_id"]
                 )
-                if approved is None:
-                    raise RuntimeError("Initial owner account is no longer registered in this family")
+            owner_id = owner["telegram_id"] if owner is not None else None
+            if owner_id != family["owner_telegram_id"]:
+                await connection.execute(
+                    "UPDATE families SET owner_telegram_id = $2 WHERE family_id = $1", family_id, owner_id
+                )
 
     async def update_family(self, family_id: str, **fields) -> None:
         allowed = {"name", "notify_chat", "state", "language", "owner_telegram_id", "alerts"}

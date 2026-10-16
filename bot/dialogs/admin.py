@@ -55,6 +55,15 @@ async def member_getter(dialog_manager: DialogManager, db: Db, family: Family, l
 async def set_status(manager: DialogManager, status: str | None) -> None:
     db: Db = manager.middleware_data["db"]
     telegram_id = manager.dialog_data["telegram_id"]
+    target = await db.account(telegram_id)
+    family: Family = manager.middleware_data["family"]
+    if (
+        target is None
+        or target["family_id"] != family.family_id
+        or (status == "approved" and target["steam_id"] not in family.members)
+    ):
+        await manager.switch_to(Admin.members)
+        return
     if status:
         await db.set_status(telegram_id, status)
     else:

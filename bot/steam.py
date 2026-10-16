@@ -18,8 +18,9 @@ class NoFamily(RuntimeError):
 
 async def get_json(http: aiohttp.ClientSession, method: str, params: dict) -> dict:
     async with http.get(f"{API}/{method}/", params=params) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Steam {method} failed with HTTP {response.status}")
+        eresult = response.headers.get("x-eresult", "1")
+        if response.status != 200 or eresult != "1":
+            raise RuntimeError(f"Steam {method} failed with HTTP {response.status}, EResult {eresult}")
         return await response.json(content_type=None)
 
 
@@ -32,10 +33,13 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
             "include_family_group_response": "true",
         },
     )
-    group_id = family.get("response", {}).get("family_groupid")
-    members = family.get("response", {}).get("family_group", {}).get("members")
-    if not group_id or not isinstance(members, list):
+    response = family.get("response", {})
+    if response.get("is_not_member_of_any_group") is True:
         raise NoFamily("This Steam account is not joined to a Steam Family")
+    group_id = response.get("family_groupid")
+    members = response.get("family_group", {}).get("members")
+    if not group_id or not isinstance(members, list):
+        raise RuntimeError("Steam returned an incomplete family-membership response")
 
     library = await get_json(
         http,
@@ -191,7 +195,7 @@ def parse_snapshot(family: dict, library: dict, players: dict) -> dict:
     members = family.get("response", {}).get("family_group", {}).get("members")
     apps = library.get("response", {}).get("apps")
     if not isinstance(members, list):
-        raise NoFamily("This Steam account is not joined to a Steam Family")
+        raise RuntimeError("Steam returned an incomplete family-membership response")
     if not isinstance(apps, list):
         raise RuntimeError("Steam returned an incomplete family-library response")
 

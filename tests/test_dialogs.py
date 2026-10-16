@@ -5,7 +5,17 @@ import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
-from aiogram.types import Chat, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, InlineQuery, Update, User
+from aiogram.types import (
+    Chat,
+    ChatMemberLeft,
+    ChatMemberMember,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQuery,
+    Update,
+    User,
+)
 from aiogram_dialog.test_tools import BotClient, MockMessageManager
 from aiogram_dialog.test_tools.keyboard import InlineButtonTextLocator as Btn
 from aiogram_dialog.test_tools.memory_storage import JsonMemoryStorage
@@ -148,6 +158,135 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await self.client(PENDING).send("/start")
         self.assertIn("Waiting for the family owner", self.last().text)
         self.assertEqual(self.buttons(), ["Settings"])
+
+    async def test_departed_member_loses_open_library_and_inline_access(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        library = self.last()
+        await self.db.set_status(FRIEND, "pending")
+        await client.click(library, Btn("Game 01 · \\$1.00"))
+        self.assertIn("Waiting for the family owner", self.last().text)
+        self.assertEqual(self.buttons(), ["Settings"])
+
+        await client.click(self.last(), Btn("Settings"))
+        self.assertIn("Log out", self.buttons())
+        answer = AsyncMock()
+        with patch("aiogram.types.InlineQuery.answer", answer):
+            await self.dp.feed_update(
+                client.bot,
+                Update(
+                    update_id=4,
+                    inline_query=InlineQuery(id="left", from_user=client.user, query="game", offset=""),
+                ),
+            )
+        self.assertEqual(answer.await_args.args[0], [])
+        await self.client(OWNER).send("/start")
+        self.assertIn("Family library", self.buttons())
+
+    async def test_departed_member_cannot_use_old_main_menu_library_button(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        old_menu = self.last()
+        await self.db.set_status(FRIEND, "pending")
+        await client.click(old_menu, Btn("Family library"))
+        self.assertIn("Waiting for the family owner", self.last().text)
+        self.assertEqual(self.buttons(), ["Settings"])
+
+    async def test_departed_owner_cannot_approve_from_open_admin_dialog(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("⏳ Carol"))
+        old_admin = self.last()
+        await self.db.set_status(OWNER, "pending")
+        await client.click(old_admin, Btn("Approve"))
+        self.assertEqual((await self.db.account(PENDING))["status"], "pending")
+        self.assertEqual((await self.db.account(OWNER))["status"], "pending")
+        self.assertIn("Waiting for the family owner", self.last().text)
+
+    async def test_owner_cannot_approve_departed_target_from_old_admin_card(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("⏳ Carol"))
+        old_admin = self.last()
+        self.families.get(FAMILY).snapshot["members"].remove(CAROL)
+        await client.click(old_admin, Btn("Approve"))
+        self.assertEqual((await self.db.account(PENDING))["status"], "pending")
+
+    async def test_owner_can_remove_departed_target_and_release_their_steam_link(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("✅ Bob"))
+        old_admin = self.last()
+        self.families.get(FAMILY).snapshot["members"].remove(BOB)
+        await self.db.set_status(FRIEND, "pending")
+        await client.click(old_admin, Btn("Remove"))
+        self.assertIsNone(await self.db.account(FRIEND))
+        await self.db.check_steam_link(NEWCOMER, BOB)
+
+    async def test_pending_former_owner_cannot_approve_themself_with_forged_admin_button(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        # Callback payloads can name an account or action even when no such button was rendered.
+        self_button = self.button("✅ Bob").model_copy(
+            update={
+                "text": "Self",
+                "callback_data": self.button("✅ Bob").callback_data.rsplit(":", 1)[0] + f":{OWNER}",
+            }
+        )
+        message = self.last().model_copy(update={"reply_markup": InlineKeyboardMarkup(inline_keyboard=[[self_button]])})
+        await client.click(message, Btn("Self"))
+        approve = InlineKeyboardButton(
+            text="Approve", callback_data=self.button("Block").callback_data.removesuffix("block") + "approve"
+        )
+        message = self.last().model_copy(update={"reply_markup": InlineKeyboardMarkup(inline_keyboard=[[approve]])})
+        await self.db.set_status(OWNER, "pending")
+        await client.click(message, Btn("Approve"))
+        self.assertEqual((await self.db.account(OWNER))["status"], "pending")
+        self.assertIn("Waiting for the family owner", self.last().text)
+
+    async def test_owner_cannot_change_moved_target_from_old_admin_card(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
+        await client.click(self.last(), Btn("✅ Bob"))
+        old_admin = self.last()
+        await self.db.ensure_family("10", "Other family")
+        await self.db.save_account(FRIEND, BOB, "10", "token")
+        await self.families.make_owner("10", FRIEND)
+        await client.click(old_admin, Btn("Block"))
+        self.assertEqual((await self.db.account(FRIEND))["status"], "approved")
+
+    async def test_former_owner_cannot_rename_from_open_dialog(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn("✏️ Rename family"))
+        await self.families.make_owner(FAMILY, FRIEND)
+        with patch("bot.dialogs.family.rename_family", AsyncMock()) as rename:
+            await client.send("Should not rename")
+        rename.assert_not_awaited()
+        self.assertIn("Family library", self.buttons())
+
+    async def test_family_move_invalidates_existing_family_action(self):
+        client = self.client(OWNER)
+        await self.open_bot_members(client)
+        await client.click(self.last(), Btn("✏️ Rename family"))
+        await self.db.ensure_family("10", "Other family")
+        await self.db.save_account(OWNER, ALICE, "10", "token")
+        await self.families.make_owner("10", OWNER)
+        self.families.get("10").snapshot = {
+            **self.families.get(FAMILY).snapshot,
+            "family_id": "10",
+            "name": "Other family",
+        }
+        with patch("bot.dialogs.family.rename_family", AsyncMock()) as rename:
+            await client.send("Should not rename either family")
+        rename.assert_not_awaited()
+        self.assertIn("Other family", self.last().text)
 
     async def test_group_chats_ignore_everything_but_link(self):
         await self.client(OWNER, chat_id=-5, chat_type="supergroup").send("/start")

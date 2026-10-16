@@ -10,6 +10,8 @@ from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message
 from aiogram_dialog import DIALOG_EVENT_NAME, DialogManager, ShowMode, StartMode, setup_dialogs
 from aiogram_dialog.api.exceptions import OutdatedIntent, UnknownIntent
+from aiogram_dialog.utils import remove_intent_id
+from aiogram_dialog.widgets.kbd import Start, SwitchTo
 
 from .config import poll_seconds, required
 from .db import Db, PgStorage
@@ -21,7 +23,7 @@ from .family import Families, role
 from .i18n import DEFAULT, t
 from .inline import router as inline_router
 from .login import Logins
-from .states import Menu
+from .states import Admin, FamilyView, Games, Menu
 
 router = Router()
 
@@ -48,6 +50,59 @@ class AccountMiddleware(BaseMiddleware):
         data["account"] = account
         data["family"] = data["families"].get(account["family_id"]) if account else None
         return await handler(event, data)
+
+
+OWNER_STATES = {
+    *Admin.__all_states__,
+    Menu.group_alerts,
+    FamilyView.remove,
+    FamilyView.manage,
+    FamilyView.invite,
+    FamilyView.invite_role,
+    FamilyView.invites,
+    FamilyView.rename,
+    FamilyView.purchases,
+}
+
+
+class AccessMiddleware(BaseMiddleware):
+    """Recheck access before processing an existing dialog or one of its stale buttons."""
+
+    async def __call__(self, handler, event, data: dict):
+        manager: DialogManager = data["dialog_manager"]
+        account = data["account"]
+        family_id = account["family_id"] if account else None
+        user_role = role(account)
+        if manager.has_context():
+            context = manager.current_context()
+            states = [context.state]
+            widget_id = ""
+            if isinstance(event, CallbackQuery) and event.data:
+                _, callback_data = remove_intent_id(event.data)
+                widget_id = callback_data.split(":", 1)[0]
+                widget = manager.dialog().find(widget_id)
+                if isinstance(widget, (Start, SwitchTo)):
+                    states.append(widget.state)
+            denied = context.dialog_data.get("_family_id") != family_id
+            denied |= any(state in OWNER_STATES for state in states) and user_role != "owner"
+            denied |= any(state.group in (Games, FamilyView, Admin) for state in states) and user_role not in (
+                "member",
+                "owner",
+            )
+            denied |= (
+                context.state == Menu.settings and widget_id in {"requests_on", "requests_off"} and user_role != "owner"
+            )
+            if denied:
+                await manager.start(Menu.main, mode=StartMode.RESET_STACK)
+                manager.dialog_data["_family_id"] = family_id
+                if isinstance(event, CallbackQuery):
+                    await manager.answer_callback()
+                return None
+        result = await handler(event, data)
+        if manager.has_context():
+            account = data["account"]  # logout clears it while handling this update
+            manager.dialog_data["_family_id"] = account["family_id"] if account else None
+        return result
 
 
 @router.message(CommandStart(), F.chat.type == "private")
@@ -99,6 +154,7 @@ def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, 
     setup_dialogs(dp, **dialog_options)
     for observer in (dp.message, dp.callback_query, dp.observers[DIALOG_EVENT_NAME]):
         observer.outer_middleware(AccountMiddleware())
+        observer.middleware(AccessMiddleware())
     return dp
 
 

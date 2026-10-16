@@ -55,6 +55,164 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             await self.db.save_account(20, "1", "9", "replacement-token", "US", 999.0)
         self.assertEqual(await self.snapshot_links(), before)
 
+    async def test_moving_family_requires_approval_and_clears_only_the_departing_owner(self):
+        await self.db.ensure_family("8", "Other family")
+        await self.db.save_account(10, "1", "9", "old-token", "KZ")
+        await self.db.set_status(10, "approved")
+        await self.db.set_language(10, "ru")
+        await self.db.set_notify_requests(10, False)
+        await self.db.set_telegram_profile(10, "owner", "Original owner")
+        await self.db.update_family("9", owner_telegram_id=10, alerts={"online": False})
+        before_family = dict(await self.db.family("9"))
+
+        await self.db.save_account(10, "1", "8", "new-token", "US", 123.0)
+
+        account = await self.db.account(10)
+        self.assertEqual((account["family_id"], account["status"]), ("8", "pending"))
+        self.assertEqual(
+            (self.db.refresh_token(account), account["country"], account["token_renewed_at"]),
+            ("new-token", "US", 123.0),
+        )
+        self.assertEqual((account["tg_username"], account["tg_name"]), ("owner", "Original owner"))
+        self.assertEqual(await self.db.language(10), "ru")
+        self.assertFalse(await self.db.notify_requests(10))
+        self.assertEqual(dict(await self.db.family("9")), {**before_family, "owner_telegram_id": None})
+        self.assertIsNone((await self.db.family("8"))["owner_telegram_id"])
+
+    async def test_failed_family_move_keeps_the_old_owner_and_account(self):
+        await self.db.save_account(10, "1", "9", "old-token")
+        await self.db.set_status(10, "approved")
+        await self.db.update_family("9", owner_telegram_id=10)
+        before = await self.snapshot_links()
+        with self.assertRaises(asyncpg.ForeignKeyViolationError):
+            await self.db.save_account(10, "1", "missing-family", "new-token")
+        self.assertEqual(await self.snapshot_links(), before)
+
+    async def test_changing_steam_account_clears_owner_and_requires_approval(self):
+        await self.db.save_account(10, "1", "9", "old-token")
+        await self.db.set_status(10, "approved")
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.save_account(10, "2", "9", "new-token")
+        self.assertEqual((await self.db.account(10))["status"], "pending")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_revoke_membership_is_scoped_to_account_family_and_preserves_blocked(self):
+        await self.db.ensure_family("8", "Other family")
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.set_status(10, "approved")
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.update_family("8", owner_telegram_id=10)
+        await self.db.revoke_membership(10, "8")
+        self.assertEqual((await self.db.account(10))["status"], "approved")
+        self.assertEqual((await self.db.family("8"))["owner_telegram_id"], 10)
+        await self.db.revoke_membership(10, "9")
+        self.assertEqual((await self.db.account(10))["status"], "pending")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+        await self.db.set_status(10, "blocked")
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.revoke_membership(10, "9")
+        self.assertEqual((await self.db.account(10))["status"], "blocked")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_reconcile_members_revokes_departed_owner_and_promotes_a_current_member(self):
+        for telegram_id, steam_id in ((10, "1"), (20, "2")):
+            await self.db.save_account(telegram_id, steam_id, "9", "token", "KZ", 123.0)
+            await self.db.set_status(telegram_id, "approved")
+        await self.db.update_family("9", owner_telegram_id=10)
+        before = await self.snapshot_links()
+
+        await self.db.reconcile_members("9", ["2"])
+
+        self.assertEqual((await self.db.account(10))["status"], "pending")
+        self.assertEqual((await self.db.account(20))["status"], "approved")
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 20)
+        for account in before["accounts"]:
+            current = dict(await self.db.account(account["telegram_id"]))
+            current.pop("owner_telegram_id")
+            expected_status = "pending" if account["telegram_id"] == 10 else "approved"
+            self.assertEqual(current, {**dict(account), "status": expected_status})
+        self.assertEqual((await self.db.family("9"))["state"], before["families"][0]["state"])
+
+    async def test_reconcile_members_prefers_approved_then_oldest_pending_and_excludes_blocked(self):
+        for telegram_id, steam_id, status in ((10, "1", "blocked"), (20, "2", "pending"), (30, "3", "approved")):
+            await self.db.save_account(telegram_id, steam_id, "9", "token")
+            await self.db.set_status(telegram_id, status)
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.reconcile_members("9", ["1", "2", "3"])
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 30)
+        self.assertEqual((await self.db.account(10))["status"], "blocked")
+
+        await self.db.set_status(30, "blocked")
+        await self.db.reconcile_members("9", ["1", "2", "3"])
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 20)
+        self.assertEqual((await self.db.account(20))["status"], "approved")
+        self.assertEqual((await self.db.account(30))["status"], "blocked")
+
+    async def test_reconcile_members_bootstraps_legacy_owner_and_keeps_valid_tokenless_owner(self):
+        for telegram_id, steam_id in ((20, "2"), (10, "1")):
+            await self.db.save_account(telegram_id, steam_id, "9", "token")
+        await self.db.pool.execute(
+            "UPDATE accounts SET created_at = created_at - interval '1 day' WHERE telegram_id = 20"
+        )
+        await self.db.reconcile_members("9", ["1", "2"])
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 20)
+        await self.db.set_refresh_token(20, None)
+        await self.db.set_status(10, "approved")
+        before_family = await self.db.pool.fetchrow(
+            "SELECT *, xmin::text AS version FROM families WHERE family_id = '9'"
+        )
+        before_accounts = await self.db.pool.fetch("SELECT *, xmin::text AS version FROM accounts ORDER BY telegram_id")
+        await self.db.reconcile_members("9", ["1", "2"])
+        self.assertEqual(
+            await self.db.pool.fetchrow("SELECT *, xmin::text AS version FROM families WHERE family_id = '9'"),
+            before_family,
+        )
+        self.assertEqual(
+            await self.db.pool.fetch("SELECT *, xmin::text AS version FROM accounts ORDER BY telegram_id"),
+            before_accounts,
+        )
+
+    async def test_reconcile_members_clears_owner_without_eligible_registered_members(self):
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.set_status(10, "approved")
+        await self.db.save_account(20, "2", "9", "token")
+        await self.db.set_status(20, "blocked")
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.reconcile_members("9", ["2", "unregistered"])
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+        self.assertEqual((await self.db.account(10))["status"], "pending")
+        self.assertEqual((await self.db.account(20))["status"], "blocked")
+        await self.db.reconcile_members("9", [])
+        self.assertEqual((await self.db.account(20))["status"], "blocked")
+
+    async def test_reconcile_members_replaces_missing_or_wrong_family_owner(self):
+        await self.db.ensure_family("8", "Other family")
+        await self.db.save_account(10, "1", "8", "token")
+        await self.db.save_account(20, "2", "9", "token")
+        await self.db.set_status(10, "approved")
+        await self.db.set_status(20, "approved")
+        for owner in (None, 999, 10):
+            with self.subTest(owner=owner):
+                await self.db.update_family("9", owner_telegram_id=owner)
+                await self.db.reconcile_members("9", ["1", "2"])
+                self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 20)
+                self.assertEqual((await self.db.account(10))["status"], "approved")
+
+    async def test_reconcile_members_rolls_back_status_changes_if_owner_update_fails(self):
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.set_status(10, "approved")
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.pool.execute("""
+            CREATE FUNCTION reject_owner_update() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'owner update failed'; END $$;
+            CREATE TRIGGER reject_owner_update BEFORE UPDATE ON families
+            FOR EACH ROW EXECUTE FUNCTION reject_owner_update();
+        """)
+        before = await self.snapshot_links()
+        with self.assertRaisesRegex(asyncpg.RaiseError, "owner update failed"):
+            await self.db.reconcile_members("9", [])
+        self.assertEqual(await self.snapshot_links(), before)
+
     async def test_every_status_and_expired_token_reserve_the_steam_link(self):
         for status in ("pending", "approved", "blocked"):
             with self.subTest(status=status):
@@ -203,6 +361,22 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
         account = await self.db.account(10)
         self.assertEqual((account["family_id"], account["status"]), ("other", "blocked"))
+
+    async def test_blocked_account_cannot_claim_a_vacant_owner(self):
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.set_status(10, "blocked")
+        before = await self.snapshot_links()
+        await self.db.claim_initial_owner("9", 10)
+        self.assertEqual(await self.snapshot_links(), before)
+
+    async def test_concurrent_initial_owner_claims_approve_only_the_first_account(self):
+        await self.db.save_account(10, "1", "9", "token")
+        await self.db.save_account(20, "2", "9", "token")
+        await asyncio.gather(self.db.claim_initial_owner("9", 10), self.db.claim_initial_owner("9", 20))
+        owner = (await self.db.family("9"))["owner_telegram_id"]
+        self.assertIn(owner, (10, 20))
+        for account in await self.db.family_accounts("9"):
+            self.assertEqual(account["status"], "approved" if account["telegram_id"] == owner else "pending")
 
     async def test_token_and_renewal_time_are_saved_together(self):
         await self.db.save_account(10, "1", "9", "first", "KZ", token_renewed_at=100_000.0)
