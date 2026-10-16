@@ -2,7 +2,7 @@ import unittest
 
 from aiogram.fsm.storage.base import StorageKey
 
-from bot.db import PgStorage
+from bot.db import SCHEMA, PgStorage
 from bot.states import Menu
 from tests.pg import fresh_db, needs_pg
 
@@ -51,6 +51,32 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.store_cache("DE"), {})
         await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
         self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
+
+    async def test_token_and_renewal_time_are_saved_together(self):
+        await self.db.save_account(10, "1", "9", "first", "KZ", token_renewed_at=100_000.0)
+        await self.db.set_refresh_token(10, "rotated", 186_400.0)
+        account = await self.db.account(10)
+        self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("rotated", 186_400.0))
+        self.assertNotIn(b"rotated", account["refresh_token"])
+
+        await self.db.save_account(10, "1", "9", "relogin", token_renewed_at=186_400.0)
+        account = await self.db.account(10)
+        self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("relogin", 186_400.0))
+        await self.db.set_refresh_token(10, None)
+        account = await self.db.account(10)
+        self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), (None, 0.0))
+
+    async def test_renewal_schema_upgrade_keeps_existing_accounts(self):
+        await self.db.save_account(10, "1", "9", "legacy", "KZ")
+        await self.db.set_status(10, "approved")
+        await self.db.pool.execute("ALTER TABLE accounts DROP COLUMN IF EXISTS token_renewed_at")
+        await self.db.pool.execute(SCHEMA)
+        await self.db.pool.execute(SCHEMA)
+        account = await self.db.account(10)
+        self.assertEqual(account["token_renewed_at"], 0.0)
+        self.assertEqual(
+            (self.db.refresh_token(account), account["country"], account["status"]), ("legacy", "KZ", "approved")
+        )
 
     async def test_fsm_storage(self):
         storage = PgStorage(self.db)

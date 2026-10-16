@@ -133,5 +133,107 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.db.family("9"))["state"]["ownership"], {})
 
 
+@needs_pg
+class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.db = await fresh_db()
+        self.families = Families(self.db, http=None, bot=AsyncMock())
+        self.patches = [
+            patch("bot.family.update_store_cache", AsyncMock(return_value=False)),
+            patch("bot.family.fetch_user_country", AsyncMock(return_value="KZ")),
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))),
+            patch("bot.steam_auth.time.time", return_value=100_000.0),
+            patch("bot.steam_auth.call", AsyncMock(return_value={1: b"access", 2: b"rotated"})),
+        ]
+        self.steam_call = self.patches[-1].start()
+        for p in self.patches[:-1]:
+            p.start()
+
+    async def asyncTearDown(self):
+        for p in self.patches:
+            p.stop()
+        await self.db.pool.close()
+
+    async def test_first_registration_keeps_replacement_token_after_restart(self):
+        await self.families.register(1, "original", ALICE)
+        account = await self.db.account(1)
+        self.assertEqual(self.db.refresh_token(account), "rotated")
+        self.assertEqual(account["token_renewed_at"], 100_000.0)
+        self.assertEqual([dict(c.args[2])[3] for c in self.steam_call.await_args_list], [1, 0])
+
+        restarted = Families(self.db, http=None, bot=AsyncMock())
+        self.steam_call.reset_mock()
+        await restarted.refresh("9")
+        fields = dict(self.steam_call.await_args.args[2])
+        self.assertEqual((fields[1], fields[3]), ("rotated", 0))
+        self.assertEqual((await self.db.account(1))["token_renewed_at"], 100_000.0)
+
+    async def test_relogin_keeps_rotated_token_and_existing_approval(self):
+        await self.families.register(1, "original", ALICE)
+        with patch("bot.steam_auth.time.time", return_value=200_000.0):
+            self.steam_call.return_value = {1: b"access", 2: b"relogin-rotated"}
+            await self.families.register(1, "new-login", ALICE)
+        account = await self.db.account(1)
+        self.assertEqual(self.db.refresh_token(account), "relogin-rotated")
+        self.assertEqual((account["token_renewed_at"], account["status"]), (200_000.0, "approved"))
+
+        restarted = Families(self.db, http=None, bot=AsyncMock())
+        self.steam_call.reset_mock()
+        with patch("bot.steam_auth.time.time", return_value=200_001.0):
+            await restarted.refresh("9")
+        fields = dict(self.steam_call.await_args.args[2])
+        self.assertEqual((fields[1], fields[3]), ("relogin-rotated", 0))
+
+    async def test_relogin_within_day_keeps_renewal_time(self):
+        await self.families.register(1, "original", ALICE)
+        self.steam_call.reset_mock()
+        self.steam_call.return_value = {1: b"access"}
+        with patch("bot.steam_auth.time.time", return_value=100_001.0):
+            await self.families.register(1, "new-login", ALICE)
+        account = await self.db.account(1)
+        self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("new-login", 100_000.0))
+        self.assertTrue(all(dict(c.args[2])[3] == 0 for c in self.steam_call.await_args_list))
+
+    async def test_different_steam_account_does_not_inherit_renewal_time(self):
+        await self.families.register(1, "original", ALICE)
+        self.steam_call.reset_mock()
+        with patch("bot.steam_auth.time.time", return_value=100_001.0):
+            await self.families.register(1, "other-login", BOB)
+        account = await self.db.account(1)
+        self.assertEqual((account["steam_id"], account["token_renewed_at"]), (BOB, 100_001.0))
+        self.assertEqual(dict(self.steam_call.await_args_list[0].args[2])[3], 1)
+
+    async def test_cached_auth_keeps_pending_credentials_during_database_failure(self):
+        await self.families.register(1, "original", ALICE)
+        account = await self.db.account(1)
+        self.steam_call.return_value = {1: b"x.eyJleHAiOjMwMDAwMH0.y", 2: b"pending"}
+        self.steam_call.reset_mock()
+        with (
+            patch("bot.steam_auth.time.time", return_value=200_000.0),
+            patch.object(self.db, "set_refresh_token", AsyncMock(side_effect=OSError("unavailable"))),
+        ):
+            with self.assertRaises(OSError):
+                await self.families.owner_token(account)
+        cached = self.families.auths[1]
+        with patch("bot.steam_auth.time.time", return_value=200_001.0):
+            await self.families.owner_token(await self.db.account(1))
+        self.assertIs(self.families.auths[1], cached)
+        self.steam_call.assert_awaited_once()
+        account = await self.db.account(1)
+        self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("pending", 200_000.0))
+
+    async def test_failed_registration_does_not_replace_saved_credentials(self):
+        await self.families.register(1, "original", ALICE)
+        with (
+            patch("bot.steam_auth.time.time", return_value=200_000.0),
+            patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=OSError("unavailable"))),
+        ):
+            self.steam_call.return_value = {1: b"access", 2: b"uncommitted"}
+            with self.assertRaises(OSError):
+                await self.families.register(1, "new-login", ALICE)
+        account = await self.db.account(1)
+        self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("rotated", 100_000.0))
+
+
 if __name__ == "__main__":
     unittest.main()
