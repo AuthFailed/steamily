@@ -634,6 +634,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
             await self.families.register(NEWCOMER, "duplicate", ALICE)
         await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
         await self.db.set_language(FRIEND, "ru")
+        self.families.get(FAMILY).apps[2]["exclude_reason"] = 1
         cards = {
             3: {"name": "Game 03", "description": "Desc", "price_text": "300₸", "thumbnail": "https://img/3.jpg"},
             999: {"name": "Other", "description": "", "price_text": "1 000₸", "thumbnail": None},
@@ -659,6 +660,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.id for r in results], ["3", "999"])  # family game first
         card = results[0].input_message_content.message_text
         self.assertIn("300₸", card)
+        self.assertIn("Семейный доступ исключён: исключено издателем", card)
         self.assertIn(
             'Есть в семье у:\n• <a href="https://steamcommunity.com/id/alice/">Alice</a> · '
             '<a href="https://t.me/alice_tg">@alice_tg</a>\n• <a href="https://steamcommunity.com/profiles/'
@@ -668,6 +670,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(results[0].reply_markup.inline_keyboard[0][0].url, "https://store.steampowered.com/app/3/")
         self.assertIn("В семье ни у кого нет", results[1].input_message_content.message_text)
+        self.assertNotIn("Семейный доступ исключён", results[1].input_message_content.message_text)
 
         answer.reset_mock()
         with patch("aiogram.types.InlineQuery.answer", answer):

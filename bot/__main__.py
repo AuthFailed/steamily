@@ -26,6 +26,7 @@ from .login import Logins
 from .states import Admin, FamilyView, Menu
 
 router = Router()
+log = logging.getLogger(__name__)
 
 
 class AccountMiddleware(BaseMiddleware):
@@ -147,6 +148,16 @@ def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, 
     return dp
 
 
+def background_finished(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        log.error("Background task %s failed", task.get_name(), exc_info=error)
+    else:
+        log.error("Background task %s stopped unexpectedly", task.get_name())
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     bot = Bot(required("TELEGRAM_BOT_TOKEN"), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -157,14 +168,17 @@ async def main() -> None:
         dp = create_dispatcher(db, families, logins)
         families.bot_username = (await bot.me()).username
         loops = [
-            asyncio.create_task(families.refresh_loop(poll_seconds())),
-            asyncio.create_task(families.presence_loop()),
+            asyncio.create_task(families.refresh_loop(poll_seconds()), name="family-refresh"),
+            asyncio.create_task(families.presence_loop(), name="family-presence"),
         ]
+        for loop in loops:
+            loop.add_done_callback(background_finished)
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         finally:
             for loop in loops:
                 loop.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
             await logins.close()
             await db.pool.close()
 

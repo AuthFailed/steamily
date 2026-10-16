@@ -42,6 +42,10 @@ def format_notification(event: dict, names: dict, lang: str) -> str:
     )
 
 
+def shareable_copies(app: dict) -> int:
+    return len(app["owners"]) if app.get("exclude_reason", 0) == 0 else 0
+
+
 def query(
     apps: list[dict],
     store: dict,
@@ -55,7 +59,7 @@ def query(
     sort: str = "name",
     desc: bool = False,
 ) -> list[dict]:
-    """Filters and sorts family games. `players`: everyone must be able to play at once, so copies >= len(players)."""
+    """Filter by ownership/sharing eligibility and copy capacity; live availability is not known."""
     details = store.get("apps", {})
     words = search.lower().split()
     low, high = PRICE_RANGES.get(price, (None, None))
@@ -69,6 +73,8 @@ def query(
         if multiplayer and not info.get("multiplayer"):
             continue
         if len(app["owners"]) < len(players):
+            continue
+        if not shareable_copies(app) and not set(players) <= set(app["owners"]):
             continue
         if not set(owners) <= set(app["owners"]):  # "games we both have"
             continue
