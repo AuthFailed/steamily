@@ -1,5 +1,6 @@
 """Inline mode: `@bot game name` in any chat finds games and posts a card in the sender's language and currency."""
 
+import asyncio
 import logging
 from html import escape
 
@@ -23,6 +24,7 @@ from .steam import search_store, store_cards
 log = logging.getLogger(__name__)
 router = Router()
 MAX_RESULTS = 15
+STORE_TIMEOUT = 2  # two optional Store calls must leave time to answer the inline query
 
 
 def card_text(lang: str, name: str, description: str, price: str | None, owners: list[str], url: str) -> str:
@@ -63,12 +65,18 @@ async def search(query: InlineQuery, db: Db, families: Families):
     country = account["country"] or DEFAULT_COUNTRY
     term = query.query.strip()[:100]
     in_family = family_matches(family.apps, term)
-    from_store = await search_store(families.http, term, lang, country) if term else []
+    try:
+        async with asyncio.timeout(STORE_TIMEOUT):
+            from_store = await search_store(families.http, term, lang, country) if term else []
+    except Exception as error:
+        log.warning("Store search for inline query failed (%s)", type(error).__name__)
+        from_store = []
     appids = list(dict.fromkeys(in_family + from_store))[:MAX_RESULTS]
     try:
-        cards = await store_cards(families.http, appids, lang, country)
-    except Exception:  # still answer with what the family library knows
-        log.exception("Store details for inline search failed")
+        async with asyncio.timeout(STORE_TIMEOUT):
+            cards = await store_cards(families.http, appids, lang, country)
+    except Exception as error:  # still answer with what the family library knows
+        log.warning("Store details for inline search failed (%s)", type(error).__name__)
         cards = {}
 
     names = {a["appid"]: a["name"] for a in family.apps}
