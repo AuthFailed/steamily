@@ -34,9 +34,15 @@ class SteamResponseParsingTest(unittest.TestCase):
         self.assertEqual(
             snapshot["apps"],
             [
-                {"appid": 10, "name": "Fixture Game", "owners": [ALICE, BOB], "acquired": 1700000020},
-                {"appid": 20, "name": "App 20", "owners": [CHARLIE], "acquired": 0},
-                {"appid": 30, "name": "App 30", "owners": [], "acquired": 0},
+                {
+                    "appid": 10,
+                    "name": "Fixture Game",
+                    "owners": [ALICE, BOB],
+                    "acquired": 1700000020,
+                    "exclude_reason": 0,
+                },
+                {"appid": 20, "name": "App 20", "owners": [CHARLIE], "acquired": 0, "exclude_reason": 0},
+                {"appid": 30, "name": "App 30", "owners": [], "acquired": 0, "exclude_reason": 0},
             ],
         )
         self.assertEqual(snapshot["names"], {ALICE: "Alice & Алиса", BOB: "Bob"})

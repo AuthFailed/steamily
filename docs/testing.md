@@ -31,6 +31,6 @@ recordings must be sanitized before committing: remove tokens, cookies, QR sessi
 identifiers and personal data.
 
 Issue #8 tracks shared test infrastructure. Behavioral regression tests for linked
-backlog items belong with those implementations; in particular, database
-enumeration recovery (#13) and inline store-search transport failures (#17) still
-need their respective fixes and regression tests.
+backlog items belong with those implementations. The shared suite also runs the
+regressions added by those issues, including inline store-search transport
+recovery (#17) and per-family refresh serialization (#15).

@@ -223,6 +223,7 @@ def parse_snapshot(family: dict, library: dict, players: dict) -> dict:
                 "name": app.get("name") or f"App {app['appid']}",
                 "owners": sorted({str(o) for o in app.get("owner_steamids", [])}),
                 "acquired": app.get("rt_time_acquired", 0),
+                "exclude_reason": app.get("exclude_reason", 0),
             }
             for app in apps
         ],
