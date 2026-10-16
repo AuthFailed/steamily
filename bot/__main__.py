@@ -27,6 +27,23 @@ from .states import Admin, FamilyView, Menu
 router = Router()
 
 
+class GroupMigrationMiddleware(BaseMiddleware):
+    """Handle service notices before dialog middleware, which requires a sender."""
+
+    async def __call__(self, handler, message: Message, data: dict):
+        if (
+            message
+            and message.chat.type != "private"
+            and (message.migrate_to_chat_id is not None or message.migrate_from_chat_id is not None)
+        ):
+            await data["db"].migrate_chat(
+                message.migrate_from_chat_id or message.chat.id,
+                message.migrate_to_chat_id or message.chat.id,
+            )
+            return None
+        return await handler(message, data)
+
+
 class AccountMiddleware(BaseMiddleware):
     """Loads the sender's account and family. In groups only /link gets through."""
 
@@ -134,6 +151,7 @@ async def stale_button(event: ErrorEvent, dialog_manager: DialogManager, lang: s
 
 def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, **dialog_options) -> Dispatcher:
     dp = Dispatcher(storage=storage or PgStorage(db), db=db, families=families, logins=logins)
+    dp.message.outer_middleware(GroupMigrationMiddleware())
     dp.include_routers(router, inline_router, menu_dialog, games_dialog, family_dialog, admin_dialog)
     setup_dialogs(dp, **dialog_options)
     for observer in (dp.message, dp.callback_query, dp.observers[DIALOG_EVENT_NAME]):
@@ -155,6 +173,7 @@ async def main() -> None:
         loops = [
             asyncio.create_task(families.refresh_loop(poll_seconds())),
             asyncio.create_task(families.presence_loop()),
+            asyncio.create_task(families.delivery_loop()),
         ]
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
