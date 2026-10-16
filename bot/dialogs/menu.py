@@ -12,8 +12,9 @@ from aiogram_dialog.widgets.text import Format
 
 from ..config import LOGIN_LOCATION
 from ..family import Family, alert_settings, role
-from ..i18n import LANGUAGES, Tr, t
+from ..i18n import LANGUAGES, Tr, language_of, t
 from ..library import ALERTS
+from ..login import LoginRejected
 from ..states import FamilyView, Games, Menu
 from ..ui import GREEN, RED, Header, back_home, look, premium
 
@@ -52,6 +53,9 @@ async def main_getter(account, family: Family | None, lang: str, **kwargs):
 async def on_login(callback: CallbackQuery, button: Button, manager: DialogManager):
     try:
         login = await manager.middleware_data["logins"].start(callback.from_user.id, manager.bg())
+    except LoginRejected as error:
+        await callback.answer(t(language_of(manager), error.reason, seconds=error.retry_after), show_alert=True)
+        return
     except Exception:
         login = {"login": "failed"}
     manager.dialog_data.update(login)

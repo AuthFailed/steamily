@@ -108,7 +108,8 @@ async def main() -> None:
     db = await Db.connect(required("DATABASE_URL"), required("SECRET_KEY"))
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as http:
         families = Families(db, http, bot)
-        dp = create_dispatcher(db, families, Logins(families, bot))
+        logins = Logins(families, bot)
+        dp = create_dispatcher(db, families, logins)
         families.bot_username = (await bot.me()).username
         loops = [
             asyncio.create_task(families.refresh_loop(poll_seconds())),
@@ -119,6 +120,7 @@ async def main() -> None:
         finally:
             for loop in loops:
                 loop.cancel()
+            await logins.close()
             await db.pool.close()
 
 
