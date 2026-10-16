@@ -11,3 +11,12 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.coverage.run]
+branch = true
+source = ["bot"]
+
+[tool.coverage.report]
+fail_under = 90
+precision = 2
+show_missing = true

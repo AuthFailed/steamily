@@ -1,5 +1,8 @@
+import logging
+from datetime import UTC, datetime
 from html import escape
 
+import aiohttp
 from aiogram import F
 from aiogram.enums import ContentType
 from aiogram.exceptions import TelegramAPIError
@@ -10,14 +13,31 @@ from aiogram_dialog.widgets.kbd import Button, Group, Select, Start, SwitchTo, U
 from aiogram_dialog.widgets.media import DynamicMedia
 from aiogram_dialog.widgets.text import Format
 
-from ..config import LOGIN_LOCATION
-from ..family import Family, alert_settings, role
-from ..i18n import LANGUAGES, Tr, t
+from ..config import INSTANCE_HOSTING, INSTANCE_OPERATOR, LOGIN_LOCATION
+from ..family import Family, SessionRevocationFailed, alert_settings, role
+from ..i18n import LANGUAGES, Tr, language_of, t
 from ..library import ALERTS
+from ..login import LoginRejected
 from ..states import FamilyView, Games, Menu
 from ..ui import GREEN, RED, Header, back_home, look, premium
+from . import require_owner
 
 STATUS_KEYS = {"none": "status_none", "pending": "status_pending", "blocked": "status_blocked"}
+PUBLICATION_SETTINGS = {"p": "publish_presence", "t": "publish_telegram"}
+log = logging.getLogger(__name__)
+
+
+async def instance_getter(account, families, lang: str, **kwargs):
+    checked = families.last_family_check.get(account["family_id"]) if account else families.last_steam_check
+    unknown = t(lang, "instance_unknown")
+    return {
+        "operator": escape(INSTANCE_OPERATOR or unknown),
+        "hosting": escape(INSTANCE_HOSTING or unknown),
+        "location": escape(LOGIN_LOCATION or unknown),
+        "checked": datetime.fromtimestamp(checked, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if checked is not None
+        else t(lang, "check_never"),
+    }
 
 
 async def language_getter(**kwargs):
@@ -57,6 +77,9 @@ async def on_login(callback: CallbackQuery, button: Button, manager: DialogManag
 async def begin_login(callback: CallbackQuery, button: Button, manager: DialogManager):
     try:
         login = await manager.middleware_data["logins"].start(callback.from_user.id, manager.bg())
+    except LoginRejected as error:
+        await callback.answer(t(language_of(manager), error.reason, seconds=error.retry_after), show_alert=True)
+        return
     except Exception:
         login = {"login": "failed"}
     manager.dialog_data.update(login)
@@ -75,9 +98,16 @@ async def login_getter(dialog_manager: DialogManager, lang: str, **kwargs):
         "waiting": waiting,
         "qr": MediaAttachment(ContentType.PHOTO, path=data["qr"]) if waiting else None,
         "url": data.get("url", ""),
-        "location": LOGIN_LOCATION or t(lang, "location_unknown"),
+        "location": escape(LOGIN_LOCATION or t(lang, "location_unknown")),
         "failure": f"{premium('login')} <b>{t(lang, 'login_title')}</b>\n\n"
-        + t(lang, {"timeout": "login_timeout", "no_family": "login_no_family"}.get(data.get("login"), "login_failed")),
+        + t(
+            lang,
+            {
+                "timeout": "login_timeout",
+                "no_family": "login_no_family",
+                "already_linked": "login_already_linked",
+            }.get(data.get("login"), "login_failed"),
+        ),
     }
 
 
@@ -85,16 +115,70 @@ async def login_intro_getter(lang: str, **kwargs):
     return {"location": escape(LOGIN_LOCATION or t(lang, "location_unknown"))}
 
 
-async def settings_getter(account, db, **kwargs):
+async def settings_getter(dialog_manager: DialogManager, account, db, lang: str = "en", **kwargs):
+    if account:
+        dialog_manager.dialog_data.setdefault("family_id", account["family_id"])
     is_owner = role(account) == "owner"
+    can_publish = bool(account and account["status"] == "approved" and account["refresh_token"])
     return {
         "has_account": account is not None,
         "is_owner": is_owner,
         "requests_on": is_owner and await db.notify_requests(account["telegram_id"]),
+        "can_publish": can_publish,
+        "publication_items": [
+            (
+                f"{code}:{account['publication_version']}:{int(not account[setting])}",
+                t(lang, f"btn_{setting}_{'on' if account[setting] else 'off'}"),
+            )
+            for code, setting in PUBLICATION_SETTINGS.items()
+        ]
+        if can_publish
+        else [],
     }
 
 
+async def set_publication(callback: CallbackQuery, widget, manager: DialogManager, item_id: str):
+    db = manager.middleware_data["db"]
+    account = await db.account(callback.from_user.id)
+    manager.middleware_data["account"] = account
+    parts = item_id.split(":")
+    valid = (
+        len(parts) == 3
+        and parts[0] in PUBLICATION_SETTINGS
+        and parts[2] in ("0", "1")
+        and account is not None
+        and account["telegram_id"] == callback.from_user.id
+        and account["publication_version"] == parts[1]
+        and account["status"] == "approved"
+        and bool(account["refresh_token"])
+    )
+    if valid and parts[2] == "1":
+        families = manager.middleware_data["families"]
+        try:
+            async with families.get(account["family_id"]).lock:
+                snapshot = await families._fetch(account["family_id"])
+        except (aiohttp.ClientError, TimeoutError, RuntimeError):
+            snapshot = None
+        valid = bool(
+            snapshot and snapshot["family_id"] == account["family_id"] and account["steam_id"] in snapshot["members"]
+        )
+        manager.middleware_data["account"] = await db.account(callback.from_user.id)
+    if not valid or not await db.set_publication(
+        callback.from_user.id,
+        account["steam_id"],
+        account["family_id"],
+        PUBLICATION_SETTINGS[parts[0]],
+        parts[2] == "1",
+        expected_version=parts[1],
+    ):
+        await callback.answer(t(language_of(manager), "publication_unavailable"), show_alert=True)
+        return
+    manager.middleware_data["account"] = await db.account(callback.from_user.id)
+
+
 async def toggle_requests(callback: CallbackQuery, button: Button, manager: DialogManager):
+    if await require_owner(manager) is None:
+        return
     db = manager.middleware_data["db"]
     await db.set_notify_requests(callback.from_user.id, not await db.notify_requests(callback.from_user.id))
 
@@ -117,23 +201,33 @@ async def group_alerts_getter(account, db, families, bot, lang: str, **kwargs):
 
 
 async def toggle_alert(callback: CallbackQuery, widget, manager: DialogManager, kind: str):
+    account = await require_owner(manager)
+    if account is None:
+        return
     db = manager.middleware_data["db"]
-    family_id = manager.middleware_data["account"]["family_id"]
+    family_id = account["family_id"]
     alerts = alert_settings(await db.family(family_id))
     await db.update_family(family_id, alerts={**alerts, kind: not alerts[kind]})
 
 
 async def unlink_group(callback: CallbackQuery, button: Button, manager: DialogManager):
-    await manager.middleware_data["db"].update_family(manager.middleware_data["account"]["family_id"], notify_chat=None)
+    account = await require_owner(manager)
+    if account is None:
+        return
+    await manager.middleware_data["db"].update_family(account["family_id"], notify_chat=None)
 
 
-async def logout_getter(account, db, **kwargs):
+async def logout_getter(account, db, family: Family | None, **kwargs):
     others = []
     if role(account) == "owner":
         others = [
             a
             for a in await db.family_accounts(account["family_id"])
-            if a["telegram_id"] != account["telegram_id"] and a["status"] != "blocked"
+            if a["telegram_id"] != account["telegram_id"]
+            and a["status"] != "blocked"
+            and family is not None
+            and a["steam_id"] in family.members
+            and a["refresh_token"]
         ]
     return {
         "owner_handover": role(account) == "owner" and bool(others),
@@ -144,20 +238,33 @@ async def logout_getter(account, db, **kwargs):
 async def on_logout(callback: CallbackQuery, button: Button, manager: DialogManager):
     families = manager.middleware_data["families"]
     family = manager.middleware_data["family"]
+    await manager.middleware_data["logins"].forget(callback.from_user.id)
     try:
         new_owner = await families.leave(callback.from_user.id)
-    except Exception:
+    except SessionRevocationFailed:
         await callback.answer(t(manager.middleware_data["lang"], "logout_failed"), show_alert=True)
         return
-    if new_owner is not None:
-        lang = await families.db.language(new_owner)
-        name = escape(family.snapshot["name"]) if family and family.snapshot else ""
-        await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
-        await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
-    # Logout also forgets the language, so the user starts over with the language choice.
+    manager.middleware_data["deleted_dialogs"].append(callback.from_user.id)
     manager.middleware_data.update(account=None, family=None, has_language=False)
-    await callback.answer(t(manager.middleware_data["lang"], "logged_out"))
-    await manager.start(Menu.language, mode=StartMode.RESET_STACK)
+    try:
+        await callback.answer(t(manager.middleware_data["lang"], "logged_out"))
+    except Exception:
+        log.exception("Could not answer logout callback for %s", callback.from_user.id)
+    try:
+        await manager.start(Menu.deleted, mode=StartMode.RESET_STACK)
+    except Exception:
+        log.exception("Could not reset menu after logout for %s", callback.from_user.id)
+    if new_owner is not None:
+        try:
+            lang = await families.db.language(new_owner)
+            name = escape(family.snapshot["name"]) if family and family.snapshot else ""
+            await families.bot.send_message(new_owner, t(lang, "new_owner", name=name))
+        except Exception:
+            log.exception("Could not notify new owner %s after logout", new_owner)
+        try:
+            await manager.bg(user_id=new_owner, chat_id=new_owner).start(Menu.main, mode=StartMode.RESET_STACK)
+        except Exception:
+            log.exception("Could not refresh new owner %s menu after logout", new_owner)
 
 
 menu_dialog = Dialog(
@@ -183,6 +290,7 @@ menu_dialog = Dialog(
         Button(Tr("btn_login"), id="login", on_click=on_login, when="needs_login", style=look("login", GREEN)),
         Start(Tr("btn_family"), id="family", state=FamilyView.info, when="loaded", style=look("family")),
         SwitchTo(Tr("btn_settings"), id="settings", state=Menu.settings, style=look("settings")),
+        SwitchTo(Tr("btn_about"), id="about", state=Menu.about),
         getter=main_getter,
         state=Menu.main,
     ),
@@ -205,6 +313,15 @@ menu_dialog = Dialog(
     ),
     Window(
         Header("settings", "settings"),
+        Tr("publication_desc", when="can_publish"),
+        Select(
+            Format("{item[1]}"),
+            id="publication",
+            item_id_getter=lambda item: item[0],
+            items="publication_items",
+            on_click=set_publication,
+            when="can_publish",
+        ),
         Button(
             Tr("btn_requests_on"),
             id="requests_off",
@@ -227,7 +344,7 @@ menu_dialog = Dialog(
             style=look("notifications"),
         ),
         SwitchTo(Tr("btn_language"), id="to_language", state=Menu.language, style=look("language")),
-        SwitchTo(Tr("btn_logout"), id="logout", state=Menu.logout, when="has_account", style=look("logout", RED)),
+        SwitchTo(Tr("btn_logout"), id="logout", state=Menu.logout, style=look("logout", RED)),
         SwitchTo(Tr("btn_back"), id="settings_back", state=Menu.main),
         getter=settings_getter,
         state=Menu.settings,
@@ -261,5 +378,26 @@ menu_dialog = Dialog(
         SwitchTo(Tr("btn_cancel"), id="cancel_logout", state=Menu.settings, style=look("cancel")),
         getter=logout_getter,
         state=Menu.logout,
+    ),
+    Window(Tr("deleted_desc"), state=Menu.deleted),
+    Window(
+        Header("family", "about"),
+        SwitchTo(Tr("btn_privacy"), id="privacy", state=Menu.privacy),
+        SwitchTo(Tr("btn_status"), id="status", state=Menu.status),
+        SwitchTo(Tr("btn_home"), id="info_home", state=Menu.main),
+        getter=instance_getter,
+        state=Menu.about,
+    ),
+    Window(
+        Header("settings", "privacy"),
+        SwitchTo(Tr("btn_logout"), id="privacy_delete", state=Menu.logout, style=look("logout", RED)),
+        SwitchTo(Tr("btn_back"), id="privacy_back", state=Menu.about),
+        state=Menu.privacy,
+    ),
+    Window(
+        Header("notifications", "instance_status"),
+        SwitchTo(Tr("btn_back"), id="status_back", state=Menu.about),
+        getter=instance_getter,
+        state=Menu.status,
     ),
 )

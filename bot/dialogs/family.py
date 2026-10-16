@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 from html import escape
+from pathlib import Path
 
 from aiogram import F
 from aiogram.enums import ContentType
@@ -17,7 +18,7 @@ from aiogram_dialog.widgets.media import DynamicMedia
 from aiogram_dialog.widgets.text import Format
 
 from .. import charts, library
-from ..family import Families, Family, accounts_by_steam, person_link, role
+from ..family import Families, Family, accounts_by_steam, person_link, publication_allowed, role
 from ..i18n import Tr, t
 from ..states import Admin, FamilyView, Games
 from ..steam import (
@@ -32,6 +33,7 @@ from ..steam import (
 )
 from ..steam_auth import TokenRejected
 from ..ui import BLUE, GREEN, RED, Header, back_home, look
+from . import current_owner, require_owner
 
 log = logging.getLogger(__name__)
 # Previews only for store pages: profile links would show a big avatar card.
@@ -54,7 +56,10 @@ async def info_getter(dialog_manager: DialogManager, family: Family, account, db
     players = family.snapshot.get("players", {})
     lines = []
     for member in sorted(family.members, key=lambda m: family.snapshot.get("joined", {}).get(m) or 0):
-        marks = (" 👑" if member == owner else "") + (" 🟢" if players.get(member, {}).get("online") else "")
+        visible = member == account["steam_id"] or publication_allowed(family, member, accounts, "publish_presence")
+        marks = (" 👑" if member == owner else "") + (
+            " 🟢" if visible and players.get(member, {}).get("online") else ""
+        )
         child = f" ({t(lang, 'role_child')})" if family.snapshot.get("roles", {}).get(member) == 2 else ""
         lines.append(f"• {person_link(family, member, accounts)}{child}{marks}")
     free = family.snapshot.get("free_spots", 0)
@@ -86,7 +91,7 @@ async def on_stat(callback: CallbackQuery, widget, manager: DialogManager, key: 
     await manager.switch_to(FamilyView.stat)
 
 
-def render_stat(key: str, family: Family, store: dict, lang: str) -> str:
+def render_stat(key: str, family: Family, store: dict, lang: str, directory: Path) -> str:
     title = t(lang, f"stat_{key}")
     names = {m: family.name(m) for m in family.members}
     by_member = None
@@ -100,29 +105,42 @@ def render_stat(key: str, family: Family, store: dict, lang: str) -> str:
                 key=lambda item: -item[1],
             ),
             " " + library.currency(store),
+            directory=directory,
         )
     elif key == "exclusive":
         by_member = library.exclusive_per_member(family.apps, family.members)
     elif key == "added":
-        return charts.columns(title, library.added_per_month(family.apps))
+        return charts.columns(title, library.added_per_month(family.apps), directory=directory)
     elif key == "genres":
         tag_names = store.get("tag_names", {})
         return charts.bars(
-            title, [(tag_names[tag], count) for tag, count in library.tag_counts(family.apps, store)[:10]]
+            title,
+            [(tag_names[tag], count) for tag, count in library.tag_counts(family.apps, store)[:10]],
+            directory=directory,
         )
     elif key == "borrowed_games":
         return charts.bars(
-            title, library.borrowed_hours_per_game(family.snapshot.get("playtime", []), family.apps), " h"
+            title,
+            library.borrowed_hours_per_game(family.snapshot.get("playtime", []), family.apps),
+            " h",
+            directory=directory,
         )
     elif key == "borrowed_members":
         hours = library.borrowed_hours_per_member(family.snapshot.get("playtime", []), family.members)
-        return charts.bars(title, sorted(((names[m], h) for m, h in hours.items()), key=lambda item: -item[1]), " h")
-    return charts.bars(title, sorted(((names[m], n) for m, n in by_member.items()), key=lambda item: -item[1]))
+        return charts.bars(
+            title,
+            sorted(((names[m], h) for m, h in hours.items()), key=lambda item: -item[1]),
+            " h",
+            directory=directory,
+        )
+    return charts.bars(
+        title, sorted(((names[m], n) for m, n in by_member.items()), key=lambda item: -item[1]), directory=directory
+    )
 
 
 async def stat_getter(dialog_manager: DialogManager, family: Family, lang: str, **kwargs):
     key = dialog_manager.dialog_data["stat"]
-    path = await asyncio.to_thread(render_stat, key, family, viewer_store(dialog_manager), lang)
+    path = await asyncio.to_thread(render_stat, key, family, viewer_store(dialog_manager), lang, family.chart_dir)
     return {
         "chart": MediaAttachment(ContentType.PHOTO, path=path),
         "stat_name": t(lang, f"stat_{key}"),
@@ -131,14 +149,15 @@ async def stat_getter(dialog_manager: DialogManager, family: Family, lang: str, 
 
 
 # Members
-async def members_getter(family: Family, **kwargs):
+async def members_getter(family: Family, account, db, **kwargs):
+    accounts = await accounts_by_steam(db, family.family_id)
     players = family.snapshot.get("players", {})
-    return {
-        "members": [
-            (m, ("🟢 " if players.get(m, {}).get("online") else "") + family.name(m))
-            for m in sorted(family.members, key=lambda m: family.name(m).lower())
-        ]
-    }
+    members = []
+    for member in sorted(family.members, key=lambda m: family.name(m).lower()):
+        visible = member == account["steam_id"] or publication_allowed(family, member, accounts, "publish_presence")
+        prefix = "🟢 " if visible and players.get(member, {}).get("online") else ""
+        members.append((member, prefix + family.name(member)))
+    return {"members": members}
 
 
 async def on_member(callback: CallbackQuery, widget, manager: DialogManager, steam_id: str):
@@ -150,20 +169,23 @@ async def member_getter(
     dialog_manager: DialogManager, family: Family, families: Families, account, db, lang: str, **kwargs
 ):
     steam_id = dialog_manager.dialog_data["member"]
-    links = person_link(family, steam_id, await accounts_by_steam(db, family.family_id))
     store = viewer_store(dialog_manager)
-    player = family.snapshot.get("players", {}).get(steam_id, {})
     stats = await families.member_stats(family.family_id, steam_id)
+    accounts = await accounts_by_steam(db, family.family_id)
+    player = family.snapshot.get("players", {}).get(steam_id, {})
+    visible = steam_id == account["steam_id"] or publication_allowed(family, steam_id, accounts, "publish_presence")
     unknown = t(lang, "private")
     own = [a for a in family.apps if steam_id in a["owners"]]
     hours_borrowed = library.borrowed_hours_per_member(family.snapshot.get("playtime", []), [steam_id])[steam_id]
     in_family = steam_id in family.members
     return {
         "member_name": escape(family.name(steam_id)),
-        "links": links,
-        "status": t(lang, "online")
-        if player.get("online")
-        else t(lang, "last_online", when=date(player.get("last_online"))),
+        "links": person_link(family, steam_id, accounts),
+        "status": (
+            t(lang, "online") if player.get("online") else t(lang, "last_online", when=date(player.get("last_online")))
+        )
+        if visible
+        else unknown,
         "level": stats.get("level") if stats.get("level") is not None else unknown,
         "created": date(player.get("created")),
         "steam_games": stats.get("games") if stats.get("games") is not None else unknown,
@@ -187,14 +209,17 @@ async def common_games(callback: CallbackQuery, button: Button, manager: DialogM
 # Owner actions on the Steam family
 async def act(manager: DialogManager, action, *args) -> None:
     """Runs a Steam family change with the acting user's own login and shows the outcome on the manage screen."""
+    account = await require_owner(manager)
+    if account is None:
+        return
     families: Families = manager.middleware_data["families"]
     family: Family = manager.middleware_data["family"]
     lang = manager.middleware_data["lang"]
     try:
-        token = await families.owner_token(manager.middleware_data["account"])
+        token = await families.owner_token(account)
         await action(families.http, token, family.family_id, *args)
     except TokenRejected:
-        await families._reject_token(manager.middleware_data["account"])
+        await families._reject_token(account)
         manager.dialog_data["notice"] = t(lang, "relogin")
     except SteamActionError as error:
         manager.dialog_data["notice"] = t(lang, "action_failed", error=escape(str(error)))
@@ -223,6 +248,8 @@ async def clear_notice(callback: CallbackQuery, widget, manager: DialogManager, 
 
 
 async def on_invitee(message: Message, widget, manager: DialogManager, text: str):
+    if await require_owner(manager) is None:
+        return
     steam_id = await resolve_profile(manager.middleware_data["families"].http, text)
     if steam_id is None:
         manager.dialog_data["error"] = True
@@ -267,6 +294,9 @@ async def on_rename(message: Message, widget, manager: DialogManager, name: str)
 
 
 async def purchases_getter(dialog_manager: DialogManager, family: Family, families: Families, account, **kwargs):
+    account = await current_owner(dialog_manager)
+    if account is None:
+        return {"requests": [], "denied": True}
     try:
         requests = await purchase_requests(families.http, await families.owner_token(account), family.family_id)
     except TokenRejected:
@@ -276,10 +306,11 @@ async def purchases_getter(dialog_manager: DialogManager, family: Family, famili
         log.warning("Could not load purchase requests (%s)", type(error).__name__)
         requests = []
     return {
+        "denied": False,
         "requests": [
             (str(r["request_id"]), f"❌ {family.name(str(r['requester_steamid']))} · {date(r.get('time_requested'))}")
             for r in requests
-        ]
+        ],
     }
 
 
@@ -288,12 +319,13 @@ async def on_decline(callback: CallbackQuery, widget, manager: DialogManager, re
 
 
 async def on_start(start_data: Data, manager: DialogManager):
+    manager.dialog_data["family_id"] = manager.middleware_data["family"].family_id
     if manager.middleware_data["family"].snapshot is None:  # opened before the family finished loading
         await manager.done()
 
 
-def back_to(state, id_: str):
-    return back_home(SwitchTo(Tr("btn_back"), id=id_, state=state, on_click=clear_notice))
+def back_to(state, id_: str, when=None):
+    return back_home(SwitchTo(Tr("btn_back"), id=id_, state=state, on_click=clear_notice, when=when))
 
 
 family_dialog = Dialog(
@@ -423,14 +455,15 @@ family_dialog = Dialog(
     ),
     Window(
         Header("admin", "purchases"),
-        Tr("purchases_empty", when=~F["requests"]),
+        Tr("owner_action_denied", when="denied"),
+        Tr("purchases_empty", when=~F["requests"] & ~F["denied"]),
         Group(
             Select(
                 Format("{item[1]}"), id="request", item_id_getter=lambda r: r[0], items="requests", on_click=on_decline
             ),
             width=1,
         ),
-        back_to(FamilyView.manage, "back_manage"),
+        back_to(FamilyView.manage, "back_manage", when=~F["denied"]),
         getter=purchases_getter,
         state=FamilyView.purchases,
     ),

@@ -1,3 +1,4 @@
+import logging
 from html import escape
 
 from aiogram import F
@@ -7,26 +8,35 @@ from aiogram_dialog.widgets.kbd import Button, Cancel, ScrollingGroup, Select, S
 from aiogram_dialog.widgets.text import Format
 
 from ..db import Db
-from ..family import Family
+from ..family import Family, publication_allowed
 from ..i18n import Tr, t
 from ..states import Admin, Menu
 from ..ui import GREEN, RED, Header, back_home, look
+from . import deny_action, require_owner
 
 STATUS_ICONS = {"pending": "⏳", "approved": "✅", "blocked": "⛔"}
+log = logging.getLogger(__name__)
 
 
 async def members_getter(db: Db, family: Family, account, **kwargs):
     accounts = await db.family_accounts(family.family_id)
     rows = [
-        (str(a["telegram_id"]), f"{STATUS_ICONS[a['status']]} {family.name(a['steam_id'])}")
+        (a["steam_id"], f"{STATUS_ICONS[a['status']]} {family.name(a['steam_id'])}")
         for a in accounts
         if a["telegram_id"] != account["telegram_id"]
     ]  # the owner looking at the list
     return {"accounts": rows, "count": len(rows)}
 
 
-async def on_member(callback: CallbackQuery, widget, manager: DialogManager, telegram_id: str):
-    manager.dialog_data["telegram_id"] = int(telegram_id)
+async def on_member(callback: CallbackQuery, widget, manager: DialogManager, steam_id: str):
+    db: Db = manager.middleware_data["db"]
+    family: Family = manager.middleware_data["family"]
+    account = next((a for a in await db.family_accounts(family.family_id) if a["steam_id"] == steam_id), None)
+    if account is None:
+        manager.dialog_data.pop("telegram_id", None)
+        await manager.switch_to(Admin.members)
+        return
+    manager.dialog_data["telegram_id"] = account["telegram_id"]
     await manager.switch_to(Admin.member)
 
 
@@ -45,22 +55,46 @@ async def member_getter(dialog_manager: DialogManager, db: Db, family: Family, l
     return {
         "name": escape(family.name(steam)),
         "steam": steam,
-        "telegram": account["telegram_id"],
+        "telegram": account["telegram_id"]
+        if publication_allowed(family, steam, {steam: account}, "publish_telegram")
+        else t(lang, "private"),
         "status_text": t(lang, f"status_{account['status']}_short"),
         "warning": "" if not family.members or steam in family.members else t(lang, "member_left"),
         "status": account["status"],
     }
 
 
-async def set_status(manager: DialogManager, status: str | None) -> None:
+async def set_status(manager: DialogManager, status: str | None) -> bool:
+    actor = await require_owner(manager)
+    if actor is None:
+        return False
     db: Db = manager.middleware_data["db"]
-    telegram_id = manager.dialog_data["telegram_id"]
+    telegram_id = manager.dialog_data.get("telegram_id")
+    target = await db.account(telegram_id) if telegram_id is not None else None
+    if target is None or target["family_id"] != actor["family_id"] or telegram_id == actor["telegram_id"]:
+        await deny_action(manager, "member_gone")
+        return False
     if status:
-        await db.set_status(telegram_id, status)
+        family: Family = manager.middleware_data["family"]
+        changed = await db.set_status(
+            telegram_id,
+            status,
+            family_id=actor["family_id"],
+            members=family.members if status == "approved" else None,
+        )
     else:
-        await db.delete_account(telegram_id)
+        await manager.middleware_data["logins"].forget(telegram_id)
+        changed = await manager.middleware_data["families"].remove(telegram_id, family_id=actor["family_id"])
+    if not changed:
+        await deny_action(manager, "member_gone")
+        return False
     # Reset the user's own dialogs so they immediately see their new access level.
-    await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
+    if status:
+        try:
+            await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
+        except Exception:
+            log.exception("Could not refresh member %s menu after status change", telegram_id)
+    return True
 
 
 async def approve(callback: CallbackQuery, button: Button, manager: DialogManager):
@@ -72,8 +106,15 @@ async def block(callback: CallbackQuery, button: Button, manager: DialogManager)
 
 
 async def remove(callback: CallbackQuery, button: Button, manager: DialogManager):
-    await set_status(manager, None)
-    await manager.switch_to(Admin.members)
+    if await set_status(manager, None):
+        manager.dialog_data.pop("telegram_id", None)
+        await manager.switch_to(Admin.members)
+
+
+async def on_start(start_data, manager: DialogManager):
+    family = manager.middleware_data["family"]
+    if family:
+        manager.dialog_data["family_id"] = family.family_id
 
 
 admin_dialog = Dialog(
@@ -115,4 +156,5 @@ admin_dialog = Dialog(
         getter=member_getter,
         state=Admin.member,
     ),
+    on_start=on_start,
 )

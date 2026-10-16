@@ -1,17 +1,15 @@
-# Run the bot:
-#   1. cp .env.example .env and fill it in (bot token from @BotFather, SECRET_KEY, POSTGRES_PASSWORD)
-#   2. docker compose up -d
-#   3. docker compose logs -f bot
-# Update to the latest version: docker compose pull && docker compose up -d
-# To build from source instead, replace `image:` below with `build: .`
+# Start with the interactive setup in README.md before running the bot.
 
 services:
   bot:
-    image: ghcr.io/authfailed/steamily:main
+    image: ghcr.io/authfailed/steamily:${STEAMILY_VERSION:-main}
+    build: .
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false # Allows the setup command to create it on first run.
     environment:
-      DATABASE_URL: postgresql://bot:${POSTGRES_PASSWORD}@db/bot
+      DATABASE_URL: postgresql://bot:${POSTGRES_PASSWORD:-}@db/bot
     depends_on:
       db:
         condition: service_healthy
@@ -22,7 +20,7 @@ services:
     environment:
       POSTGRES_USER: bot
       POSTGRES_DB: bot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:

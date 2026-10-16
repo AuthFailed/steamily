@@ -2,10 +2,17 @@ import asyncio
 import base64
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from bot.steam_auth import SteamAuth, SteamError, TokenRejected
 from bot.steam_auth import call as auth_call
+from bot.steam_browser import begin_browser_login as begin_qr_login
+from bot.steam_browser import poll_browser_login as poll_qr_login
 
 ALICE = "76561198000000001"
 NOW = 2_000_000_000.0
@@ -393,6 +400,128 @@ class BrowserSteamAuthTest(unittest.IsolatedAsyncioTestCase):
             await self.auth.revoke()
         revoke_call.assert_awaited_once_with(self.shared_http, self.rotated, ALICE)
         self.assertIsNone(self.auth.access_token)
+
+
+class SteamAuthWireTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.fixtures = json.loads((Path(__file__).parent / "fixtures/steam/auth.json").read_text())
+        self.response = self.fixtures["begin"]
+        self.requests = []
+
+        async def respond(request):
+            form = await request.post()
+            self.requests.append(
+                {
+                    "path": request.path,
+                    "headers": request.headers,
+                    "content_type": request.content_type,
+                    "fields": set(form),
+                    "protobuf": base64.b64decode(form["input_protobuf_encoded"], validate=True),
+                }
+            )
+            return web.Response(
+                body=bytes.fromhex(self.response["body_hex"]),
+                status=self.response.get("status", 200),
+                headers=self.response.get("headers", {}),
+            )
+
+        app = web.Application()
+        app.router.add_post("/IAuthenticationService/{method}/v1/", respond)
+        server = TestServer(app)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        self.http = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.http.close)
+        api_patch = patch("bot.steam_auth.API", str(server.make_url("/IAuthenticationService")))
+        api_patch.start()
+        self.addCleanup(api_patch.stop)
+
+    async def test_qr_begin_posts_browser_device_protobuf_and_decodes_interval(self):
+        login = await begin_qr_login(self.http)
+
+        self.assertEqual(
+            login,
+            {
+                "client_id": 4242,
+                "request_id": b"fixture-request-id",
+                "url": "https://s.team/q/fixture-only",
+                "interval": 2.5,
+            },
+        )
+        request = self.requests[0]
+        self.assertEqual(request["path"], "/IAuthenticationService/BeginAuthSessionViaQR/v1/")
+        self.assertEqual(request["content_type"], "multipart/form-data")
+        self.assertEqual(request["fields"], {"input_protobuf_encoded"})
+        self.assertEqual(request["protobuf"], bytes.fromhex("1a0c0a08537465616d696c7910022209436f6d6d756e697479"))
+        self.assertEqual(request["headers"]["user-agent"], "Steamily")
+        self.assertNotIn("cookie", request["headers"])
+
+    async def test_qr_begin_defaults_poll_interval_when_steam_omits_it(self):
+        self.response = self.fixtures["begin_without_interval"]
+        self.assertEqual((await begin_qr_login(self.http))["interval"], 5.0)
+
+    async def test_qr_poll_waits_rotates_and_returns_approved_refresh_token(self):
+        login = await begin_qr_login(self.http)
+        self.response = self.fixtures["pending"]
+        self.assertIsNone(await poll_qr_login(self.http, login))
+        self.assertEqual(login["url"], "https://s.team/q/fixture-only")
+        self.assertEqual(self.requests[-1]["protobuf"], bytes.fromhex(self.response["request_hex"]))
+
+        self.response = self.fixtures["rotated"]
+        self.assertIsNone(await poll_qr_login(self.http, login))
+        self.assertEqual(login["client_id"], 4243)
+        self.assertEqual(login["url"], "https://s.team/q/fixture-rotated")
+        self.assertEqual(login["request_id"], b"fixture-request-id")
+
+        self.response = self.fixtures["approved"]
+        self.assertEqual(await poll_qr_login(self.http, login), "fixture-refresh-approved")
+        self.assertEqual(self.requests[-1]["path"], "/IAuthenticationService/PollAuthSessionStatus/v1/")
+        self.assertEqual(self.requests[-1]["protobuf"], bytes.fromhex(self.response["request_hex"]))
+
+    async def test_access_token_renewal_posts_fixed64_steam_id_and_persists_decoded_tokens(self):
+        self.response = self.fixtures["renewed"]
+        persist = AsyncMock()
+        auth = SteamAuth(self.http, "fixture-refresh", ALICE, persist, last_renewal=NOW - DAY)
+        with patch("bot.steam_auth.time.time", return_value=NOW):
+            self.assertEqual(await auth.get_access_token(), ACCESS)
+            self.assertEqual(await auth.get_access_token(), ACCESS)
+
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.requests[0]["path"], "/IAuthenticationService/GenerateAccessTokenForApp/v1/")
+        self.assertEqual(self.requests[0]["protobuf"], bytes.fromhex(self.response["request_hex"]))
+        self.assertEqual(auth.refresh_token, "fixture-refresh-renewed")
+        persist.assert_awaited_once_with("fixture-refresh-renewed", NOW)
+
+    async def test_steam_token_rejection_preserves_stored_credentials(self):
+        for status in (200, 401, 403):
+            with self.subTest(status=status):
+                self.response = {**self.fixtures["rejected"], "status": status}
+                persist = AsyncMock()
+                auth = SteamAuth(self.http, "fixture-refresh", ALICE, persist, last_renewal=NOW - DAY)
+                with self.assertRaisesRegex(TokenRejected, "Steam rejected"):
+                    await auth.get_access_token()
+                self.assertEqual(auth.refresh_token, "fixture-refresh")
+                self.assertEqual(auth.last_renewal, NOW - DAY)
+                self.assertIsNone(auth.access_token)
+                persist.assert_not_awaited()
+
+    async def test_http_outage_is_retryable_and_keeps_steam_error_status(self):
+        self.response = {"status": 503, "body_hex": ""}
+        auth = SteamAuth(self.http, "fixture-refresh", ALICE)
+        with self.assertRaises(SteamError) as caught:
+            await auth.get_access_token()
+        self.assertEqual(caught.exception.status, 503)
+        self.assertIn("HTTP 503", str(caught.exception))
+        self.assertEqual(auth.refresh_token, "fixture-refresh")
+
+    async def test_success_without_access_token_is_rejected_before_persistence(self):
+        self.response = self.fixtures["missing_access"]
+        persist = AsyncMock()
+        auth = SteamAuth(self.http, "fixture-refresh", ALICE, persist)
+        with self.assertRaisesRegex(RuntimeError, "no access token"):
+            await auth.get_access_token()
+        self.assertEqual(auth.refresh_token, "fixture-refresh")
+        persist.assert_not_awaited()
 
 
 if __name__ == "__main__":

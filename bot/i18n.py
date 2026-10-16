@@ -13,6 +13,49 @@ DEFAULT = "en"
 
 TEXTS = {
     "en": {
+        "btn_about": "About this bot",
+        "btn_privacy": "Privacy and deletion",
+        "btn_status": "Instance status",
+        "instance_unknown": "Not supplied by the operator",
+        "check_never": "No successful check since restart",
+        "about_title": "About this instance",
+        "about_desc": "Operator / contact: <b>{operator}</b>\nHosting: <b>{hosting}</b>\n"
+        "Steam login location: <b>{location}</b>\n\n"
+        '<a href="https://github.com/AuthFailed/steamily">Source code</a> · '
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/LICENSE.md">PolyForm Noncommercial license</a>\n'
+        "Free, noncommercial use. No uptime or account-safety guarantee. Independent of Valve and Telegram.\n\n"
+        "Only authorize a server session if you trust its operator. Missing details should be checked with them.",
+        "privacy_title": "Privacy and deletion",
+        "privacy_desc": "<b>Stored data and purpose</b>\nTelegram ID, name and username; SteamID, family, approval, "
+        "registration date, country and preferences identify you, control access and show local prices. "
+        "The encrypted Steam refresh token lets the bot check Steam and perform requested actions; "
+        "the operator holds its decryption key. Your Steam password is not stored. Saved dialogs keep menus "
+        "working after a restart.\n\n"
+        "<b>Publication choices</b>\nSettings has separate permissions for your presence and Telegram identity, "
+        "both off by default. Only you can enable them. Logout or loss of family access resets them. "
+        "Already delivered messages cannot reliably be recalled.\n\n"
+        "<b>Retention and deletion</b>\nUse /delete or Settings → Log out to erase your account, token, Telegram "
+        "profile link, preferences, saved dialogs and personal runtime caches, and cancel pending login. "
+        "Your saved Steam session is revoked before deletion. Administrative removal deletes the same bot data "
+        "but does not revoke Steam sessions. You need a fresh Steam login to return.\n"
+        "Shared family snapshots, seen member/game ownership history, pending alerts and alert settings remain "
+        "while another account is registered; Steam may supply your family data again through them. The last account's "
+        "removal deletes the family record and caches. Public store metadata stays without account identifiers.\n"
+        "Other users' open member screens may keep selected IDs until those dialogs close or reset, "
+        "or their viewer logs out; these cannot restore your account.\n"
+        "Telegram messages, Steam records and operator backups/logs have separate retention; ask the operator.\n\n"
+        "<b>Steam safety</b>\nServer login can cause unusual sign-in warnings or an account lock. "
+        "Only approve a login you initiated and whose location matches /about. Logout revokes only the bot's saved "
+        'session; other devices stay signed in. You can also open <a href="https://store.steampowered.com/account/authorizeddevices">'
+        "Steam Authorized Devices</a> to review and remove the Steamily session.\n\n"
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/docs/public-instance.md">'
+        "Full privacy and usage policy</a>",
+        "instance_status_title": "Instance status",
+        "instance_status_desc": "The bot is responding now.\nLast successful Steam family check: <b>{checked}</b>\n\n"
+        "For registered users this is your family; otherwise it is the last check across the instance. "
+        "Times reset on restart. A response or old timestamp does not prove Steam is available now.",
+        "deleted_desc": "<b>Your bot data was deleted.</b>\nUse /start to begin again. "
+        "The bot revoked its saved Steam session, if present. You can review sessions in Steam Authorized Devices.",
         "language_title": "Language / Язык",
         "language_desc": "Choose the bot language.\nВыберите язык бота.",
         "main_title": "Steam Family",
@@ -32,11 +75,26 @@ TEXTS = {
         "btn_home": "Home",
         "btn_cancel": "Cancel",
         "family_title": "Family",
-        "family_desc": "Who is in your Steam family right now. The name opens their Steam profile, the second link "
-        "their Telegram (for members who use the bot).",
+        "family_desc": "Who is in your Steam family right now. Names open Steam profiles; Telegram links appear "
+        "only with each member's permission.",
         "btn_settings": "Settings",
         "settings_title": "Settings",
         "settings_desc": "Your language, alerts and Steam account.",
+        "publication_desc": "<b>What the bot may publish about you</b>\n"
+        "Both choices start off for everyone: existing and new accounts, and unregistered Steam relatives.\n"
+        "Presence covers online/last seen and playing status; Telegram covers your links, mentions and identifiers "
+        "in family screens, cards, shared results and group alerts. Each choice is independent.\n"
+        "This controls the bot's disclosures only. Your Steam name, profile and library remain visible according "
+        "to Steam privacy settings.\n"
+        "Logout, deletion, leaving the family or changing Steam account/family resets permission; joining again "
+        "requires opting in again.\n"
+        "Newly opened cards and inline searches use your latest choices. Already delivered or forwarded messages "
+        "and previously offered inline results cannot reliably be recalled or changed.\n",
+        "btn_publish_presence_on": "Publish my presence: on",
+        "btn_publish_presence_off": "Publish my presence: off",
+        "btn_publish_telegram_on": "Publish my Telegram: on",
+        "btn_publish_telegram_off": "Publish my Telegram: off",
+        "publication_unavailable": "Could not verify your account and current family. Reopen Settings and try again.",
         "btn_requests_on": "New member alerts: on",
         "btn_requests_off": "New member alerts: off",
         "logout_owner_handover": "👑 You own this family in the bot. After you log out, a random other family member "
@@ -114,7 +172,9 @@ TEXTS = {
         "purchases_empty": "No open requests.",
         "sum_owners": "👥 Everyone has it: {names}",
         "logout_title": "Log out",
-        "logout_desc": "The bot revokes this Steam session and forgets your login. Other devices stay signed in.",
+        "logout_desc": "Revoke this saved Steam session, delete your account, token, Telegram profile link, "
+        "preferences and saved dialogs, and cancel pending login. Other devices stay signed in. "
+        "Shared family data remains while another account is registered. See /privacy.",
         "logout_failed": "Steam logout could not be confirmed. Your login is kept so you can retry. "
         "You can also remove this session in Steam Guard → Authorized devices.",
         "btn_logout_yes": "Yes, log out",
@@ -134,6 +194,7 @@ TEXTS = {
         ),
         "btn_login_continue": "Continue to QR",
         "login_desc": (
+            "⚠️ A server login may trigger an account lock. Only continue if you trust this instance (/about).\n\n"
             "1. On your phone open the <b>Steam</b> app → <b>Steam Guard</b> (shield icon) → scan this QR code. "
             "If Steam is on this phone, just tap <b>Open in Steam app</b>.\n"
             "2. Check <b>Web browser</b>, the name <b>Steamily</b> "
@@ -148,6 +209,17 @@ TEXTS = {
         "login_failed": "❌ Steam login failed. If you approved it, you can remove the Steamily session in "
         "Steam Guard → Authorized devices.",
         "login_no_family": "❌ This Steam account isn't in a Steam Family.",
+        "login_cooldown": "Please wait {seconds} seconds before trying to log in again.",
+        "login_active": "A Steam sign-in is already in progress. Finish or cancel it before starting another.",
+        "login_busy": "Too many Steam sign-ins are in progress. Try again in {seconds} seconds.",
+        "login_stopping": "The bot is stopping. Try again after it restarts.",
+        "login_already_linked": (
+            "❌ This Steam account is already linked to another Telegram account.\n\n"
+            "Use the Telegram account you linked originally. To move the link, open <b>Settings → Log out</b> "
+            "in that account first, then sign in here. Logging out deletes that account's bot data and settings "
+            "and may pass family ownership to another member.\n\n"
+            "If you cannot access that Telegram account, contact the bot operator."
+        ),
         "btn_retry": "Try again",
         "owner_new_member": "👋 <b>{name}</b> logged in and waits for access: "
         "open Family → Manage family → Bot members.",
@@ -185,15 +257,50 @@ TEXTS = {
         "genre_desc": "Pick a genre. The number shows how many family games have it.",
         "btn_any_genre": "Any genre",
         "players_title": "Players",
-        "players_desc": "Pick who is going to play. Everyone needs their own copy, so only games with at least "
-        "that many copies in the family stay in the list.",
+        "players_desc": "Pick who is going to play. Everyone needs an owned or shareable copy. "
+        "Excluded games require each player to own a copy. Availability right now is not checked.",
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "This game is no longer in the family library.",
         "price_unknown": "Price unknown",
         "multiplayer": "👥 Multiplayer",
         "singleplayer": "👤 Single-player",
-        "copies_line": "📦 Copies: {n}{owners}",
+        "copies_line": "📦 Owned copies: {n}{owners}",
+        "shareable_copies_line": "🤝 Shareable copies: {n}",
+        "access_owned": "🔑 Your access: own copy",
+        "access_borrowed": "🔑 Your access: family sharing",
+        "access_unavailable": "🔒 Your access: unavailable through family sharing",
+        "sharing_excluded": "⚠️ Not shareable: {reason}",
+        "availability_unknown": "⏳ Available now: unknown",
+        "sharing_reason_unknown": "Steam restriction (code {code})",
+        "sharing_reason_1": "excluded by the publisher",
+        "sharing_reason_2": "license excluded from sharing",
+        "sharing_reason_3": "free game",
+        "sharing_reason_4": "private license",
+        "sharing_reason_6": "app type not eligible for sharing",
+        "sharing_reason_7": "nonrefundable DLC",
+        "sharing_reason_8": "unreleased app",
+        "sharing_reason_9": "parent app excluded from sharing",
+        "sharing_reason_10": "package excluded by the publisher",
+        "sharing_reason_11": "special package",
+        "sharing_reason_12": "developer package",
+        "sharing_reason_13": "free weekend package",
+        "sharing_reason_15": "invalid package",
+        "sharing_reason_16": "recurring subscription license",
+        "sharing_reason_17": "license type not eligible for sharing",
+        "sharing_reason_18": "master subscription package",
+        "sharing_reason_19": "package contains no shareable apps",
+        "sharing_reason_20": "master subscription payment license",
+        "sharing_reason_21": "family group payment license",
+        "sharing_reason_22": "authorized device payment license",
+        "sharing_reason_23": "automatically granted payment license",
+        "sharing_reason_24": "pending license",
+        "sharing_reason_25": "refund pending",
+        "sharing_reason_26": "borrowed license",
+        "sharing_reason_27": "automatically granted license",
+        "sharing_reason_28": "timed trial license",
+        "sharing_reason_29": "free subscription license",
+        "sharing_reason_30": "inactive license",
         "btn_members": "Bot members ({pending} pending)",
         "members_title": "Members",
         "members_desc": "Family members log in themselves; approve or block them here.",
@@ -206,6 +313,7 @@ TEXTS = {
         "status_blocked_short": "⛔ blocked",
         "member_left": "\n⚠️ Left the Steam Family.",
         "member_gone": "This user is no longer in the family.",
+        "owner_action_denied": "This action requires the current family owner. Reopen the menu and try again.",
         "btn_approve": "Approve",
         "btn_block": "Block",
         "btn_remove": "Remove",
@@ -240,6 +348,52 @@ TEXTS = {
         "steam_user": "Steam user {steam_id}",
     },
     "ru": {
+        "btn_about": "О боте",
+        "btn_privacy": "Данные и удаление",
+        "btn_status": "Состояние сервиса",
+        "instance_unknown": "Оператор не указал",
+        "check_never": "Успешных проверок после перезапуска ещё не было",
+        "about_title": "Об этом инстансе",
+        "about_desc": "Оператор / контакт: <b>{operator}</b>\nХостинг: <b>{hosting}</b>\n"
+        "Место входа в Steam: <b>{location}</b>\n\n"
+        '<a href="https://github.com/AuthFailed/steamily">Исходный код</a> · '
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/LICENSE.md">Лицензия PolyForm Noncommercial</a>\n'
+        "Бесплатное некоммерческое использование. Без гарантий доступности и безопасности аккаунта. "
+        "Независимый проект, не связанный с Valve и Telegram.\n\n"
+        "Разрешайте серверную сессию только доверенному оператору. Недостающие сведения уточните у него.",
+        "privacy_title": "Данные и удаление",
+        "privacy_desc": "<b>Что хранится и зачем</b>\nTelegram ID, имя и username; SteamID, семья, статус доступа, "
+        "дата регистрации, страна и настройки нужны для связи аккаунтов, контроля доступа и местных цен. "
+        "Зашифрованный refresh token Steam позволяет проверять Steam и выполнять запрошенные действия; "
+        "ключ расшифровки есть у оператора. Пароль Steam не хранится. Сохранённые диалоги восстанавливают "
+        "меню после перезапуска.\n\n"
+        "<b>Разрешения на публикацию</b>\nВ настройках отдельно разрешается показ вашего присутствия и Telegram, "
+        "оба выключены по умолчанию. Включить их можете только вы. Выход или потеря доступа к семье "
+        "сбрасывает разрешения. Уже отправленные сообщения нельзя надёжно отозвать.\n\n"
+        "<b>Срок хранения и удаление</b>\nКоманда /delete или Настройки → Выйти удаляет аккаунт, токен, ссылку "
+        "на Telegram, настройки, диалоги и личные кеши, отменяет незавершённый вход. Сохранённый сеанс Steam "
+        "отзывается до удаления. Удаление администратором очищает те же данные бота, но не отзывает сеансы Steam. "
+        "Для возвращения нужен новый вход в Steam.\n"
+        "Общие снимки семьи, история замеченных участников и владельцев игр, очередь и настройки уведомлений остаются, "
+        "пока зарегистрирован другой аккаунт; Steam может вновь передать ваши семейные данные через него. "
+        "Удаление последнего аккаунта удаляет запись семьи и кеши. Публичный кеш магазина не содержит "
+        "идентификаторов аккаунтов и остаётся.\n"
+        "В открытых карточках других пользователей выбранные ID могут оставаться до закрытия или сброса "
+        "диалога либо выхода его владельца; восстановить ваш аккаунт по ним нельзя.\n"
+        "Сообщения Telegram, записи Steam и резервные копии/логи оператора имеют отдельные сроки хранения; "
+        "уточните их у оператора.\n\n"
+        "<b>Безопасность Steam</b>\nВход с сервера может вызвать предупреждение или блокировку аккаунта. "
+        "Подтверждайте только начатый вами вход с местом из /about. При выходе отзывается только сохранённый сеанс "
+        'бота; другие устройства остаются в аккаунте. Также можно открыть <a href="https://store.steampowered.com/account/authorizeddevices">'
+        "Авторизованные устройства Steam</a>, проверить и удалить сеанс Steamily.\n\n"
+        '<a href="https://github.com/AuthFailed/steamily/blob/main/docs/public-instance.md">'
+        "Полная политика хранения и использования</a>",
+        "instance_status_title": "Состояние сервиса",
+        "instance_status_desc": "Бот отвечает сейчас.\nПоследняя успешная проверка семьи в Steam: <b>{checked}</b>\n\n"
+        "Для зарегистрированного пользователя показана его семья, иначе — последняя проверка всего инстанса. "
+        "Время сбрасывается при перезапуске. Ответ бота или старая отметка не доказывают доступность Steam сейчас.",
+        "deleted_desc": "<b>Ваши данные в боте удалены.</b>\nОтправьте /start, чтобы начать заново. "
+        "Бот отозвал сохранённый сеанс Steam, если он был. Проверить сеансы можно в авторизованных устройствах Steam.",
         "language_title": "Language / Язык",
         "language_desc": "Choose the bot language.\nВыберите язык бота.",
         "main_title": "Семья Steam",
@@ -259,11 +413,27 @@ TEXTS = {
         "btn_home": "Домой",
         "btn_cancel": "Отмена",
         "family_title": "Семья",
-        "family_desc": "Кто сейчас в вашей семье Steam. Имя ведёт в профиль Steam, вторая ссылка — в Telegram "
-        "(у тех, кто пользуется ботом).",
+        "family_desc": "Кто сейчас в вашей семье Steam. Имена ведут в профили Steam; ссылки на Telegram видны "
+        "только с разрешения каждого участника.",
         "btn_settings": "Настройки",
         "settings_title": "Настройки",
         "settings_desc": "Язык, уведомления и ваш аккаунт Steam.",
+        "publication_desc": "<b>Что бот может публиковать о вас</b>\n"
+        "Оба разрешения изначально выключены у всех: старых и новых аккаунтов и участников семьи без регистрации.\n"
+        "Активность — это онлайн, последний вход и запущенная игра; Telegram — ваши ссылки, упоминания и "
+        "идентификаторы в меню семьи, карточках, отправленных результатах и уведомлениях группы. "
+        "Разрешения независимы.\n"
+        "Настройки управляют только публикациями бота. Имя, профиль и библиотека Steam остаются видны "
+        "согласно настройкам приватности Steam.\n"
+        "Выход из бота, удаление, выход из семьи или смена аккаунта Steam/семьи сбрасывают разрешения; "
+        "после возвращения их нужно включить снова.\n"
+        "Новые карточки и поиск через inline учитывают ваши последние настройки. Уже доставленные или "
+        "пересланные сообщения и ранее предложенные inline-результаты нельзя надёжно отозвать или изменить.\n",
+        "btn_publish_presence_on": "Публиковать мою активность: вкл",
+        "btn_publish_presence_off": "Публиковать мою активность: выкл",
+        "btn_publish_telegram_on": "Публиковать мой Telegram: вкл",
+        "btn_publish_telegram_off": "Публиковать мой Telegram: выкл",
+        "publication_unavailable": "Не удалось проверить ваш аккаунт и текущую семью. Откройте Настройки заново.",
         "btn_requests_on": "Уведомления о новых участниках: вкл",
         "btn_requests_off": "Уведомления о новых участниках: выкл",
         "logout_owner_handover": "👑 Вы владелец этой семьи в боте. После выхода владельцем станет случайный другой "
@@ -342,7 +512,9 @@ TEXTS = {
         "purchases_empty": "Открытых запросов нет.",
         "sum_owners": "👥 Есть у всех: {names}",
         "logout_title": "Выход",
-        "logout_desc": "Бот отзовёт этот сеанс Steam и забудет ваш вход. Другие устройства останутся в аккаунте.",
+        "logout_desc": "Отозвать сохранённый сеанс Steam, удалить аккаунт, токен, ссылку на Telegram, "
+        "настройки и диалоги, отменить незавершённый вход. Другие устройства останутся в аккаунте. "
+        "Общие данные семьи остаются, пока зарегистрирован другой аккаунт. Подробнее: /privacy.",
         "logout_failed": "Не удалось подтвердить выход из Steam. Вход сохранён для повторной попытки. "
         "Также можно удалить этот сеанс в Steam Guard → Авторизованные устройства.",
         "btn_logout_yes": "Да, выйти",
@@ -361,6 +533,8 @@ TEXTS = {
         ),
         "btn_login_continue": "Перейти к QR-коду",
         "login_desc": (
+            "⚠️ Вход с сервера может привести к блокировке аккаунта. "
+            "Продолжайте, только если доверяете инстансу (/about).\n\n"
             "1. Откройте на телефоне приложение <b>Steam</b> → <b>Steam Guard</b> (значок щита) → "
             "отсканируйте этот QR-код. Если Steam стоит на этом телефоне, просто нажмите "
             "<b>Открыть в Steam</b>.\n"
@@ -375,6 +549,17 @@ TEXTS = {
         "login_failed": "❌ Не удалось войти через Steam. Если вы подтвердили вход, удалите сеанс Steamily в "
         "Steam Guard → Авторизованные устройства.",
         "login_no_family": "❌ Этот аккаунт Steam не состоит в семье Steam.",
+        "login_cooldown": "Подождите {seconds} сек. перед следующей попыткой входа.",
+        "login_active": "Вход через Steam уже начат. Завершите или отмените его перед новой попыткой.",
+        "login_busy": "Слишком много одновременных входов через Steam. Попробуйте через {seconds} сек.",
+        "login_stopping": "Бот останавливается. Попробуйте войти после его перезапуска.",
+        "login_already_linked": (
+            "❌ Этот аккаунт Steam уже привязан к другому аккаунту Telegram.\n\n"
+            "Войдите с аккаунта Telegram, который привязали изначально. Для переноса сначала откройте там "
+            "<b>Настройки → Выйти</b>, затем войдите здесь. При выходе данные и настройки этого аккаунта в боте "
+            "удалятся, а роль владельца семьи может перейти другому участнику.\n\n"
+            "Если доступа к тому аккаунту Telegram нет, обратитесь к оператору бота."
+        ),
         "btn_retry": "Попробовать снова",
         "owner_new_member": "👋 <b>{name}</b> вошёл в бота и ждёт доступа: "
         "откройте Семья → Управление семьёй → Участники бота.",
@@ -412,15 +597,50 @@ TEXTS = {
         "genre_desc": "Выберите жанр. Число показывает, сколько игр семьи в этом жанре.",
         "btn_any_genre": "Любой жанр",
         "players_title": "Игроки",
-        "players_desc": "Выберите, кто будет играть. Каждому нужна своя копия, поэтому в списке останутся "
-        "только игры, которых в семье не меньше, чем игроков.",
+        "players_desc": "Выберите, кто будет играть. Каждому нужна собственная копия или копия с семейным доступом. "
+        "Исключённой из доступа игрой должен владеть каждый игрок. Наличие свободных копий сейчас не проверяется.",
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "Этой игры больше нет в библиотеке семьи.",
         "price_unknown": "Цена неизвестна",
         "multiplayer": "👥 Мультиплеер",
         "singleplayer": "👤 Одиночная",
-        "copies_line": "📦 Копий: {n}{owners}",
+        "copies_line": "📦 Собственных копий: {n}{owners}",
+        "shareable_copies_line": "🤝 Копий для семейного доступа: {n}",
+        "access_owned": "🔑 Ваша копия",
+        "access_borrowed": "🔑 Ваш доступ: семейная библиотека",
+        "access_unavailable": "🔒 Для вас недоступно через семейную библиотеку",
+        "sharing_excluded": "⚠️ Семейный доступ исключён: {reason}",
+        "availability_unknown": "⏳ Свободно сейчас: неизвестно",
+        "sharing_reason_unknown": "ограничение Steam (код {code})",
+        "sharing_reason_1": "исключено издателем",
+        "sharing_reason_2": "лицензия исключена из семейного доступа",
+        "sharing_reason_3": "бесплатная игра",
+        "sharing_reason_4": "приватная лицензия",
+        "sharing_reason_6": "тип приложения не поддерживает семейный доступ",
+        "sharing_reason_7": "невозвратное DLC",
+        "sharing_reason_8": "приложение ещё не вышло",
+        "sharing_reason_9": "основное приложение исключено из семейного доступа",
+        "sharing_reason_10": "пакет исключён издателем",
+        "sharing_reason_11": "специальный пакет",
+        "sharing_reason_12": "пакет разработчика",
+        "sharing_reason_13": "пакет бесплатных выходных",
+        "sharing_reason_15": "недействительный пакет",
+        "sharing_reason_16": "лицензия с регулярной подпиской",
+        "sharing_reason_17": "тип лицензии не поддерживает семейный доступ",
+        "sharing_reason_18": "пакет основной подписки",
+        "sharing_reason_19": "в пакете нет приложений с семейным доступом",
+        "sharing_reason_20": "лицензия с оплатой основной подписки",
+        "sharing_reason_21": "лицензия с оплатой через семейную группу",
+        "sharing_reason_22": "лицензия с оплатой через авторизованное устройство",
+        "sharing_reason_23": "автоматически выданная платёжная лицензия",
+        "sharing_reason_24": "лицензия ожидает подтверждения",
+        "sharing_reason_25": "ожидается возврат средств",
+        "sharing_reason_26": "заимствованная лицензия",
+        "sharing_reason_27": "автоматически выданная лицензия",
+        "sharing_reason_28": "временная пробная лицензия",
+        "sharing_reason_29": "лицензия бесплатной подписки",
+        "sharing_reason_30": "неактивная лицензия",
         "btn_members": "Участники бота (ожидают: {pending})",
         "members_title": "Участники",
         "members_desc": "Участники семьи входят сами, а здесь вы их одобряете или блокируете.",
@@ -433,6 +653,7 @@ TEXTS = {
         "status_blocked_short": "⛔ заблокирован",
         "member_left": "\n⚠️ Покинул семью Steam.",
         "member_gone": "Этого пользователя больше нет в семье.",
+        "owner_action_denied": "Это действие доступно только текущему владельцу семьи. Откройте меню заново.",
         "btn_approve": "Одобрить",
         "btn_block": "Заблокировать",
         "btn_remove": "Удалить",
@@ -473,6 +694,14 @@ assert TEXTS["en"].keys() == TEXTS["ru"].keys(), set(TEXTS["en"]) ^ set(TEXTS["r
 def t(lang: str | None, key: str, **values) -> str:
     text = TEXTS.get(lang, TEXTS[DEFAULT])[key]
     return text.format(**values) if values else text
+
+
+def sharing_warning(lang: str, reason: int) -> str:
+    if not reason:
+        return ""
+    key = f"sharing_reason_{reason}"
+    text = t(lang, key) if key in TEXTS[DEFAULT] else t(lang, "sharing_reason_unknown", code=reason)
+    return t(lang, "sharing_excluded", reason=text)
 
 
 def language_of(manager: DialogManager) -> str:
