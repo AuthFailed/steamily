@@ -199,11 +199,29 @@ class Db:
     async def set_country(self, telegram_id: int, country: str) -> None:
         await self.pool.execute("UPDATE accounts SET country = $2 WHERE telegram_id = $1", telegram_id, country)
 
-    async def set_status(self, telegram_id: int, status: str) -> None:
-        await self.pool.execute("UPDATE accounts SET status = $2 WHERE telegram_id = $1", telegram_id, status)
+    async def set_status(self, telegram_id: int, status: str, family_id: str | None = None) -> bool:
+        changed = await self.pool.fetchval(
+            """
+            UPDATE accounts SET status = $2
+            WHERE telegram_id = $1 AND ($3::TEXT IS NULL OR family_id = $3)
+            RETURNING telegram_id
+            """,
+            telegram_id,
+            status,
+            family_id,
+        )
+        return changed is not None
 
-    async def delete_account(self, telegram_id: int) -> None:
-        await self.pool.execute("DELETE FROM accounts WHERE telegram_id = $1", telegram_id)
+    async def delete_account(self, telegram_id: int, family_id: str | None = None) -> bool:
+        deleted = await self.pool.fetchval(
+            """
+            DELETE FROM accounts WHERE telegram_id = $1 AND ($2::TEXT IS NULL OR family_id = $2)
+            RETURNING telegram_id
+            """,
+            telegram_id,
+            family_id,
+        )
+        return deleted is not None
 
     # Families
     async def family(self, family_id: str) -> asyncpg.Record | None:
