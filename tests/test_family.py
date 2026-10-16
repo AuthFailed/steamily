@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from asyncpg import CheckViolationError
 
 from bot.db import SteamAlreadyLinked
-from bot.family import Families
+from bot.family import Families, role
 from bot.steam import NoFamily
 from bot.steam_auth import TokenRejected
 from tests.pg import fresh_db, needs_pg
@@ -389,6 +389,226 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         account = await self.db.account(1)
         self.assertEqual((account["family_id"], account["status"]), ("other", "approved"))
         self.assertEqual(self.db.refresh_token(account), "new-login")
+
+    async def test_snapshot_from_bob_revokes_only_departed_alice(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        await self.db.set_status(2, "approved")
+        current = {**snapshot([]), "members": [BOB]}
+        with (
+            patch("bot.steam_auth.SteamAuth.get_access_token", AsyncMock(side_effect=[TokenRejected("gone"), "bob"])),
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)),
+        ):
+            await self.families.refresh("9")
+        self.assertEqual(role(await self.db.account(1)), "pending")
+        self.assertEqual(role(await self.db.account(2)), "owner")
+        self.assertEqual(self.families.get("9").members, [BOB])
+
+    async def test_unvalidated_steam_failures_keep_approval_and_owner(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        before = await self.db.account(1)
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=RuntimeError("Steam HTTP 503"))):
+            await self.families.refresh("9")
+        self.assertEqual(await self.db.account(1), before)
+
+    async def test_valid_different_family_revokes_old_access_even_without_another_login(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([], family_id="other"))):
+            await self.families.refresh("9")
+        self.assertEqual(role(await self.db.account(1)), "pending")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_confirmed_no_family_revokes_old_access(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=NoFamily("left every family"))):
+            await self.families.refresh("9")
+        self.assertEqual(role(await self.db.account(1)), "pending")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_confirmed_no_family_during_relogin_revokes_old_access(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=NoFamily("left every family"))):
+            with self.assertRaises(NoFamily):
+                await self.families.register(1, "replacement", ALICE)
+        self.assertEqual(role(await self.db.account(1)), "pending")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_failed_login_to_a_different_steam_account_keeps_original_access(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        before = await self.db.account(1)
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=NoFamily("bob has no family"))):
+            with self.assertRaises(NoFamily):
+                await self.families.register(1, "bob", BOB)
+        self.assertEqual(await self.db.account(1), before)
+
+    async def test_blocked_relogin_cannot_inherit_departed_owners_access(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        await self.db.set_status(2, "blocked")
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=NoFamily("Alice left every family"))):
+            await self.families.refresh("9")
+        current = {**snapshot([]), "members": [BOB]}
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)):
+            await self.families.register(2, "bob-new", BOB)
+        self.assertEqual(role(await self.db.account(1)), "pending")
+        self.assertEqual(role(await self.db.account(2)), "blocked")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_relogin_into_another_family_requires_approval_and_resolves_old_owner(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        await self.db.set_status(2, "approved")
+        carol = "76561198000000003"
+        target = {**snapshot([], family_id="10"), "members": [ALICE, carol]}
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)):
+            await self.families.register(3, "carol", carol)
+
+        async def read_family(http, access_token):
+            return target if access_token in (ALICE, carol) else {**snapshot([]), "members": [BOB]}
+
+        async def token(auth):
+            return auth.steam_id
+
+        with (
+            patch("bot.steam_auth.SteamAuth.get_access_token", new=token),
+            patch("bot.family.fetch_family_snapshot", side_effect=read_family),
+        ):
+            await self.families.register(1, "alice-new", ALICE)
+        alice = await self.db.account(1)
+        self.assertEqual((alice["family_id"], alice["status"]), ("10", "pending"))
+        self.assertEqual(role(await self.db.account(2)), "owner")
+        self.assertEqual(role(await self.db.account(3)), "owner")
+
+    async def test_replacing_owners_steam_account_does_not_preempt_an_approved_member(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        await self.db.set_status(2, "approved")
+        carol = "76561198000000003"
+        with patch(
+            "bot.family.fetch_family_snapshot", AsyncMock(return_value={**snapshot([]), "members": [BOB, carol]})
+        ):
+            await self.families.register(1, "carol", carol)
+        self.assertEqual(role(await self.db.account(1)), "pending")
+        self.assertEqual(role(await self.db.account(2)), "owner")
+
+    async def test_logout_handover_cannot_restore_access_revoked_by_a_concurrent_poll(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        selected, resume = asyncio.Event(), asyncio.Event()
+        make_owner = self.families.make_owner
+
+        async def paused_handover(*args):
+            selected.set()
+            await resume.wait()
+            await make_owner(*args)
+
+        with (
+            patch.object(self.families, "make_owner", paused_handover),
+            patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=NoFamily("Bob left every family"))),
+        ):
+            logout = asyncio.create_task(self.families.leave(1))
+            await asyncio.wait_for(selected.wait(), timeout=5)
+            refresh = asyncio.create_task(self.families.refresh("9"))
+            try:
+                await asyncio.wait({refresh}, timeout=0.1)
+            finally:
+                resume.set()
+            await asyncio.wait_for(asyncio.gather(logout, refresh), timeout=5)
+        self.assertEqual(role(await self.db.account(2)), "pending")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_logout_handover_cannot_approve_a_member_moving_to_another_family(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        carol = "76561198000000003"
+        target = {**snapshot([], family_id="10"), "members": [BOB, carol]}
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)):
+            await self.families.register(3, "carol", carol)
+        selected, resume = asyncio.Event(), asyncio.Event()
+        make_owner = self.families.make_owner
+
+        async def paused_handover(*args):
+            selected.set()
+            await resume.wait()
+            await make_owner(*args)
+
+        with (
+            patch.object(self.families, "make_owner", paused_handover),
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)),
+        ):
+            logout = asyncio.create_task(self.families.leave(1))
+            await asyncio.wait_for(selected.wait(), timeout=5)
+            migration = asyncio.create_task(self.families.register(2, "bob-new", BOB))
+            try:
+                await asyncio.wait({migration}, timeout=0.1)
+            finally:
+                resume.set()
+            await asyncio.wait_for(asyncio.gather(logout, migration), timeout=5)
+        bob = await self.db.account(2)
+        self.assertEqual((bob["family_id"], bob["status"]), ("10", "pending"))
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+
+    async def test_logout_uses_current_family_if_account_moves_while_waiting_for_lock(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        carol = "76561198000000003"
+        target = {**snapshot([], family_id="10"), "members": [ALICE, carol]}
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)):
+            await self.families.register(3, "carol", carol)
+        read = asyncio.Event()
+        account = self.db.account
+
+        async def read_account(telegram_id):
+            result = await account(telegram_id)
+            read.set()
+            return result
+
+        with patch.object(self.db, "account", read_account):
+            async with self.families.get("9").lock:
+                logout = asyncio.create_task(self.families.leave(1))
+                await asyncio.wait_for(read.wait(), timeout=5)
+                # Complete a migration while logout is queued behind the old family's operation.
+                await self.db.save_account(1, ALICE, "10", "alice-new")
+                await self.families.make_owner("10", 1)
+            await asyncio.wait_for(logout, timeout=5)
+        self.assertIsNone(await self.db.account(1))
+        self.assertEqual(role(await self.db.account(3)), "owner")
+
+    async def test_valid_registration_snapshot_reconciles_even_when_next_poll_fails(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        await self.db.set_status(2, "approved")
+        current = {**snapshot([]), "members": [BOB]}
+        with patch(
+            "bot.family.fetch_family_snapshot",
+            AsyncMock(side_effect=[current, RuntimeError("Steam HTTP 503"), RuntimeError("Steam HTTP 503")]),
+        ):
+            await self.families.register(2, "bob-new", BOB)
+        self.assertEqual(role(await self.db.account(1)), "pending")
+        self.assertEqual(role(await self.db.account(2)), "owner")
+
+    async def test_pending_owner_field_does_not_grant_access(self):
+        self.assertEqual(role({"telegram_id": 1, "owner_telegram_id": 1, "status": "pending"}), "pending")
+
+    async def test_logout_does_not_promote_a_departed_pending_member(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        self.families.get("9").snapshot["members"] = [ALICE]
+        self.assertIsNone(await self.families.leave(1))
+        self.assertEqual(role(await self.db.account(2)), "pending")
 
 
 @needs_pg

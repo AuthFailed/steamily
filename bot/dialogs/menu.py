@@ -130,8 +130,10 @@ async def set_publication(callback: CallbackQuery, widget, manager: DialogManage
         and bool(account["refresh_token"])
     )
     if valid and parts[2] == "1":
+        families = manager.middleware_data["families"]
         try:
-            snapshot = await manager.middleware_data["families"]._fetch(account["family_id"])
+            async with families.get(account["family_id"]).lock:
+                snapshot = await families._fetch(account["family_id"])
         except (aiohttp.ClientError, TimeoutError, RuntimeError):
             snapshot = None
         valid = bool(

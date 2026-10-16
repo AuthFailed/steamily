@@ -1,6 +1,7 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 
@@ -33,7 +34,11 @@ class PublicationSettingsTest(unittest.IsolatedAsyncioTestCase):
             set_publication=AsyncMock(return_value=True),
             notify_requests=AsyncMock(return_value=True),
         )
-        self.families = SimpleNamespace(_fetch=AsyncMock(return_value={"family_id": FAMILY, "members": [STEAM]}))
+        self.family = SimpleNamespace(lock=asyncio.Lock())
+        self.families = SimpleNamespace(
+            get=MagicMock(return_value=self.family),
+            _fetch=AsyncMock(return_value={"family_id": FAMILY, "members": [STEAM]}),
+        )
         self.manager = SimpleNamespace(
             middleware_data={"db": self.db, "families": self.families, "lang": "en"}, dialog_data={}
         )
@@ -81,10 +86,23 @@ class PublicationSettingsTest(unittest.IsolatedAsyncioTestCase):
             )
         self.callback.answer.assert_not_awaited()
 
+    async def test_enable_holds_family_lock_during_membership_fetch(self):
+        async def fetch(family_id):
+            self.assertEqual(family_id, FAMILY)
+            self.assertTrue(self.family.lock.locked())
+            return {"family_id": FAMILY, "members": [STEAM]}
+
+        self.families._fetch.side_effect = fetch
+        await self.click(f"p:{VERSION}:1")
+        self.families.get.assert_called_once_with(FAMILY)
+        self.assertFalse(self.family.lock.locked())
+        self.callback.answer.assert_not_awaited()
+
     async def test_disabling_does_not_depend_on_steam_availability(self):
         self.families._fetch.side_effect = aiohttp.ClientError()
         await self.click(f"p:{VERSION}:0")
         self.families._fetch.assert_not_awaited()
+        self.families.get.assert_not_called()
         self.db.set_publication.assert_awaited_once_with(
             TELEGRAM, STEAM, FAMILY, "publish_presence", False, expected_version=VERSION
         )
