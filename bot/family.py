@@ -64,25 +64,28 @@ class Families:
     def get(self, family_id: str) -> Family:
         return self.items.setdefault(family_id, Family(family_id, self.stores))
 
-    def auth(self, telegram_id: int, refresh_token: str, steam_id: str) -> SteamAuth:
+    def auth(self, telegram_id: int, refresh_token: str, steam_id: str, last_renewal: float = 0.0) -> SteamAuth:
         auth = self.auths.get(telegram_id)
         if not auth or auth.refresh_token != refresh_token:
 
-            async def save(token):
-                await self.db.set_refresh_token(telegram_id, token)
+            async def save(token, renewed_at):
+                await self.db.set_refresh_token(telegram_id, token, renewed_at)
 
-            auth = self.auths[telegram_id] = SteamAuth(self.http, refresh_token, steam_id, save)
+            auth = self.auths[telegram_id] = SteamAuth(self.http, refresh_token, steam_id, save, last_renewal)
         return auth
 
     async def register(self, telegram_id: int, refresh_token: str, steam_id: str) -> Family:
         """Called after a successful Steam login. Raises RuntimeError if the account has no family."""
-        auth = self.auth(telegram_id, refresh_token, steam_id)
+        account = await self.db.account(telegram_id)
+        last_renewal = account["token_renewed_at"] if account and account["steam_id"] == steam_id else 0.0
+        auth = SteamAuth(self.http, refresh_token, steam_id, last_renewal=last_renewal)
         access_token = await auth.get_access_token()
         snapshot = await fetch_family_snapshot(self.http, access_token)
         country = await fetch_user_country(self.http, access_token, steam_id)
         family_id = snapshot["family_id"]
         await self.db.ensure_family(family_id, snapshot["name"])
-        await self.db.save_account(telegram_id, steam_id, family_id, refresh_token, country)
+        await self.db.save_account(telegram_id, steam_id, family_id, auth.refresh_token, country, auth.last_renewal)
+        self.auths.pop(telegram_id, None)
         if (await self.db.family(family_id))["owner_telegram_id"] is None:  # nobody owns it: the next to register does
             await self.make_owner(family_id, telegram_id)
         family = self.get(family_id)
@@ -119,7 +122,9 @@ class Families:
 
     async def owner_token(self, account) -> str:
         """Access token of the acting user's own Steam account, for changes to the family."""
-        auth = self.auth(account["telegram_id"], self.db.refresh_token(account), account["steam_id"])
+        auth = self.auth(
+            account["telegram_id"], self.db.refresh_token(account), account["steam_id"], account["token_renewed_at"]
+        )
         return await auth.get_access_token()
 
     async def any_token(self, family_id: str) -> str | None:
@@ -181,7 +186,9 @@ class Families:
 
     async def _fill_country(self, account) -> None:
         """For accounts that logged in before countries were stored."""
-        auth = self.auth(account["telegram_id"], self.db.refresh_token(account), account["steam_id"])
+        auth = self.auth(
+            account["telegram_id"], self.db.refresh_token(account), account["steam_id"], account["token_renewed_at"]
+        )
         try:
             country = await fetch_user_country(self.http, await auth.get_access_token(), account["steam_id"])
         except TokenRejected:
@@ -194,7 +201,9 @@ class Families:
         for account in await self.db.family_accounts(family_id):
             if account["status"] == "blocked" or not account["refresh_token"]:
                 continue
-            auth = self.auth(account["telegram_id"], self.db.refresh_token(account), account["steam_id"])
+            auth = self.auth(
+                account["telegram_id"], self.db.refresh_token(account), account["steam_id"], account["token_renewed_at"]
+            )
             try:
                 token = await auth.get_access_token()
             except TokenRejected as error:

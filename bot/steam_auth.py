@@ -1,5 +1,6 @@
 """Steam mobile-app auth over the WebAPI, the same protocol steam-session (Node) used."""
 
+import asyncio
 import base64
 import json
 import struct
@@ -119,22 +120,36 @@ def expires_within(token: str | None, seconds: int, now: float | None = None) ->
 
 
 class SteamAuth:
-    """Access tokens for one account; on_renew(refresh_token) persists a rotated refresh token."""
+    """Access tokens for one account; on_renew(token, renewed_at) persists credentials together."""
 
-    def __init__(self, http: aiohttp.ClientSession, refresh_token: str, steam_id: str, on_renew):
+    def __init__(
+        self, http: aiohttp.ClientSession, refresh_token: str, steam_id: str, on_renew=None, last_renewal: float = 0.0
+    ):
         self.http = http
         self.refresh_token = refresh_token
         self.steam_id = steam_id
         self.on_renew = on_renew
         self.access_token: str | None = None
-        self.last_renewal = 0.0
+        self.last_renewal = last_renewal
+        self._pending_renewal: tuple[str, float, str] | None = None
+        self._lock = asyncio.Lock()
+
+    async def _persist_renewal(self) -> None:
+        if self._pending_renewal is not None:
+            token, renewed_at, access_token = self._pending_renewal
+            await self.on_renew(token, renewed_at)
+            self.refresh_token, self.last_renewal, self.access_token = token, renewed_at, access_token
+            self._pending_renewal = None
 
     async def get_access_token(self) -> str:
+        async with self._lock:
+            return await self._get_access_token()
+
+    async def _get_access_token(self) -> str:
+        await self._persist_renewal()
         if not expires_within(self.access_token, ACCESS_TOKEN_MARGIN):
             return self.access_token
         renew = time.time() - self.last_renewal >= RENEW_INTERVAL
-        if renew:
-            self.last_renewal = time.time()
         try:
             response = await call(
                 self.http,
@@ -151,10 +166,13 @@ class SteamAuth:
             raise
         if not response.get(1):
             raise TokenRejected("Steam returned no access token")
-        self.access_token = response[1].decode()
-        if response.get(2) and response[2].decode() != self.refresh_token:
-            self.refresh_token = response[2].decode()
-            await self.on_renew(self.refresh_token)
+        token = response[2].decode() if response.get(2) else self.refresh_token
+        renewed_at = time.time() if renew else self.last_renewal
+        if self.on_renew and (renew or token != self.refresh_token):
+            self._pending_renewal = (token, renewed_at, response[1].decode())
+            await self._persist_renewal()
+        else:
+            self.refresh_token, self.last_renewal, self.access_token = token, renewed_at, response[1].decode()
         return self.access_token
 
 

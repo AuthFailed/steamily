@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS telegram_users (
 );
 ALTER TABLE families ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'en';
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS country TEXT;
+-- Unix seconds of the last successful refresh-token renewal, preserved across restarts.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_renewed_at DOUBLE PRECISION NOT NULL DEFAULT 0;
 -- The family owner is a bot role: it passes on when the owner logs out (see Families.leave).
 ALTER TABLE families ADD COLUMN IF NOT EXISTS owner_telegram_id BIGINT;
 ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS notify_requests BOOLEAN NOT NULL DEFAULT TRUE;
@@ -119,13 +121,21 @@ class Db:
         )
 
     async def save_account(
-        self, telegram_id: int, steam_id: str, family_id: str, refresh_token: str, country: str | None = None
+        self,
+        telegram_id: int,
+        steam_id: str,
+        family_id: str,
+        refresh_token: str,
+        country: str | None = None,
+        token_renewed_at: float = 0.0,
     ) -> None:
         # Re-login keeps the approval status unless the Steam account changed.
         await self.pool.execute(
             """
-            INSERT INTO accounts (telegram_id, steam_id, family_id, refresh_token, country) VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO accounts (telegram_id, steam_id, family_id, refresh_token, country, token_renewed_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (telegram_id) DO UPDATE SET family_id = $3, refresh_token = $4, country = $5,
+                token_renewed_at = $6,
                 status = CASE WHEN accounts.steam_id = $2 THEN accounts.status ELSE 'pending' END, steam_id = $2
         """,
             telegram_id,
@@ -133,11 +143,19 @@ class Db:
             family_id,
             self.fernet.encrypt(refresh_token.encode()),
             country,
+            token_renewed_at,
         )
 
-    async def set_refresh_token(self, telegram_id: int, refresh_token: str | None) -> None:
+    async def set_refresh_token(
+        self, telegram_id: int, refresh_token: str | None, token_renewed_at: float = 0.0
+    ) -> None:
         token = self.fernet.encrypt(refresh_token.encode()) if refresh_token else None
-        await self.pool.execute("UPDATE accounts SET refresh_token = $2 WHERE telegram_id = $1", telegram_id, token)
+        await self.pool.execute(
+            "UPDATE accounts SET refresh_token = $2, token_renewed_at = $3 WHERE telegram_id = $1",
+            telegram_id,
+            token,
+            token_renewed_at,
+        )
 
     def refresh_token(self, account: asyncpg.Record) -> str | None:
         return self.fernet.decrypt(account["refresh_token"]).decode() if account["refresh_token"] else None
