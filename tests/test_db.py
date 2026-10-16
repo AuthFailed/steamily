@@ -194,6 +194,17 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
         self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
 
+    async def test_changing_family_requires_new_approval(self):
+        await self.db.ensure_family("other", "Other")
+        for status in ("approved", "blocked"):
+            with self.subTest(status=status):
+                await self.db.save_account(10, "1", "9", "old")
+                await self.db.set_status(10, status)
+                await self.db.save_account(10, "1", "9", "same-family")
+                self.assertEqual((await self.db.account(10))["status"], status)
+                await self.db.save_account(10, "1", "other", "new-family")
+                self.assertEqual((await self.db.account(10))["status"], "pending")
+
     async def test_initial_owner_claim_requires_an_account_in_the_family(self):
         await self.db.ensure_family("other", "Other")
         await self.db.save_account(10, "1", "other", "token")
