@@ -60,6 +60,7 @@ class AlertDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.queued(), [])
 
     async def test_restart_retries_pending_membership_even_without_steam_login(self):
+        await self.db.save_account(2, BOB, "9", "other-refresh")
         self.fetch.return_value = {**snapshot([]), "members": [ALICE]}
         self.bot.send_message.side_effect = [TelegramNetworkError(self.method, "offline"), None]
         await self.families.refresh("9")
@@ -214,6 +215,7 @@ class AlertDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.queued(), [])
 
     async def test_delivery_loop_drains_after_restart_without_fetching_steam(self):
+        await self.db.save_account(2, BOB, "9", "other-refresh")
         await self.db.enqueue_alerts("9", [{"text": "saved before restart"}])
         await self.db.delete_account(1)
         restarted = Families(self.db, None, self.bot)

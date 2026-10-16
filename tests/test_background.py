@@ -9,6 +9,23 @@ LOOPS = (("refresh_loop", "refresh"), ("presence_loop", "check_presence"))
 
 
 class BackgroundLoopsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_scan_cannot_restore_a_forgotten_health_family(self):
+        db = AsyncMock()
+        families = Families(db, None, None)
+        families.health.steam_read("removed")
+        families.refresh = AsyncMock()
+
+        async def stale_scan():
+            families._forget_family("removed")
+            return [{"family_id": "removed"}]
+
+        db.families_with_accounts.side_effect = stale_scan
+        with patch("bot.family.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await families.refresh_loop(7)
+        self.assertEqual(families.health.families, {})
+        self.assertEqual(families.health.first_seen, {})
+
     async def test_database_failure_is_logged_and_next_cycle_processes_families(self):
         for loop_name, operation in LOOPS:
             with self.subTest(loop=loop_name):

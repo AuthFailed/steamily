@@ -89,6 +89,7 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:3]):
             await migrate(self.connection)
         await self.connection.execute("INSERT INTO families (family_id, name) VALUES ('9', 'Existing')")
+        await self.connection.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (10, '1', '9')")
         before = await self.versions()
         await migrate(self.connection)
         self.assertEqual((await self.versions())[:3], before)
@@ -96,8 +97,8 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((family["name"], family["alert_retry_at"], family["alert_link_version"]), ("Existing", 0, 0))
         self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM pending_alerts"), 0)
 
-    async def test_version_four_upgrade_defaults_publication_off_and_preserves_consent_on_restart(self):
-        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:4]):
+    async def test_version_five_upgrade_defaults_publication_off_and_preserves_consent_on_restart(self):
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:5]):
             await migrate(self.connection)
         key = Fernet.generate_key().decode()
         token = Fernet(key).encrypt(b"legacy-token")
@@ -115,7 +116,7 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
             self.assertEqual((account["status"], db.refresh_token(account)), ("approved", "legacy-token"))
             self.assertIsNone((await db.pending_alerts("9", 0))[0]["publication"])
-            self.assertEqual((await self.versions())[:4], before)
+            self.assertEqual((await self.versions())[:5], before)
             for setting in ("publish_presence", "publish_telegram"):
                 account = await db.account(10)
                 self.assertTrue(
@@ -132,7 +133,7 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
             account = await db.account(10)
             self.assertEqual((account["publish_presence"], account["publish_telegram"]), (True, True))
             self.assertEqual(account["publication_version"], version)
-            self.assertEqual(len(await self.versions()), 5)
+            self.assertEqual(len(await self.versions()), 6)
         finally:
             await db.pool.close()
 
@@ -142,6 +143,7 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         await self.connection.execute("""
             INSERT INTO families (family_id, name, notify_chat, alert_retry_at, alert_link_version)
             VALUES ('9', 'Existing', -100, 250, 6);
+            INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (10, '1', '9');
             INSERT INTO pending_alerts (family_id, chat_id, text, coalesce_key, expires_at)
             VALUES ('9', -100, 'durable event', NULL, NULL), ('9', -100, 'presence event', 'presence:1', 500);
         """)
@@ -181,6 +183,30 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         )
         await migrate(self.connection)
         self.assertEqual(len(await self.versions()), len(MIGRATIONS))
+
+    async def test_retention_upgrade_prunes_abandoned_families_and_their_pending_alerts_once(self):
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:4]):
+            await migrate(self.connection)
+        await self.connection.execute("""
+            INSERT INTO families (family_id, name, notify_chat, state) VALUES
+                ('active', 'Registered', -100, '{"members":["1"]}'),
+                ('abandoned', 'Abandoned', -200, '{"members":["old"]}');
+            INSERT INTO accounts (telegram_id, steam_id, family_id, status) VALUES (10, '1', 'active', 'blocked');
+            INSERT INTO pending_alerts (family_id, chat_id, text) VALUES
+                ('active', -100, 'retained'), ('abandoned', -200, 'removed');
+        """)
+        active = await self.connection.fetchrow("SELECT * FROM families WHERE family_id = 'active'")
+        account = await self.connection.fetchrow("SELECT * FROM accounts")
+        pending = await self.connection.fetch("SELECT * FROM pending_alerts WHERE family_id = 'active'")
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:5]):
+            await migrate(self.connection)
+            versions = await self.versions()
+            await migrate(self.connection)
+        self.assertEqual(await self.versions(), versions)
+        self.assertEqual(await self.connection.fetchrow("SELECT * FROM families WHERE family_id = 'active'"), active)
+        self.assertEqual(await self.connection.fetchrow("SELECT * FROM accounts"), account)
+        self.assertIsNone(await self.connection.fetchrow("SELECT * FROM families WHERE family_id = 'abandoned'"))
+        self.assertEqual(await self.connection.fetch("SELECT * FROM pending_alerts"), pending)
 
     async def test_newer_or_inconsistent_history_refuses_startup_without_changes(self):
         await migrate(self.connection)

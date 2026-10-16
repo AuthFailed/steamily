@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from asyncpg import CheckViolationError
 
@@ -204,6 +204,141 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.families.leave(2))
         self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 1)
 
+    async def test_last_logout_clears_runtime_data_and_cannot_reuse_old_credentials(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "refresh", ALICE)
+        account = await self.db.account(1)
+        auth = self.families.auths[1]
+        self.families.stats_cache[ALICE] = (0, {"level": 10})
+        self.families.stats_cache[BOB] = (0, {"level": 20})
+        self.families.stats_cache["76561198000000003"] = (0, {"level": 30})  # a former family member
+        self.assertIn("9", self.families.presence)
+        await self.families.leave(1)
+        self.assertNotIn(1, self.families.auths)
+        self.assertEqual(self.families.stats_cache, {})
+        self.assertNotIn("9", self.families.items)
+        self.assertNotIn("9", self.families.presence)
+        self.assertNotIn("9", self.families.delivery_locks)
+        self.assertNotIn("9", self.families.last_family_check)
+        self.assertNotIn("9", self.families.health.families)
+        self.assertNotIn("9", self.families.health.first_seen)
+        tasks = {name: Mock(done=lambda: False) for name in self.families.health.workers}
+        self.assertEqual(self.families.health.snapshot(tasks)["steam"]["families"], [])
+        with self.assertRaises(TokenRejected):
+            await self.families.owner_token(account)
+        with self.assertRaises(TokenRejected):
+            await auth.on_renew("late-token", 123)
+        restarted = Families(self.db, http=None, bot=self.bot)
+        self.assertIsNone(await restarted.any_token("9"))
+        self.assertIsNone(await self.db.family("9"))
+
+    async def test_admin_removal_clears_user_cache_and_keeps_shared_family(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+            await self.families.register(2, "bob", BOB)
+        family = self.families.items["9"]
+        await self.families.owner_token(await self.db.account(2))
+        self.families.stats_cache[ALICE] = (0, {"level": 1})
+        self.families.stats_cache[BOB] = (0, {"level": 2})
+        self.assertFalse(await self.families.remove(2, family_id="unrelated"))
+        self.assertIn(2, self.families.auths)
+        self.assertTrue(await self.families.remove(2, family_id="9"))
+        self.assertNotIn(2, self.families.auths)
+        self.assertNotIn(BOB, self.families.stats_cache)
+        self.assertIn(ALICE, self.families.stats_cache)
+        self.assertIs(self.families.items["9"], family)
+        self.assertIn("9", self.families.presence)
+        self.assertIn("9", self.families.health.families)
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 1)
+
+    async def test_inflight_snapshot_cannot_restore_a_deleted_family(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        started, released = asyncio.Event(), asyncio.Event()
+
+        async def fetch(http, token):
+            started.set()
+            await released.wait()
+            return snapshot([])
+
+        with patch("bot.family.fetch_family_snapshot", fetch):
+            poll = asyncio.create_task(self.families.refresh("9"))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await self.families.remove(1, family_id="9")
+            finally:
+                released.set()
+                await poll
+        self.assertNotIn("9", self.families.items)
+        self.assertNotIn("9", self.families.last_family_check)
+        self.assertIsNone(await self.db.family("9"))
+
+    async def test_inflight_member_stats_are_not_cached_after_deletion(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        started, released = asyncio.Event(), asyncio.Event()
+
+        async def fetch(http, token, steam_id):
+            started.set()
+            await released.wait()
+            return {"level": 10}
+
+        with patch("bot.family.member_stats", fetch):
+            request = asyncio.create_task(self.families.member_stats("9", ALICE))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await self.families.leave(1)
+            finally:
+                released.set()
+                await request
+        self.assertNotIn(ALICE, self.families.stats_cache)
+
+    async def test_removal_during_observation_cannot_restore_snapshot_or_pending_alerts(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        await self.db.update_family("9", notify_chat=-100)
+        started, released = asyncio.Event(), asyncio.Event()
+        observe = self.db.observe_family
+
+        async def delayed_observe(*args):
+            started.set()
+            await released.wait()
+            await observe(*args)
+
+        current = snapshot([{"appid": 620, "name": "Portal 2", "owners": [ALICE]}])
+        with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)),
+            patch.object(self.db, "observe_family", side_effect=delayed_observe),
+        ):
+            check = asyncio.create_task(self.families.refresh("9"))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await self.families.remove(1, family_id="9")
+            finally:
+                released.set()
+                await check
+        self.assertNotIn("9", self.families.items)
+        self.assertNotIn("9", self.families.presence)
+        self.assertNotIn("9", self.families.last_family_check)
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_status_time_advances_only_after_a_successful_steam_snapshot(self):
+        with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))),
+            patch("bot.family.time.time", return_value=123.0),
+        ):
+            await self.families.register(1, "alice", ALICE)
+        self.assertEqual(self.families.last_steam_check, 123.0)
+        self.assertEqual(self.families.last_family_check, {"9": 123.0})
+        with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=RuntimeError("unavailable"))),
+            patch("bot.family.time.time", return_value=456.0),
+        ):
+            await self.families.refresh("9")
+        self.assertEqual(self.families.last_steam_check, 123.0)
+        self.assertEqual(self.families.last_family_check, {"9": 123.0})
+
     async def test_presence_and_membership_alerts_go_to_the_group(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
             await self.families.register(1, "refresh", ALICE)
@@ -235,6 +370,33 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=moved)):
             await self.families.refresh("9")
         self.assertIn("left the Steam family", sent.await_args.args[1])
+
+    async def test_presence_check_stops_after_logout_during_an_alert(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "alice", ALICE)
+        await self.db.update_family("9", notify_chat=-100, alerts={"playing": True})
+        self.families.presence["9"] = {m: {"online": True, "game": None} for m in (ALICE, BOB)}
+        current = {m: {"online": True, "game": 620, "game_name": "Portal 2"} for m in (ALICE, BOB)}
+        started, released = asyncio.Event(), asyncio.Event()
+
+        async def send(*args, **kwargs):
+            started.set()
+            await released.wait()
+
+        with (
+            patch("bot.family.fetch_presence", AsyncMock(return_value=current)),
+            patch.object(self.bot, "send_message", side_effect=send) as sent,
+        ):
+            check = asyncio.create_task(self.families.check_presence("9"))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await self.families.leave(1)
+            finally:
+                released.set()
+                await check
+        sent.assert_awaited_once()
+        self.assertNotIn("9", self.families.presence)
+        self.assertNotIn("9", self.families.items)
 
     async def test_member_who_moved_family_is_not_used(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
@@ -339,6 +501,27 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.refresh_token(account), "new-login")
         self.assertEqual((await self.db.account(2))["owner_telegram_id"], 2)
         self.assertEqual((await self.db.account(2))["status"], "approved")
+        self.assertIsNotNone(await self.db.family("9"))
+        self.assertIn("9", self.families.items)
+        self.assertIn("9", self.families.presence)
+
+    async def test_migrating_last_account_removes_abandoned_family_data(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "old-login", ALICE)
+        await self.db.update_family("9", notify_chat=-100)
+        target = snapshot([], family_id="other")
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)):
+            await self.families.register(1, "new-login", ALICE)
+        self.assertIsNone(await self.db.family("9"))
+        self.assertNotIn("9", self.families.items)
+        self.assertNotIn("9", self.families.presence)
+        self.assertNotIn("9", self.families.last_family_check)
+        account = await self.db.account(1)
+        self.assertEqual((account["family_id"], account["status"]), ("other", "approved"))
+        self.assertEqual(self.db.refresh_token(account), "new-login")
+        self.assertIsNotNone(await self.db.family("other"))
+        self.assertEqual(self.families.items["other"].snapshot, target)
+        self.assertIn(1, self.families.auths)
 
     async def test_changed_steam_identity_cannot_keep_ownership(self):
         current = {**snapshot([]), "members": [ALICE, BOB, "76561198000000003"]}
@@ -432,11 +615,17 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
     async def test_confirmed_no_family_during_relogin_revokes_old_access(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
             await self.families.register(1, "alice", ALICE)
+        self.families.stats_cache[ALICE] = (0, {"level": 10})
         with patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=NoFamily("left every family"))):
             with self.assertRaises(NoFamily):
                 await self.families.register(1, "replacement", ALICE)
         self.assertEqual(role(await self.db.account(1)), "pending")
         self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+        self.assertNotIn(1, self.families.auths)
+        self.assertNotIn(ALICE, self.families.stats_cache)
+        await self.families.leave(1)
+        self.assertIsNone(await self.db.family("9"))
+        self.assertNotIn("9", self.families.items)
 
     async def test_failed_login_to_a_different_steam_account_keeps_original_access(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
@@ -557,7 +746,7 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(asyncio.gather(logout, migration), timeout=5)
         bob = await self.db.account(2)
         self.assertEqual((bob["family_id"], bob["status"]), ("10", "pending"))
-        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+        self.assertIsNone(await self.db.family("9"))
 
     async def test_logout_uses_current_family_if_account_moves_while_waiting_for_lock(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
@@ -646,6 +835,14 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((fields[1], fields[3]), ("rotated", 0))
         self.assertEqual((await self.db.account(1))["token_renewed_at"], 100_000.0)
 
+    async def test_uncommitted_registration_does_not_retain_health_family_identifiers(self):
+        with patch.object(self.db, "save_account", AsyncMock(side_effect=OSError("unavailable"))):
+            with self.assertRaises(OSError):
+                await self.families.register(1, "original", ALICE)
+        self.assertEqual(self.families.health.families, {})
+        self.assertEqual(self.families.health.first_seen, {})
+        self.assertIsNone(self.families.last_steam_check)
+
     async def test_relogin_keeps_rotated_token_and_existing_approval(self):
         await self.families.register(1, "original", ALICE)
         with patch("bot.steam_auth.time.time", return_value=200_000.0):
@@ -724,6 +921,57 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
         self.steam_call.assert_awaited_once()
         account = await self.db.account(1)
         self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("pending", 200_000.0))
+
+    async def test_logout_rejects_an_inflight_token_renewal(self):
+        await self.families.register(1, "original", ALICE)
+        account = await self.db.account(1)
+        started, released = asyncio.Event(), asyncio.Event()
+
+        async def renew(*args):
+            started.set()
+            await released.wait()
+            return {1: b"late-access", 2: b"late-refresh"}
+
+        self.steam_call.side_effect = renew
+        with patch("bot.steam_auth.time.time", return_value=200_000.0):
+            renewal = asyncio.create_task(self.families.owner_token(account))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await self.families.leave(1)
+            finally:
+                released.set()
+            with self.assertRaises(TokenRejected):
+                await renewal
+        self.assertIsNone(await self.db.account(1))
+        self.assertNotIn(1, self.families.auths)
+
+    async def test_old_token_write_cannot_overwrite_credentials_after_logout_and_relogin(self):
+        await self.families.register(1, "original", ALICE)
+        account = await self.db.account(1)
+        started, released = asyncio.Event(), asyncio.Event()
+        set_token = self.db.set_refresh_token
+
+        async def delayed_write(*args, **kwargs):
+            started.set()
+            await released.wait()
+            await set_token(*args, **kwargs)
+
+        self.steam_call.return_value = {1: b"late-access", 2: b"late-refresh"}
+        with (
+            patch("bot.steam_auth.time.time", return_value=200_000.0),
+            patch.object(self.db, "set_refresh_token", side_effect=delayed_write),
+        ):
+            renewal = asyncio.create_task(self.families.owner_token(account))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await self.families.leave(1)
+                await self.db.ensure_family("9", "Fam")
+                await self.db.save_account(1, BOB, "9", "new-login")
+            finally:
+                released.set()
+            with self.assertRaises(TokenRejected):
+                await renewal
+        self.assertEqual(self.db.refresh_token(await self.db.account(1)), "new-login")
 
     async def test_failed_registration_does_not_replace_saved_credentials(self):
         await self.families.register(1, "original", ALICE)

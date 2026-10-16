@@ -52,9 +52,29 @@ class Db:
 
     async def delete_user(self, telegram_id: int) -> None:
         """Logout: forgets the Steam login and every setting of this Telegram user."""
-        async with self.pool.acquire() as connection, connection.transaction():
-            await connection.execute("DELETE FROM accounts WHERE telegram_id = $1", telegram_id)
-            await connection.execute("DELETE FROM telegram_users WHERE telegram_id = $1", telegram_id)
+        if not await self.delete_account(telegram_id):
+            async with self.pool.acquire() as connection, connection.transaction():
+                await self._delete_personal_data(connection, telegram_id, None)
+
+    async def delete_dialogs(self, telegram_id: int) -> None:
+        await self.pool.execute("DELETE FROM fsm WHERE split_part(key, ':', 3) = $1", str(telegram_id))
+
+    async def _delete_personal_data(
+        self, connection: asyncpg.Connection, telegram_id: int, family_id: str | None
+    ) -> None:
+        await connection.execute("DELETE FROM telegram_users WHERE telegram_id = $1", telegram_id)
+        await connection.execute("DELETE FROM fsm WHERE split_part(key, ':', 3) = $1", str(telegram_id))
+        if family_id is not None:
+            await connection.execute(
+                "UPDATE families SET owner_telegram_id = NULL WHERE family_id = $1 AND owner_telegram_id = $2",
+                family_id,
+                telegram_id,
+            )
+            await connection.execute(
+                "DELETE FROM families WHERE family_id = $1 AND NOT EXISTS "
+                "(SELECT 1 FROM accounts WHERE family_id = $1)",
+                family_id,
+            )
 
     async def set_language(self, telegram_id: int, language: str) -> None:
         await self.pool.execute(
@@ -164,14 +184,21 @@ class Db:
         return result == "UPDATE 1"
 
     async def set_refresh_token(
-        self, telegram_id: int, refresh_token: str | None, token_renewed_at: float = 0.0
+        self,
+        telegram_id: int,
+        refresh_token: str | None,
+        token_renewed_at: float = 0.0,
+        *,
+        expected_refresh_token: bytes | None = None,
     ) -> None:
         token = self.fernet.encrypt(refresh_token.encode()) if refresh_token else None
         await self.pool.execute(
-            "UPDATE accounts SET refresh_token = $2, token_renewed_at = $3 WHERE telegram_id = $1",
+            "UPDATE accounts SET refresh_token = $2, token_renewed_at = $3 WHERE telegram_id = $1 "
+            "AND ($4::bytea IS NULL OR refresh_token = $4)",
             telegram_id,
             token,
             token_renewed_at,
+            expected_refresh_token,
         )
 
     def refresh_token(self, account: asyncpg.Record) -> str | None:
@@ -234,21 +261,46 @@ class Db:
         )
 
     async def delete_account(self, telegram_id: int, *, family_id: str | None = None) -> bool:
-        return (
-            await self.pool.fetchval(
-                """
-            DELETE FROM accounts WHERE telegram_id = $1 AND ($2::text IS NULL OR family_id = $2)
-            RETURNING telegram_id
-            """,
-                telegram_id,
-                family_id,
-            )
-            is not None
-        )
+        async with self.pool.acquire() as connection:
+            while True:
+                async with connection.transaction():
+                    registered_family = await connection.fetchval(
+                        "SELECT family_id FROM accounts WHERE telegram_id = $1 "
+                        "AND ($2::text IS NULL OR family_id = $2)",
+                        telegram_id,
+                        family_id,
+                    )
+                    if registered_family is None:
+                        return False
+                    # Match membership reconciliation's family-before-account lock order.
+                    await connection.fetchval(
+                        "SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", registered_family
+                    )
+                    removed_family = await connection.fetchval(
+                        "DELETE FROM accounts WHERE telegram_id = $1 AND family_id = $2 RETURNING family_id",
+                        telegram_id,
+                        registered_family,
+                    )
+                    if removed_family is None:
+                        continue  # A concurrent login moved families before the lock; read its current registration.
+                    await self._delete_personal_data(connection, telegram_id, removed_family)
+                    return True
 
     # Families
     async def family(self, family_id: str) -> asyncpg.Record | None:
         return await self.pool.fetchrow("SELECT * FROM families WHERE family_id = $1", family_id)
+
+    async def prune_family(self, family_id: str) -> bool:
+        async with self.pool.acquire() as connection, connection.transaction():
+            await connection.fetchval("SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", family_id)
+            return (
+                await connection.fetchval(
+                    "DELETE FROM families WHERE family_id = $1 AND NOT EXISTS "
+                    "(SELECT 1 FROM accounts WHERE family_id = $1) RETURNING family_id",
+                    family_id,
+                )
+                is not None
+            )
 
     async def unlink_chat(self, chat_id: int, *, family_id: str | None = None, link_version: int | None = None) -> None:
         async with self.pool.acquire() as connection, connection.transaction():

@@ -60,6 +60,13 @@ class Logins:
         if task := self.tasks.get(telegram_id):
             task.cancel()
 
+    async def forget(self, telegram_id: int) -> None:
+        """Drain sign-in before deletion so a late Steam response cannot recreate the account."""
+        if task := self.tasks.get(telegram_id):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.retry_at.pop(telegram_id, None)
+
     async def start(self, telegram_id: int, manager: BaseDialogManager) -> dict:
         """Starts a QR session; returns the dialog data for the login window and keeps polling in the background."""
         now = time.monotonic()

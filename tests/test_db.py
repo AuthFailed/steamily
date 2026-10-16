@@ -71,7 +71,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             "ALTER TABLE accounts DROP COLUMN publish_presence, DROP COLUMN publish_telegram, "
             "DROP COLUMN publication_version"
         )
-        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version = 5")
+        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version = 6")
         await self.migrate_db()
         account = await self.db.account(10)
         self.assertEqual((account["publish_presence"], account["publish_telegram"]), (False, False))
@@ -209,6 +209,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(await self.db.revoke_account(10, "1", "9"))
                 else:
                     await getattr(self.db, action)(10)
+                await self.db.ensure_family("9", "Fam")
                 await self.db.save_account(10, "1", "9", "relogin")
                 await self.db.set_status(10, "approved")
                 account = await self.db.account(10)
@@ -481,6 +482,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
     async def test_every_status_and_expired_token_reserve_the_steam_link(self):
         for status in ("pending", "approved", "blocked"):
             with self.subTest(status=status):
+                await self.db.ensure_family("9", "Fam")
                 await self.db.save_account(10, "1", "9", "token")
                 await self.db.set_status(10, status)
                 await self.db.set_refresh_token(10, None)
@@ -493,10 +495,206 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_account_deletion_releases_the_steam_link(self):
         await self.db.save_account(10, "1", "9", "old-token")
         await self.db.delete_account(10)
+        await self.db.ensure_family("9", "Fam")
         await self.db.save_account(20, "1", "9", "new-token")
         await self.db.delete_user(20)
+        await self.db.ensure_family("9", "Fam")
         await self.db.save_account(30, "1", "9", "latest-token")
         self.assertEqual(self.db.refresh_token(await self.db.account(30)), "latest-token")
+
+    async def test_logout_erases_personal_data_and_all_dialogs_after_restart(self):
+        for telegram_id, steam_id in ((10, "1"), (20, "2")):
+            await self.db.save_account(telegram_id, steam_id, "9", "secret-token", "KZ", 123.0)
+            await self.db.set_telegram_profile(telegram_id, f"user{telegram_id}", "Saved profile")
+            await self.db.set_language(telegram_id, "ru")
+            await self.db.set_notify_requests(telegram_id, False)
+        await self.db.update_family("9", owner_telegram_id=20)
+        await self.db.enqueue_alerts("9", [{"text": "Shared family event"}])
+        pending = await self.db.pending_alerts("9", 100)
+        family, survivor = await self.db.family("9"), await self.db.account(20)
+        storage = PgStorage(self.db)
+        erased = [
+            StorageKey(bot_id=1, chat_id=10, user_id=10),
+            StorageKey(bot_id=2, chat_id=-100, user_id=10, thread_id=5, destiny="other"),
+            StorageKey(bot_id=1, chat_id=-100, user_id=10, business_connection_id="business"),
+        ]
+        retained = [StorageKey(bot_id=1, chat_id=10, user_id=20), StorageKey(bot_id=1, chat_id=10, user_id=100)]
+        for key in erased + retained:
+            await storage.set_state(key, Menu.main)
+            await storage.set_data(key, {"stack": ["saved dialog"]})
+
+        await self.db.delete_user(10)
+        await self.db.pool.close()
+        self.db = await Db.connect(TEST_DATABASE_URL, Fernet.generate_key().decode())
+        storage = PgStorage(self.db)
+        self.assertIsNone(await self.db.account(10))
+        self.assertIsNone(await self.db.language(10))
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM telegram_users WHERE telegram_id = 10"), 0)
+        for key in erased:
+            self.assertIsNone(await storage.get_state(key))
+            self.assertEqual(await storage.get_data(key), {})
+        for key in retained:
+            self.assertEqual(await storage.get_state(key), Menu.main.state)
+            self.assertEqual(await storage.get_data(key), {"stack": ["saved dialog"]})
+        self.assertEqual(await self.db.account(20), survivor)
+        self.assertEqual(await self.db.family("9"), family)
+        self.assertEqual(await self.db.pending_alerts("9", 100), pending)
+
+    async def test_logout_of_unregistered_user_erases_settings_and_dialogs(self):
+        await self.db.set_language(10, "ru")
+        storage = PgStorage(self.db)
+        key = StorageKey(bot_id=1, chat_id=-100, user_id=10)
+        await storage.set_data(key, {"stack": ["unregistered dialog"]})
+        await self.db.delete_user(10)
+        self.assertIsNone(await self.db.language(10))
+        self.assertEqual(await storage.get_data(key), {})
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM fsm"), 0)
+
+    async def test_admin_deletion_is_guarded_and_removes_personal_data_and_abandoned_family(self):
+        await self.db.save_account(10, "1", "9", "secret-token", "KZ", 123.0)
+        await self.db.set_telegram_profile(10, "user10", "Saved profile")
+        await self.db.set_language(10, "ru")
+        await self.db.set_notify_requests(10, False)
+        await self.db.update_family("9", owner_telegram_id=10)
+        await self.db.enqueue_alerts("9", [{"text": "Queued family event"}])
+        storage = PgStorage(self.db)
+        key = StorageKey(bot_id=1, chat_id=-100, user_id=10)
+        await storage.set_data(key, {"stack": ["saved dialog"]})
+        before = await self.snapshot_links()
+        self.assertFalse(await self.db.delete_account(10, family_id="other"))
+        self.assertEqual(await self.snapshot_links(), before)
+
+        self.assertTrue(await self.db.delete_account(10, family_id="9"))
+        self.assertIsNone(await self.db.account(10))
+        self.assertIsNone(await self.db.language(10))
+        self.assertIsNone(await self.db.family("9"))
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM fsm"), 0)
+
+    async def test_deleting_last_account_prunes_its_family_but_preserves_unrelated_data(self):
+        await self.db.save_account(10, "1", "9", "secret-token")
+        await self.db.ensure_family("other", "Other")
+        await self.db.save_account(20, "2", "other", "surviving-token")
+        await self.db.update_family("other", notify_chat=-200)
+        await self.db.enqueue_alerts("9", [{"text": "Removed family event"}])
+        await self.db.enqueue_alerts("other", [{"text": "Surviving family event"}])
+        pending = await self.db.pending_alerts("other", 100)
+        await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
+        family, survivor = await self.db.family("other"), await self.db.account(20)
+        await self.db.delete_user(10)
+        self.assertIsNone(await self.db.family("9"))
+        self.assertEqual(await self.db.family("other"), family)
+        self.assertEqual(await self.db.account(20), survivor)
+        self.assertEqual(await self.db.pending_alerts("9", 100), [])
+        self.assertEqual(await self.db.pending_alerts("other", 100), pending)
+        self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
+
+    async def test_startup_prunes_legacy_abandoned_families_and_preserves_registered_families(self):
+        await self.db.save_account(10, "1", "9", "secret-token")
+        family, account = await self.db.family("9"), await self.db.account(10)
+        await self.db.ensure_family("orphan", "Abandoned")
+        await self.db.update_family("orphan", state={"members": ["old"]}, owner_telegram_id=99, notify_chat=-999)
+        await self.db.enqueue_alerts("orphan", [{"text": "Abandoned family event"}])
+        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version >= 5")
+        await self.migrate_db()
+        await self.migrate_db()
+        self.assertIsNone(await self.db.family("orphan"))
+        self.assertEqual(await self.db.family("9"), family)
+        self.assertEqual(await self.db.account(10), account)
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+
+    async def test_concurrent_final_logouts_do_not_leave_family_data(self):
+        await self.db.save_account(10, "1", "9", "first-token")
+        await self.db.save_account(20, "2", "9", "second-token")
+        await asyncio.wait_for(asyncio.gather(self.db.delete_user(10), self.db.delete_user(20)), timeout=5)
+        self.assertIsNone(await self.db.family("9"))
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM accounts"), 0)
+
+    async def test_logout_uses_same_lock_order_as_membership_reconciliation(self):
+        await self.db.save_account(10, "1", "9", "token")
+        logout = None
+        try:
+            async with self.db.pool.acquire() as connection, connection.transaction():
+                await connection.fetchval("SELECT family_id FROM families WHERE family_id = '9' FOR UPDATE")
+                logout = asyncio.create_task(self.db.delete_user(10))
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(logout), 0.05)
+                await asyncio.wait_for(
+                    connection.execute("UPDATE accounts SET status = 'pending' WHERE telegram_id = 10"), 3
+                )
+        finally:
+            if logout is not None:
+                await asyncio.wait_for(logout, 5)
+        self.assertIsNone(await self.db.account(10))
+        self.assertIsNone(await self.db.family("9"))
+
+    async def test_deletion_rechecks_registration_if_login_moves_while_family_lock_is_pending(self):
+        for scope in ("9", None):
+            with self.subTest(scope=scope):
+                await self.db.ensure_family("9", "Fam")
+                await self.db.ensure_family("8", "Other")
+                await self.db.save_account(10, "1", "9", "old-token")
+                await self.db.set_language(10, "ru")
+                async with self.db.pool.acquire() as connection, connection.transaction():
+                    await connection.fetchval("SELECT family_id FROM families WHERE family_id = '9' FOR UPDATE")
+                    deletion = asyncio.create_task(self.db.delete_account(10, family_id=scope))
+                    with self.assertRaises(TimeoutError):
+                        await asyncio.wait_for(asyncio.shield(deletion), 0.05)
+                    await self.db.save_account(10, "1", "8", "replacement-token")
+                self.assertEqual(await asyncio.wait_for(deletion, 5), scope is None)
+                if scope is None:
+                    self.assertIsNone(await self.db.account(10))
+                    self.assertIsNone(await self.db.language(10))
+                    self.assertIsNone(await self.db.family("8"))
+                else:
+                    self.assertEqual((await self.db.account(10))["family_id"], "8")
+                    self.assertEqual(await self.db.language(10), "ru")
+                    await self.db.delete_user(10)
+
+    async def test_revoked_blocked_registration_is_retained_until_explicit_deletion(self):
+        for delete in (self.db.delete_user, self.db.delete_account):
+            with self.subTest(delete=delete.__name__):
+                await self.db.ensure_family("9", "Fam")
+                await self.db.save_account(10, "1", "9", "token")
+                await self.db.set_status(10, "blocked")
+                await self.db.set_language(10, "ru")
+                storage = PgStorage(self.db)
+                key = StorageKey(bot_id=1, chat_id=10, user_id=10)
+                await storage.set_data(key, {"saved": "dialog"})
+                await self.db.reconcile_members("9", [])
+                await self.migrate_db()
+                account = await self.db.account(10)
+                self.assertEqual(account["status"], "blocked")
+                self.assertIsNone(self.db.refresh_token(account))
+                self.assertEqual(await self.db.language(10), "ru")
+                self.assertEqual(await storage.get_data(key), {"saved": "dialog"})
+                await delete(10)
+                await self.db.reconcile_members("9", ["1"])
+                self.assertIsNone(await self.db.account(10))
+                self.assertIsNone(await self.db.language(10))
+                self.assertIsNone(await self.db.family("9"))
+                self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM fsm"), 0)
+
+    async def test_family_pruning_only_removes_the_requested_abandoned_family(self):
+        await self.db.save_account(10, "1", "9", "surviving-token")
+        await self.db.ensure_family("abandoned", "Abandoned")
+        await self.db.ensure_family("unrelated", "Unrelated")
+        family, account = await self.db.family("9"), await self.db.account(10)
+        self.assertFalse(await self.db.prune_family("9"))
+        self.assertEqual(await self.db.family("9"), family)
+        self.assertEqual(await self.db.account(10), account)
+        self.assertTrue(await self.db.prune_family("abandoned"))
+        self.assertIsNone(await self.db.family("abandoned"))
+        self.assertFalse(await self.db.prune_family("abandoned"))
+        self.assertIsNotNone(await self.db.family("unrelated"))
+
+    async def test_dialog_cleanup_erases_rows_recreated_after_logout(self):
+        storage = PgStorage(self.db)
+        key = StorageKey(bot_id=1, chat_id=10, user_id=10)
+        await self.db.delete_user(10)
+        await storage.set_data(key, {"empty_stack": True})
+        await self.db.delete_dialogs(10)
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM fsm"), 0)
 
     async def test_status_changes_are_family_scoped_and_report_matches(self):
         await self.db.save_account(10, "1", "9", "token")
@@ -516,6 +714,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(await self.db.account(10))
         self.assertTrue(await self.db.delete_account(10, family_id="9"))
         self.assertIsNone(await self.db.account(10))
+        await self.db.ensure_family("9", "Fam")
         await self.db.save_account(10, "1", "9", "token")
         self.assertTrue(await self.db.delete_account(10))
         self.assertIsNone(await self.db.account(10))
@@ -586,7 +785,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
     async def snapshot_links(self):
         return {
             table: await self.db.pool.fetch(f"SELECT * FROM {table} ORDER BY 1")
-            for table in ("accounts", "families", "telegram_users")
+            for table in ("accounts", "families", "telegram_users", "fsm", "pending_alerts")
         }
 
     async def migrate_db(self):
@@ -660,6 +859,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
 
     async def test_observation_and_alerts_commit_together_and_survive_reconnect(self):
+        await self.db.save_account(10, "1", "9", "token")
         state = {"members": ["1", "2"], "ownership": {"620": ["1"]}}
         await self.db.observe_family("9", state, "Observed", [{"text": "Game added"}, {"text": "Member joined"}])
         await self.db.pool.close()
@@ -683,7 +883,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
     async def test_pending_publication_envelope_survives_upgrade_and_restart(self):
         await self.db.enqueue_alerts("9", [{"text": "legacy alert"}])
         await self.db.pool.execute("ALTER TABLE pending_alerts DROP COLUMN publication")
-        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version = 5")
+        await self.db.pool.execute("DELETE FROM schema_migrations WHERE version = 6")
         await self.migrate_db()
         self.assertIsNone((await self.db.pending_alerts("9", 100))[0]["publication"])
         publication = {
@@ -848,6 +1048,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
 
     async def test_alert_schema_upgrade_is_idempotent_and_keeps_existing_family(self):
+        await self.db.save_account(10, "1", "9", "token")
         await self.db.pool.execute("DROP TABLE schema_migrations")
         await self.db.pool.execute("DROP TABLE IF EXISTS pending_alerts")
         await self.db.pool.execute("ALTER TABLE families DROP COLUMN IF EXISTS alert_retry_at")
@@ -941,6 +1142,25 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.set_refresh_token(10, None)
         account = await self.db.account(10)
         self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), (None, 0.0))
+
+    async def test_stale_token_callbacks_cannot_overwrite_a_new_login(self):
+        await self.db.save_account(10, "1", "9", "original-token")
+        original = (await self.db.account(10))["refresh_token"]
+        await self.db.delete_user(10)
+        await self.db.ensure_family("9", "Fam")
+        await self.db.save_account(10, "2", "9", "new-login", token_renewed_at=100.0)
+        replacement = await self.db.account(10)
+        await self.db.set_refresh_token(10, "stale-renewal", 200.0, expected_refresh_token=original)
+        await self.db.set_refresh_token(10, None, expected_refresh_token=original)
+        self.assertEqual(await self.db.account(10), replacement)
+
+        await self.db.set_refresh_token(
+            10, "current-renewal", 300.0, expected_refresh_token=replacement["refresh_token"]
+        )
+        renewed = await self.db.account(10)
+        self.assertEqual((self.db.refresh_token(renewed), renewed["token_renewed_at"]), ("current-renewal", 300.0))
+        await self.db.set_refresh_token(10, None, expected_refresh_token=renewed["refresh_token"])
+        self.assertIsNone(self.db.refresh_token(await self.db.account(10)))
 
     async def test_renewal_schema_upgrade_keeps_existing_accounts(self):
         await self.db.save_account(10, "1", "9", "legacy", "KZ")
