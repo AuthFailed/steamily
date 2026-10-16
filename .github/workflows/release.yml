@@ -26,7 +26,7 @@ jobs:
     needs: release
     if: needs.release.outputs.release_created == 'true'
     # GITHUB_TOKEN-created tags do not trigger another workflow run.
-    uses: ./.github/workflows/docker.yml
+    uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.release.outputs.tag_name }}
     secrets: inherit

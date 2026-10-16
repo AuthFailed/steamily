@@ -113,15 +113,16 @@ currently `in_flight`, `failed_total` since startup, and
 included. `pending_retry: null` means the current
 runtime has no durable retry queue; it does not mean zero pending notifications.
 Counters reset on restart. A healthy process does not prove every notification
-arrived. Recovery, durable delivery, and refresh serialization are tracked in
-[#13](https://github.com/AuthFailed/steamily/issues/13),
-[#14](https://github.com/AuthFailed/steamily/issues/14), and
-[#15](https://github.com/AuthFailed/steamily/issues/15), respectively.
+arrived. Durable delivery is tracked in
+[#14](https://github.com/AuthFailed/steamily/issues/14).
 
-A database enumeration error currently stops the affected worker. Health detects
-the failure and stays unhealthy even if the database becomes available again.
-After database access is restored, restart with `docker compose restart bot` and
-verify health and fresh family snapshots. Automatic worker recovery belongs to #13.
+Database enumeration and per-family failures are logged, and workers retry on
+their next scheduled cycle. The affected worker stays unhealthy until a successful
+cycle completes. After database access is restored, verify that workers return to
+`ok` and family snapshot ages reset. Unexpected worker exits remain unhealthy;
+inspect the logged failure before restarting with `docker compose restart bot`.
+Refreshes for the same family are serialized, including manual and background
+checks, so overlapping requests do not announce the same change twice.
 
 ## Back up, update, and restore
 
@@ -195,5 +196,6 @@ pull requests**. The default `GITHUB_TOKEN` can create release PRs and tags, but
 its generated events do not start CI runs. To run CI automatically on those PRs,
 configure a GitHub App/user token with the necessary repository permissions as
 `RELEASE_PLEASE_TOKEN`. Otherwise, a maintainer must close and reopen the release
-PR to trigger normal PR checks before merging. Release image publication is
-called directly by the release workflow, so it also works with `GITHUB_TOKEN`.
+PR to trigger normal PR checks before merging. The release workflow calls the
+same CI checks for the exact tag before image publication, so it also works
+with `GITHUB_TOKEN`.
