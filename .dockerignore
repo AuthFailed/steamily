@@ -3,6 +3,9 @@ backups/
 __pycache__/
 .venv/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 .git/
 .github/
 tests/

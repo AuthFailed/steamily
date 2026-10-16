@@ -73,8 +73,25 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - run: pip install -r requirements.txt
-      - run: python -m unittest -v
+      - run: pip install -r requirements-dev.txt
+      - name: Tests with branch coverage
+        run: python -m coverage run -m unittest -v
+      - name: Coverage reports
+        if: always()
+        run: |
+          python -m coverage xml --fail-under=0
+          python -m coverage html --fail-under=0
+          python -m coverage report --format=markdown --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
+      - name: Minimum coverage
+        if: always()
+        run: python -m coverage report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: |
+            coverage.xml
+            htmlcov/
 
   build:
     if: github.event_name == 'pull_request'

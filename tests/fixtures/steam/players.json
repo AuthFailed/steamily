@@ -1,0 +1,47 @@
+{
+  "response": {
+    "accounts": [
+      {
+        "public_data": {
+          "steamid": "76561198000000001",
+          "persona_name": "Alice & Алиса",
+          "profile_url": "fixture-alice"
+        },
+        "private_data": {
+          "persona_state": 1,
+          "time_created": 1600000000,
+          "last_seen_online": 1700000030,
+          "game_id": "10",
+          "game_extra_info": "Fixture Game"
+        }
+      },
+      {
+        "public_data": {
+          "steamid": 76561198000000002,
+          "persona_name": "Bob",
+          "profile_url": ""
+        },
+        "private_data": {
+          "persona_state": 0,
+          "game_id": "9223372036854775808",
+          "game_extra_info": "Fixture Shortcut"
+        }
+      },
+      {
+        "public_data": {
+          "steamid": "76561198000000003"
+        },
+        "private_data": null
+      },
+      {
+        "public_data": null,
+        "private_data": null
+      },
+      {
+        "public_data": {
+          "persona_name": "Missing ID"
+        }
+      }
+    ]
+  }
+}
