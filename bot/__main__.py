@@ -15,6 +15,7 @@ from aiogram_dialog.utils import remove_intent_id
 
 from .config import ConfigError, load_config
 from .db import Db, PgStorage
+from .dialogs import deny_action
 from .dialogs.admin import admin_dialog
 from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
@@ -28,6 +29,23 @@ from .states import Admin, FamilyView, Menu
 
 router = Router()
 log = logging.getLogger(__name__)
+
+
+class GroupMigrationMiddleware(BaseMiddleware):
+    """Handle service notices before dialog middleware, which requires a sender."""
+
+    async def __call__(self, handler, message: Message, data: dict):
+        if (
+            message
+            and message.chat.type != "private"
+            and (message.migrate_to_chat_id is not None or message.migrate_from_chat_id is not None)
+        ):
+            await data["db"].migrate_chat(
+                message.migrate_from_chat_id or message.chat.id,
+                message.migrate_to_chat_id or message.chat.id,
+            )
+            return None
+        return await handler(message, data)
 
 
 class AccountMiddleware(BaseMiddleware):
@@ -86,10 +104,13 @@ class AccessMiddleware(BaseMiddleware):
             FamilyView.purchases,
         )
         if user_role != "owner":
-            denied |= state.group is Admin or state in owner_states
-            denied |= state == Menu.settings and callback in ("requests_on", "requests_off", "group_alerts")
-            denied |= state == FamilyView.info and callback == "manage"
-            denied |= state == FamilyView.member and callback == "remove"
+            owner_action = state.group is Admin or state in owner_states
+            owner_action |= state == Menu.settings and callback in ("requests_on", "requests_off", "group_alerts")
+            owner_action |= state == FamilyView.info and callback == "manage"
+            owner_action |= state == FamilyView.member and callback == "remove"
+            if owner_action:
+                await deny_action(manager)
+                return None
         if denied:
             await manager.start(Menu.main, mode=StartMode.RESET_STACK)
             await manager.answer_callback()
@@ -154,6 +175,7 @@ async def background_dialog_failed(event: ErrorEvent):
 
 def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, **dialog_options) -> Dispatcher:
     dp = Dispatcher(storage=storage or PgStorage(db), db=db, families=families, logins=logins)
+    dp.message.outer_middleware(GroupMigrationMiddleware())
     dp.include_routers(router, inline_router, menu_dialog, games_dialog, family_dialog, admin_dialog)
     setup_dialogs(dp, **dialog_options)
     for observer in (dp.message, dp.callback_query, dp.observers[DIALOG_EVENT_NAME]):
@@ -196,8 +218,9 @@ async def main() -> None:
                         families.refresh_loop(settings.poll_interval_seconds), name="family-refresh"
                     ),
                     "presence": asyncio.create_task(families.presence_loop(), name="family-presence"),
+                    "delivery": asyncio.create_task(families.delivery_loop(), name="family-delivery"),
                 }
-                monitor = asyncio.create_task(health.monitor(loops), name="health-monitor")
+                monitor = asyncio.create_task(health.monitor(loops, db), name="health-monitor")
                 for task in [*loops.values(), monitor]:
                     task.add_done_callback(background_finished)
                 try:

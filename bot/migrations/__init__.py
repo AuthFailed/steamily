@@ -12,6 +12,7 @@ MIGRATIONS = tuple(
         "001_initial.sql",
         "002_current_fields.sql",
         "003_unique_steam_links.sql",
+        "004_alert_delivery.sql",
     )
 )
 

@@ -17,7 +17,7 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
         self.clock = patch("bot.health.monotonic", return_value=100)
         self.clock.start()
         self.health = Health(60)
-        self.tasks = {name: asyncio.create_task(asyncio.Event().wait()) for name in ("refresh", "presence")}
+        self.tasks = {name: asyncio.create_task(asyncio.Event().wait()) for name in ("refresh", "presence", "delivery")}
         for name in self.tasks:
             self.health.beat(name, failed=False)
 
@@ -54,9 +54,10 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.health.snapshot(self.tasks)["steam"]["families"], [])
 
     async def test_enumeration_failure_is_unhealthy_then_recovers_automatically_for_each_worker(self):
-        for name, loop_name, operation in (
-            ("refresh", "refresh_loop", "refresh"),
-            ("presence", "presence_loop", "check_presence"),
+        for name, loop_name, operation, scan in (
+            ("refresh", "refresh_loop", "refresh", "families_with_accounts"),
+            ("presence", "presence_loop", "check_presence", "families_with_accounts"),
+            ("delivery", "delivery_loop", "deliver_alerts", "alert_families"),
         ):
             with self.subTest(worker=name):
                 failed, retry, recovered = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -75,7 +76,7 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
                         await asyncio.Event().wait()
 
                 db = AsyncMock()
-                db.families_with_accounts.side_effect = [
+                getattr(db, scan).side_effect = [
                     RuntimeError("postgresql://private:password@host/db"),
                     [{"family_id": "9"}],
                 ]
@@ -105,24 +106,56 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(report["workers"][name]["status"], "ok")
                         self.assertEqual(report["steam"]["last_success_age_seconds"], 0)
                         self.assertNotIn("password", json.dumps(report))
-                        self.assertEqual(db.families_with_accounts.await_count, 2)
+                        self.assertEqual(getattr(db, scan).await_count, 2)
                         process.assert_awaited_once_with("9")
                     finally:
                         task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
                         self.tasks[name] = asyncio.create_task(asyncio.Event().wait())
 
-    async def test_failed_delivery_is_visible_without_credentials_or_fake_retry_queue(self):
+    async def test_failed_delivery_is_visible_without_credentials(self):
         bot = AsyncMock()
         bot.send_message.side_effect = TelegramBadRequest(method="sendMessage", message="private-token")
-        families = Families(AsyncMock(), None, bot, health=self.health)
+        db = AsyncMock()
+        db.pending_alerts.side_effect = [[{"id": 1, "chat_id": -100, "text": "hello", "link_version": 1}], []]
+        families = Families(db, None, bot, health=self.health)
         with self.assertLogs("bot.family", level="WARNING"):
-            await families.send_alert({"notify_chat": -100, "family_id": "9"}, "hello")
+            await families.deliver_alerts("9")
+        db.delete_alert.assert_awaited_once_with(1)
         report = self.health.snapshot(self.tasks)
         self.assertEqual(report["notifications"]["failed_total"], 1)
         self.assertEqual(report["notifications"]["in_flight"], 0)
         self.assertIsNone(report["notifications"]["pending_retry"])
         self.assertNotIn("private-token", json.dumps(report))
+
+    async def test_queue_query_failure_is_sanitized_and_recovers_on_next_pass(self):
+        db = AsyncMock()
+        db.alert_health.side_effect = [
+            TimeoutError("postgresql://private:password@host/db"),
+            {"pending_retry": 3, "deferred": 2},
+        ]
+        reports = []
+
+        async def sleep(interval):
+            if len(reports) == 2:
+                raise asyncio.CancelledError
+
+        with patch("bot.health.write_report", side_effect=reports.append), patch("bot.health.asyncio.sleep", sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.health.monitor(self.tasks, db)
+        failed, recovered = reports
+        self.assertFalse(failed["healthy"])
+        self.assertIsNone(failed["notifications"]["pending_retry"])
+        self.assertIsNone(failed["notifications"]["deferred"])
+        self.assertEqual(failed["notifications"]["queue_status"], "failed")
+        self.assertEqual(failed["notifications"]["queue_error_type"], "TimeoutError")
+        self.assertNotIn("password", json.dumps(failed))
+        self.assertTrue(recovered["healthy"])
+        self.assertEqual(recovered["notifications"]["pending_retry"], 3)
+        self.assertEqual(recovered["notifications"]["deferred"], 2)
+        self.assertEqual(recovered["notifications"]["queue_status"], "ok")
+        self.assertNotIn("queue_error_type", recovered["notifications"])
+        self.assertEqual(db.alert_health.await_count, 2)
 
     async def test_health_command_rejects_missing_corrupt_and_stale_reports(self):
         with tempfile.TemporaryDirectory() as directory:

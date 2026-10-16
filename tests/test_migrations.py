@@ -81,12 +81,47 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await self.connection.fetchval(f"SELECT {column} FROM accounts"))
         for column in ("owner_telegram_id", "alerts"):
             self.assertIsNone(await self.connection.fetchval(f"SELECT {column} FROM families"))
+        for column in ("alert_retry_at", "alert_link_version"):
+            self.assertEqual(await self.connection.fetchval(f"SELECT {column} FROM families"), 0)
+        self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+
+    async def test_versioned_upgrade_adds_delivery_queue_without_replaying_earlier_migrations(self):
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:3]):
+            await migrate(self.connection)
+        await self.connection.execute("INSERT INTO families (family_id, name) VALUES ('9', 'Existing')")
+        before = await self.versions()
+        await migrate(self.connection)
+        self.assertEqual((await self.versions())[:3], before)
+        family = await self.connection.fetchrow("SELECT * FROM families WHERE family_id = '9'")
+        self.assertEqual((family["name"], family["alert_retry_at"], family["alert_link_version"]), ("Existing", 0, 0))
+        self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+
+    async def test_unversioned_delivery_queue_and_retry_state_survive_adoption_and_restart(self):
+        for path in MIGRATIONS:
+            await self.connection.execute(path.read_text())
+        await self.connection.execute("""
+            INSERT INTO families (family_id, name, notify_chat, alert_retry_at, alert_link_version)
+            VALUES ('9', 'Existing', -100, 250, 6);
+            INSERT INTO pending_alerts (family_id, chat_id, text, coalesce_key, expires_at)
+            VALUES ('9', -100, 'durable event', NULL, NULL), ('9', -100, 'presence event', 'presence:1', 500);
+        """)
+        family = await self.connection.fetchrow("SELECT * FROM families WHERE family_id = '9'")
+        pending = await self.connection.fetch("SELECT * FROM pending_alerts ORDER BY id")
+        await migrate(self.connection)
+        await migrate(self.connection)
+        self.assertEqual(await self.connection.fetchrow("SELECT * FROM families WHERE family_id = '9'"), family)
+        self.assertEqual(await self.connection.fetch("SELECT * FROM pending_alerts ORDER BY id"), pending)
+        next_id = await self.connection.fetchval("""
+            INSERT INTO pending_alerts (family_id, chat_id, text) VALUES ('9', -100, 'next event') RETURNING id
+        """)
+        self.assertGreater(next_id, pending[-1]["id"])
+        self.assertEqual(len(await self.versions()), len(MIGRATIONS))
 
     async def test_failed_migration_rolls_back_schema_data_and_all_new_versions(self):
         await self.connection.execute(MIGRATIONS[0].read_text())
         await self.connection.execute("INSERT INTO families (family_id, name) VALUES ('9', 'Original')")
         with tempfile.TemporaryDirectory() as directory:
-            broken = Path(directory) / "004_broken.sql"
+            broken = Path(directory) / f"{len(MIGRATIONS) + 1:03d}_broken.sql"
             broken.write_text("""
                 ALTER TABLE families ADD COLUMN failed_upgrade TEXT;
                 UPDATE families SET name = 'Changed';
@@ -109,12 +144,15 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_newer_or_inconsistent_history_refuses_startup_without_changes(self):
         await migrate(self.connection)
-        await self.connection.execute("INSERT INTO schema_migrations (version, name) VALUES (4, '004_newer.sql')")
+        newer = len(MIGRATIONS) + 1
+        await self.connection.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)", newer, f"{newer:03d}_newer.sql"
+        )
         before = await self.versions()
         with self.assertRaisesRegex(RuntimeError, "matching release"):
             await migrate(self.connection)
         self.assertEqual(await self.versions(), before)
-        await self.connection.execute("DELETE FROM schema_migrations WHERE version IN (2, 4)")
+        await self.connection.execute("DELETE FROM schema_migrations WHERE version = 2 OR version = $1", newer)
         with self.assertRaisesRegex(RuntimeError, "matching release"):
             await migrate(self.connection)
 

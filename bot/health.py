@@ -15,7 +15,7 @@ MAX_REPORT_AGE = 30
 class Health:
     def __init__(self, poll_interval: int = 600):
         self.started = monotonic()
-        self.intervals = {"refresh": poll_interval, "presence": 60}
+        self.intervals = {"refresh": poll_interval, "presence": 60, "delivery": 5}
         self.workers = {name: {"last_progress": self.started, "failed": False} for name in self.intervals}
         self.families: dict[str, float | None] = {}
         self.first_seen: dict[str, float] = {}
@@ -23,6 +23,7 @@ class Health:
         self.in_flight = 0
         self.failed_notifications = 0
         self.last_notification_failure: float | None = None
+        self.queue_health = {"pending_retry": None, "deferred": None, "queue_status": "unknown"}
 
     def beat(self, name: str, failed: bool | None = None) -> None:
         self.workers[name]["last_progress"] = monotonic()
@@ -65,7 +66,8 @@ class Health:
         ]
         return {
             "healthy": all(worker["status"] == "ok" for worker in workers.values())
-            and not any(family["delayed"] for family in families),
+            and not any(family["delayed"] for family in families)
+            and self.queue_health["queue_status"] != "failed",
             "updated_at": time.time(),
             "workers": workers,
             "steam": {"last_success_age_seconds": age(self.last_steam_read), "families": families},
@@ -73,12 +75,26 @@ class Health:
                 "in_flight": self.in_flight,
                 "failed_total": self.failed_notifications,
                 "last_failure_age_seconds": age(self.last_notification_failure),
-                "pending_retry": None,  # shortcut: no durable delivery queue yet; tracked in issue #14.
+                **self.queue_health,
             },
         }
 
-    async def monitor(self, tasks: dict[str, asyncio.Task]) -> None:
+    async def monitor(self, tasks: dict[str, asyncio.Task], db) -> None:
         while True:
+            try:
+                counts = await asyncio.wait_for(db.alert_health(time.time()), timeout=5)
+                self.queue_health = {
+                    "pending_retry": counts["pending_retry"],
+                    "deferred": counts["deferred"],
+                    "queue_status": "ok",
+                }
+            except Exception as error:
+                self.queue_health = {
+                    "pending_retry": None,
+                    "deferred": None,
+                    "queue_status": "failed",
+                    "queue_error_type": type(error).__name__,
+                }
             write_report(self.snapshot(tasks))
             await asyncio.sleep(5)
 

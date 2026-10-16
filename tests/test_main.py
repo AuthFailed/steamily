@@ -45,7 +45,7 @@ class BackgroundTasksTest(unittest.IsolatedAsyncioTestCase):
         async def background(name):
             tasks.append(asyncio.current_task())
             started.add(name)
-            if len(started) == 3:
+            if len(started) == 4:
                 ready.set()
             try:
                 await asyncio.Event().wait()
@@ -56,12 +56,13 @@ class BackgroundTasksTest(unittest.IsolatedAsyncioTestCase):
         families = MagicMock()
         families.refresh_loop.side_effect = lambda _: background("refresh")
         families.presence_loop.side_effect = lambda: background("presence")
+        families.delivery_loop.side_effect = lambda: background("delivery")
         health = MagicMock()
-        health.monitor.side_effect = lambda _: background("health")
+        health.monitor.side_effect = lambda *args: background("health")
         db = MagicMock()
 
         async def close():
-            self.assertEqual(cleaned, {"refresh", "presence", "health"})
+            self.assertEqual(cleaned, {"refresh", "presence", "delivery", "health"})
 
         db.pool.close = AsyncMock(side_effect=close)
         logins = MagicMock(close=AsyncMock(side_effect=close))

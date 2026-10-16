@@ -93,7 +93,7 @@ docker compose logs --since=30m --tail=200 bot
 
 The health command prints credential-free JSON and exits nonzero when unhealthy.
 Docker runs the same check automatically. Its local heartbeat must be less than
-30 seconds old; both refresh and presence workers must be running and making
+30 seconds old; refresh, presence, and delivery workers must be running and making
 progress. A worker that stops, fails, or stalls is unhealthy even if Telegram
 still responds. Docker marks a container unhealthy but does **not** automatically
 restart it solely for that reason.
@@ -107,14 +107,18 @@ and database/Steam reachability before restarting. Keep raw logs private: review
 and redact account identifiers and upstream errors before sharing them. Do not
 post `.env`, tokens, database URLs, or raw database rows for diagnosis.
 
-Group-alert counters cover shared-library and presence notifications: sends
-currently `in_flight`, `failed_total` since startup, and
-`last_failure_age_seconds`. Login and approval-request notifications are not
-included. `pending_retry: null` means the current
-runtime has no durable retry queue; it does not mean zero pending notifications.
-Counters reset on restart. A healthy process does not prove every notification
-arrived. Durable delivery is tracked in
-[#14](https://github.com/AuthFailed/steamily/issues/14).
+Group alerts use a durable PostgreSQL queue. `notifications.pending_retry` counts
+all nonexpired pending alerts for linked groups; `deferred` is the subset whose
+family retry time is still in the future. These counts survive process restarts.
+If the queue cannot be queried, both counts are `null`, health fails, and the
+report shows a sanitized queue-unavailable error. `null` never means an empty queue.
+
+`in_flight`, `failed_total`, and `last_failure_age_seconds` describe actual group
+delivery attempts in this process and reset on restart. Login and approval-request
+notifications are not included. Health exposes counts without queued message text
+or credentials. A healthy process does not prove every notification arrived; see
+the [group-alert delivery runbook](docs/group-alert-delivery.md) for retry delays,
+expiry, discarded messages, and the possibility of duplicates.
 
 Database enumeration and per-family failures are logged, and workers retry on
 their next scheduled cycle. The affected worker stays unhealthy until a successful

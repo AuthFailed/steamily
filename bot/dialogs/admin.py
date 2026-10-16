@@ -12,6 +12,7 @@ from ..family import Family
 from ..i18n import Tr, t
 from ..states import Admin, Menu
 from ..ui import GREEN, RED, Header, back_home, look
+from . import deny_action, require_owner
 
 STATUS_ICONS = {"pending": "⏳", "approved": "✅", "blocked": "⛔"}
 log = logging.getLogger(__name__)
@@ -54,25 +55,35 @@ async def member_getter(dialog_manager: DialogManager, db: Db, family: Family, l
     }
 
 
-async def set_status(manager: DialogManager, status: str | None) -> None:
+async def set_status(manager: DialogManager, status: str | None) -> bool:
+    actor = await require_owner(manager)
+    if actor is None:
+        return False
     db: Db = manager.middleware_data["db"]
-    family: Family = manager.middleware_data["family"]
-    telegram_id = manager.dialog_data["telegram_id"]
+    telegram_id = manager.dialog_data.get("telegram_id")
+    target = await db.account(telegram_id) if telegram_id is not None else None
+    if target is None or target["family_id"] != actor["family_id"] or telegram_id == actor["telegram_id"]:
+        await deny_action(manager, "member_gone")
+        return False
     if status:
+        family: Family = manager.middleware_data["family"]
         changed = await db.set_status(
             telegram_id,
             status,
-            family_id=family.family_id,
+            family_id=actor["family_id"],
             members=family.members if status == "approved" else None,
         )
     else:
-        changed = await db.delete_account(telegram_id, family_id=family.family_id)
+        changed = await db.delete_account(telegram_id, family_id=actor["family_id"])
+    if not changed:
+        await deny_action(manager, "member_gone")
+        return False
     # Reset the user's own dialogs so they immediately see their new access level.
-    if changed:
-        try:
-            await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
-        except Exception:
-            log.exception("Could not refresh member %s menu after status change", telegram_id)
+    try:
+        await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
+    except Exception:
+        log.exception("Could not refresh member %s menu after status change", telegram_id)
+    return True
 
 
 async def approve(callback: CallbackQuery, button: Button, manager: DialogManager):
@@ -84,8 +95,14 @@ async def block(callback: CallbackQuery, button: Button, manager: DialogManager)
 
 
 async def remove(callback: CallbackQuery, button: Button, manager: DialogManager):
-    await set_status(manager, None)
-    await manager.switch_to(Admin.members)
+    if await set_status(manager, None):
+        await manager.switch_to(Admin.members)
+
+
+async def on_start(start_data, manager: DialogManager):
+    family = manager.middleware_data["family"]
+    if family:
+        manager.dialog_data["family_id"] = family.family_id
 
 
 admin_dialog = Dialog(
@@ -127,4 +144,5 @@ admin_dialog = Dialog(
         getter=member_getter,
         state=Admin.member,
     ),
+    on_start=on_start,
 )
