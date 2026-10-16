@@ -47,6 +47,7 @@ class Family:
 
     def __init__(self, family_id: str, stores: dict[str, dict] | None = None):
         self.family_id = family_id
+        self.lock = asyncio.Lock()
         self.snapshot: dict | None = None
         self.stores = stores if stores is not None else {}
         self._charts: tempfile.TemporaryDirectory | None = None
@@ -129,38 +130,43 @@ class Families:
         last_renewal = account["token_renewed_at"] if account and account["steam_id"] == steam_id else 0.0
         auth = SteamAuth(self.http, refresh_token, steam_id, last_renewal=last_renewal)
         access_token = await auth.get_access_token()
-        snapshot = await fetch_family_snapshot(self.http, access_token)
+        try:
+            snapshot = await fetch_family_snapshot(self.http, access_token)
+        except NoFamily:
+            if account and account["steam_id"] == steam_id:
+                async with self.get(account["family_id"]).lock:
+                    await self._revoke_account(account)
+            raise
         country = await fetch_user_country(self.http, access_token, steam_id)
         family_id = snapshot["family_id"]
         if steam_id not in snapshot["members"]:
             raise RuntimeError("Steam returned a family without the signed-in account")
-        changed_family = account and account["family_id"] != family_id
-        if changed_family:
-            await self._revoke_account(account)
-        elif account and account["steam_id"] != steam_id and account["owner_telegram_id"] == telegram_id:
-            await self.make_owner(account["family_id"], None)
         await self.db.ensure_family(family_id, snapshot["name"])
-        await self.db.save_account(telegram_id, steam_id, family_id, auth.refresh_token, country, auth.last_renewal)
+        account_lock = self.get(account["family_id"]).lock if account else asyncio.Lock()
+        async with account_lock:
+            await self.db.save_account(telegram_id, steam_id, family_id, auth.refresh_token, country, auth.last_renewal)
         self.auths.pop(telegram_id, None)
-        saved = await self.db.account(telegram_id)
-        if saved["status"] != "blocked" and (not account or account["steam_id"] == steam_id or changed_family):
+        if account and (account["steam_id"] != steam_id or account["family_id"] != family_id):
+            self.stats_cache.pop(account["steam_id"], None)
+            self._cache_generation += 1
+        if account is None:
             await self.db.claim_initial_owner(family_id, telegram_id)
-        await self._reconcile_accounts(family_id, snapshot["members"])
         family = self.get(family_id)
-        family.snapshot = snapshot
-        self._checked(family_id)
-        if changed_family:
+        async with family.lock:
+            await self._reconcile_accounts(family_id, snapshot["members"])
+            family.snapshot = snapshot
+            self._checked(family_id)
+        refresh_ids = [family_id]
+        if account and account["family_id"] != family_id:
             if await self.db.prune_family(account["family_id"]) or not await self.db.family(account["family_id"]):
                 self._forget_family(account["family_id"])
             else:
-                try:
-                    await self.refresh(account["family_id"])
-                except Exception:
-                    log.exception("Old family %s refresh after migration failed", account["family_id"])
-        try:  # the login itself succeeded; store details can catch up on the next poll
-            await self.refresh(family_id)
-        except Exception:
-            log.exception("Family %s refresh after login failed", family_id)
+                refresh_ids.insert(0, account["family_id"])
+        for refresh_id in refresh_ids:
+            try:  # the login itself succeeded; store details can catch up on the next poll
+                await self.refresh(refresh_id)
+            except Exception:
+                log.exception("Family %s refresh after login failed", refresh_id)
         return family
 
     async def make_owner(self, family_id: str, telegram_id: int | None) -> None:
@@ -172,23 +178,34 @@ class Families:
         """Logout. An owner's role goes to a random other registered member (approved ones first), who is
         returned; with nobody else registered the family has no owner until the next registration."""
         account = await self.db.account(telegram_id)
-        new_owner = None
-        if account and account["owner_telegram_id"] == telegram_id:
-            others = [
-                a
-                for a in await self.db.family_accounts(account["family_id"])
-                if a["telegram_id"] != telegram_id
-                and a["status"] != "blocked"
-                and a["steam_id"] in self.get(account["family_id"]).members
-                and a["refresh_token"]
-            ]
-            approved = [a for a in others if a["status"] == "approved"]
-            if others:
-                new_owner = random.choice(approved or others)["telegram_id"]
-            await self.make_owner(account["family_id"], new_owner)
-        await self.db.delete_user(telegram_id)
-        await self._forget(account, telegram_id)
-        return new_owner
+        if account is None:
+            await self.db.delete_user(telegram_id)
+            await self._forget(account, telegram_id)
+            return None
+        while True:
+            family = self.get(account["family_id"])
+            async with family.lock:  # A poll must not revoke a successor between selection and approval.
+                cached_account = account
+                account = await self.db.account(telegram_id)
+                if account and account["family_id"] != family.family_id:
+                    continue  # A concurrent login moved the account while logout waited for the lock.
+                new_owner = None
+                if account and account["owner_telegram_id"] == telegram_id:
+                    others = [
+                        a
+                        for a in await self.db.family_accounts(account["family_id"])
+                        if a["telegram_id"] != telegram_id
+                        and a["status"] != "blocked"
+                        and a["refresh_token"]
+                        and (a["steam_id"] in family.members if family.snapshot else a["status"] == "approved")
+                    ]
+                    approved = [a for a in others if a["status"] == "approved"]
+                    if others:
+                        new_owner = random.choice(approved or others)["telegram_id"]
+                    await self.make_owner(account["family_id"], new_owner)
+                await self.db.delete_user(telegram_id)
+                await self._forget(account or cached_account, telegram_id)
+                return new_owner
 
     async def remove(self, telegram_id: int, *, family_id: str) -> bool:
         account = await self.db.account(telegram_id)
@@ -221,33 +238,22 @@ class Families:
 
     async def _revoke_account(self, account) -> None:
         family_id, telegram_id = account["family_id"], account["telegram_id"]
-        row = await self.db.family(family_id)
-        if row is None:
+        if not await self.db.revoke_membership(telegram_id, family_id, steam_id=account["steam_id"]):
             return
-        if row["owner_telegram_id"] == telegram_id:
-            await self.make_owner(family_id, None)
-        if await self.db.revoke_account(telegram_id, account["steam_id"], family_id):
-            self.auths.pop(telegram_id, None)
-            self.stats_cache.pop(account["steam_id"], None)
-            self._cache_generation += 1
+        self.auths.pop(telegram_id, None)
+        self.stats_cache.pop(account["steam_id"], None)
+        self._cache_generation += 1
         family = self.get(family_id)
         if family.snapshot:
             family.snapshot = {**family.snapshot, "members": [m for m in family.members if m != account["steam_id"]]}
 
     async def _reconcile_accounts(self, family_id: str, members: list[str]) -> None:
-        accounts = await self.db.family_accounts(family_id)
-        for account in accounts:
+        await self.db.reconcile_members(family_id, members)
+        for account in await self.db.family_accounts(family_id):
             if account["steam_id"] not in members:
-                await self._revoke_account(account)
-        current = [a for a in accounts if a["steam_id"] in members and a["status"] != "blocked"]
-        row = await self.db.family(family_id)
-        if row is None:
-            return
-        owner = row["owner_telegram_id"]
-        if owner not in {a["telegram_id"] for a in current}:
-            approved = [a for a in current if a["status"] == "approved"]
-            successor = (approved or current)[0]["telegram_id"] if current else None
-            await self.make_owner(family_id, successor)
+                self.auths.pop(account["telegram_id"], None)
+                self.stats_cache.pop(account["steam_id"], None)
+                self._cache_generation += 1
 
     async def owner_token(self, account) -> str:
         """Access token of the acting user's own Steam account, for changes to the family."""
@@ -304,33 +310,38 @@ class Families:
 
     async def _refresh(self, family_id: str) -> None:
         family = self.get(family_id)
-        previous = family.snapshot  # revocation also removes confirmed departures from the cached membership
-        snapshot = await self._fetch(family_id)
-        if snapshot is None:
-            return
-        row = await self.db.family(family_id)
-        if row is None or self.items.get(family_id) is not family:
-            return
-        events, state = reconcile(row["state"], snapshot)
-        alerts = alert_settings(row)
-        pending = []
-        if alerts["games"]:
-            for event in events:
-                pending.append({"text": format_notification(event, snapshot["names"], row["language"])})
-        previous = (row["state"] or {}).get("observed", previous)
-        if previous:
-            for event in family_events(previous, snapshot):
-                if alerts[event["kind"]]:
-                    pending.append({"text": format_event(event, snapshot["names"], snapshot["apps"], row["language"])})
-        state["observed"] = {
-            "members": snapshot["members"],
-            "apps": [{"appid": app["appid"], "name": app["name"]} for app in snapshot["apps"]],
-        }
-        await self.db.observe_family(family_id, state, snapshot["name"], pending)
-        if self.items.get(family_id) is not family:
-            return
-        family.snapshot = snapshot
-        self.presence.setdefault(family_id, snapshot.get("players", {}))
+        async with family.lock:
+            if self.items.get(family_id) is not family:
+                return
+            previous = family.snapshot  # Capture membership before revocation trims the cached snapshot.
+            snapshot = await self._fetch(family_id)
+            if snapshot is None:
+                return
+            row = await self.db.family(family_id)
+            if row is None or self.items.get(family_id) is not family:
+                return
+            events, state = reconcile(row["state"], snapshot)
+            alerts = alert_settings(row)
+            pending = []
+            if alerts["games"]:
+                for event in events:
+                    pending.append({"text": format_notification(event, snapshot["names"], row["language"])})
+            previous = (row["state"] or {}).get("observed", previous)
+            if previous:
+                for event in family_events(previous, snapshot):
+                    if alerts[event["kind"]]:
+                        pending.append(
+                            {"text": format_event(event, snapshot["names"], snapshot["apps"], row["language"])}
+                        )
+            state["observed"] = {
+                "members": snapshot["members"],
+                "apps": [{"appid": app["appid"], "name": app["name"]} for app in snapshot["apps"]],
+            }
+            await self.db.observe_family(family_id, state, snapshot["name"], pending)
+            if self.items.get(family_id) is not family:
+                return
+            family.snapshot = snapshot
+            self.presence.setdefault(family_id, snapshot.get("players", {}))
         await self.deliver_alerts(family_id)
 
         # Prices in the currency of every member who uses the bot.
@@ -556,6 +567,8 @@ def role(account) -> str:
         return "none"
     if account["status"] == "blocked":
         return "blocked"
+    if account["status"] != "approved":
+        return "pending"
     if account["owner_telegram_id"] == account["telegram_id"]:
         return "owner"
-    return "member" if account["status"] == "approved" else "pending"
+    return "member"

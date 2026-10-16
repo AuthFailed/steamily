@@ -2,6 +2,7 @@ import base64
 import json
 import time
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
 from bot.family import role
 from bot.library import (
@@ -21,7 +22,7 @@ from bot.library import (
     tag_counts,
     value_per_member,
 )
-from bot.steam import parse_snapshot, parse_store_item
+from bot.steam import NoFamily, fetch_family_snapshot, get_json, parse_snapshot, parse_store_item
 from bot.steam_auth import decode, encode, expires_within
 
 
@@ -140,6 +141,10 @@ class SteamParsingTest(unittest.TestCase):
         )
         self.assertEqual(snapshot["apps"][1]["owners"], [])
 
+    def test_missing_members_are_an_incomplete_response(self):
+        with self.assertRaisesRegex(RuntimeError, "incomplete family response"):
+            parse_snapshot({"response": {"family_groupid": "9"}}, {"response": {"apps": []}}, {})
+
     def test_parse_store_item(self):
         item = {
             "appid": 620,
@@ -153,6 +158,44 @@ class SteamParsingTest(unittest.TestCase):
         )
         self.assertEqual(parse_store_item({"is_free": True})["price"], 0)
         self.assertIsNone(parse_store_item({})["price"])
+
+
+class SteamFetchTest(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_no_family_is_confirmed_before_fetching_the_library(self):
+        get = AsyncMock(return_value={"response": {"is_not_member_of_any_group": True}})
+        with patch("bot.steam.get_json", get), self.assertRaises(NoFamily):
+            await fetch_family_snapshot(None, "access")
+        self.assertEqual(get.await_count, 1)
+
+    async def test_missing_membership_data_is_not_confirmed_departure(self):
+        for response in (
+            {},
+            {"response": {}},
+            {"response": {"family_groupid": "9"}},
+            {"response": {"family_group": {"members": []}}},
+            {"response": {"is_not_member_of_any_group": False}},
+            {"response": {"is_not_member_of_any_group": "true"}},
+        ):
+            with self.subTest(response=response), patch("bot.steam.get_json", AsyncMock(return_value=response)):
+                with self.assertRaisesRegex(RuntimeError, "incomplete family response"):
+                    await fetch_family_snapshot(None, "access")
+
+    async def test_temporary_failure_is_not_confirmed_departure(self):
+        with patch("bot.steam.get_json", AsyncMock(side_effect=RuntimeError("Steam HTTP 503"))):
+            with self.assertRaisesRegex(RuntimeError, "Steam HTTP 503"):
+                await fetch_family_snapshot(None, "access")
+
+    async def test_http_and_steam_result_errors_are_rejected_before_reading_json(self):
+        for status, eresult in ((503, "1"), (200, "2")):
+            with self.subTest(status=status, eresult=eresult):
+                response = AsyncMock()
+                response.status, response.headers = status, {"x-eresult": eresult}
+                http = Mock()
+                http.get.return_value.__aenter__ = AsyncMock(return_value=response)
+                http.get.return_value.__aexit__ = AsyncMock(return_value=False)
+                with self.assertRaises(RuntimeError):
+                    await get_json(http, "IFamilyGroupsService/GetFamilyGroupForUser/v1", {})
+                response.json.assert_not_awaited()
 
 
 class AuthTest(unittest.TestCase):

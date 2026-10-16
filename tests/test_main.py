@@ -82,6 +82,7 @@ class BackgroundTasksTest(unittest.IsolatedAsyncioTestCase):
                 patch.object(app, "required", return_value="configured"),
                 patch.object(app, "poll_seconds", return_value=60),
                 patch.object(app, "Bot", return_value=bot),
+                patch.object(app.charts, "reset_cache"),
                 patch.object(app.Db, "connect", AsyncMock(return_value=db)),
                 patch.object(app.aiohttp, "ClientSession", return_value=http),
                 patch.object(app, "Families", return_value=families),
