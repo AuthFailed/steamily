@@ -9,6 +9,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from .db import Db
+from .health import Health
 from .library import ALERTS, family_events, format_event, format_notification, presence_events, reconcile
 from .steam import (
     NoFamily,
@@ -53,8 +54,9 @@ class Family:
 
 
 class Families:
-    def __init__(self, db: Db, http: aiohttp.ClientSession, bot: Bot):
+    def __init__(self, db: Db, http: aiohttp.ClientSession, bot: Bot, health: Health | None = None):
         self.db, self.http, self.bot = db, http, bot
+        self.health = health or Health()
         self.items: dict[str, Family] = {}
         self.auths: dict[int, SteamAuth] = {}
         self.stores: dict[str, dict] = {}
@@ -87,6 +89,7 @@ class Families:
         family_id = snapshot["family_id"]
         if steam_id not in snapshot["members"]:
             raise RuntimeError("Steam returned a family without the signed-in account")
+        self.health.steam_read(family_id)
         changed_family = account and account["family_id"] != family_id
         if changed_family:
             await self._revoke_account(account)
@@ -261,6 +264,7 @@ class Families:
                 log.warning("Steam returned a family without account %s", account["telegram_id"])
                 continue
             if snapshot["family_id"] == family_id:
+                self.health.steam_read(family_id)
                 await self._reconcile_accounts(family_id, snapshot["members"])
                 return snapshot
             await self._revoke_account(account)
@@ -270,10 +274,15 @@ class Families:
     async def send_alert(self, row, text: str) -> None:
         if not row["notify_chat"]:
             return
+        self.health.in_flight += 1
         try:
             await self.bot.send_message(row["notify_chat"], text, parse_mode=None)
         except TelegramAPIError as error:  # e.g. the bot was removed from the group
+            self.health.failed_notifications += 1
+            self.health.last_notification_failure = time.monotonic()
             log.warning("Alert to family %s group failed: %s", row["family_id"], error)
+        finally:
+            self.health.in_flight -= 1
 
     async def check_presence(self, family_id: str) -> None:
         """Online and now-playing alerts; Steam is asked once for all members of the family."""
@@ -294,21 +303,34 @@ class Families:
             family.snapshot.setdefault("players", {}).setdefault(steam_id, {}).update(now)
 
     async def presence_loop(self, interval: int = PRESENCE_INTERVAL) -> None:
+        self.health.beat("presence")
         while True:
             await asyncio.sleep(interval)
+            self.health.beat("presence")
+            failed = False
             for row in await self.db.families_with_accounts():
+                self.health.beat("presence")
                 try:
                     await self.check_presence(row["family_id"])
                 except Exception:
+                    failed = True
                     log.exception("Family %s presence check failed", row["family_id"])
+            self.health.beat("presence", failed=failed)
 
     async def refresh_loop(self, interval: int) -> None:
         while True:
-            for row in await self.db.families_with_accounts():
+            self.health.beat("refresh")
+            rows = await self.db.families_with_accounts()
+            self.health.expect_families([row["family_id"] for row in rows])
+            failed = False
+            for row in rows:
+                self.health.beat("refresh")
                 try:
                     await self.refresh(row["family_id"])
                 except Exception:
+                    failed = True
                     log.exception("Family %s check failed", row["family_id"])
+            self.health.beat("refresh", failed=failed)
             await asyncio.sleep(interval)
 
 
