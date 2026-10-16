@@ -92,10 +92,12 @@ def decode(data: bytes) -> dict[int, object]:
     return result
 
 
-async def call(http: aiohttp.ClientSession, method: str, fields) -> dict[int, object]:
+async def call(http: aiohttp.ClientSession, method: str, fields, *, headers: dict | None = None) -> dict[int, object]:
     form = aiohttp.FormData(default_to_multipart=True)
     form.add_field("input_protobuf_encoded", base64.b64encode(encode(fields)).decode())
-    async with http.post(f"{API}/{method}/v1/", data=form, headers=HEADERS) as response:
+    async with http.post(
+        f"{API}/{method}/v1/", data=form, headers=HEADERS if headers is None else headers, allow_redirects=False
+    ) as response:
         body = await response.read()
         eresult = response.headers.get("x-eresult", "1")
         if response.status != 200 or eresult != "1":
