@@ -2,11 +2,19 @@ import asyncio
 import logging
 import random
 import time
+from collections import defaultdict
 from html import escape
 
 import aiohttp
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+    TelegramNotFound,
+    TelegramRetryAfter,
+)
 
 from .db import Db
 from .library import ALERTS, family_events, format_event, format_notification, presence_events, reconcile
@@ -24,6 +32,8 @@ from .steam_auth import SteamAuth, TokenRejected
 log = logging.getLogger(__name__)
 STATS_MAX_AGE = 10 * 60
 PRESENCE_INTERVAL = 60
+ALERT_RETRY_DELAY = 60
+PRESENCE_ALERT_TTL = 5 * 60
 
 
 DEFAULT_COUNTRY = "US"
@@ -64,6 +74,7 @@ class Families:
         self.stores: dict[str, dict] = {}
         self.stats_cache: dict[str, tuple[float, dict]] = {}
         self.presence: dict[str, dict] = {}  # last seen online/playing state per family
+        self.delivery_locks = defaultdict(asyncio.Lock)
         self.bot_username = ""
 
     def get(self, family_id: str) -> Family:
@@ -209,21 +220,25 @@ class Families:
         if snapshot is None:
             return
         row = await self.db.family(family_id)
-        family.snapshot = snapshot
-        self.presence.setdefault(family_id, snapshot.get("players", {}))
-
         events, state = reconcile(row["state"], snapshot)
         alerts = alert_settings(row)
+        pending = []
         if alerts["games"]:
             for event in events:
-                await self.send_alert(row, format_notification(event, snapshot["names"], row["language"]))
-        if previous:  # ponytail: compared in memory, so changes while the bot was down are not announced
+                pending.append({"text": format_notification(event, snapshot["names"], row["language"])})
+        previous = (row["state"] or {}).get("observed", previous)
+        if previous:
             for event in family_events(previous, snapshot):
                 if alerts[event["kind"]]:
-                    await self.send_alert(
-                        row, format_event(event, snapshot["names"], snapshot["apps"], row["language"])
-                    )
-        await self.db.update_family(family_id, state=state, name=snapshot["name"])
+                    pending.append({"text": format_event(event, snapshot["names"], snapshot["apps"], row["language"])})
+        state["observed"] = {
+            "members": snapshot["members"],
+            "apps": [{"appid": app["appid"], "name": app["name"]} for app in snapshot["apps"]],
+        }
+        await self.db.observe_family(family_id, state, snapshot["name"], pending)
+        family.snapshot = snapshot
+        self.presence.setdefault(family_id, snapshot.get("players", {}))
+        await self.deliver_alerts(family_id)
 
         # Prices in the currency of every member who uses the bot.
         accounts = await self.db.family_accounts(family_id)
@@ -282,36 +297,98 @@ class Families:
         log.warning("Family %s has no working Steam login", family_id)
         return None
 
-    async def send_alert(self, row, text: str) -> None:
-        if not row["notify_chat"]:
-            return
-        try:
-            await self.bot.send_message(row["notify_chat"], text, parse_mode=None)
-        except TelegramAPIError as error:  # e.g. the bot was removed from the group
-            log.warning("Alert to family %s group failed: %s", row["family_id"], error)
+    async def deliver_alerts(self, family_id: str) -> None:
+        async with self.delivery_locks[family_id]:
+            for _ in range(20):  # bound each pass so a backlog yields to other families
+                pending = await self.db.pending_alerts(family_id, time.time())
+                if not pending:
+                    return
+                event = pending[0]
+                chat_id = event["chat_id"]
+                try:
+                    text = event["text"]
+                    if event["coalesce_key"] is not None:
+                        text = await self.presence_alert_text(family_id, event)
+                        if text is None:
+                            await self.db.delete_alert(event["id"])
+                            continue
+                    await self.bot.send_message(chat_id, text, parse_mode=None)
+                except TelegramMigrateToChat as error:
+                    await self.db.migrate_chat(
+                        chat_id, error.migrate_to_chat_id, family_id=family_id, link_version=event["link_version"]
+                    )
+                    row = await self.db.family(family_id)
+                    if row["alert_link_version"] != event["link_version"]:
+                        return
+                    if row["notify_chat"] == chat_id:
+                        log.warning("Family %s migration destination is occupied; unlinking old group", family_id)
+                        await self.db.unlink_chat(chat_id, family_id=family_id, link_version=event["link_version"])
+                    else:
+                        await self.db.defer_alerts(
+                            family_id, chat_id, time.time() + ALERT_RETRY_DELAY, link_version=event["link_version"]
+                        )
+                    return
+                except (TelegramForbiddenError, TelegramNotFound) as error:
+                    log.warning("Family %s group is unavailable; unlinking: %s", family_id, error)
+                    await self.db.unlink_chat(chat_id, family_id=family_id, link_version=event["link_version"])
+                    return
+                except TelegramBadRequest as error:
+                    log.warning("Family %s alert %s permanently rejected: %s", family_id, event["id"], error)
+                    if any(reason in error.message.lower() for reason in ("chat not found", "chat was deleted")):
+                        await self.db.unlink_chat(chat_id, family_id=family_id, link_version=event["link_version"])
+                        return
+                    await self.db.delete_alert(event["id"])
+                except (TelegramAPIError, aiohttp.ClientError, OSError) as error:
+                    delay = error.retry_after if isinstance(error, TelegramRetryAfter) else ALERT_RETRY_DELAY
+                    log.warning("Family %s alert %s deferred: %s", family_id, event["id"], error)
+                    await self.db.defer_alerts(
+                        family_id, chat_id, time.time() + max(1, delay), link_version=event["link_version"]
+                    )
+                    return
+                else:
+                    await self.db.delete_alert(event["id"])
 
-    async def send_presence_alert(self, family_id: str, event: dict, publisher) -> None:
+    async def delivery_loop(self, interval: int = 5) -> None:
+        while True:
+            try:
+                for row in await self.db.alert_families():
+                    try:
+                        await self.deliver_alerts(row["family_id"])
+                    except Exception:
+                        log.exception("Family %s alert delivery failed", row["family_id"])
+            except Exception:
+                log.exception("Pending alert scan failed")
+            await asyncio.sleep(interval)
+
+    async def presence_alert_text(self, family_id: str, queued) -> str | None:
         # Keep events structured until delivery: queued text would outlive consent and membership.
+        publisher = queued["publication"]
+        if publisher is None:  # Presence queued before publication controls had no consent to verify.
+            return None
+        event = publisher["event"]
         snapshot = await self._fetch(family_id)
         if snapshot is None:
-            return
-        family = self.get(family_id)
+            return None
+        family = Family(family_id, self.stores)
         family.snapshot = snapshot
-        row = await self.db.family(family_id)
-        account = await self.db.account(publisher["telegram_id"])
+        account = await self.db.publication_account(publisher["telegram_id"])
         if (
-            row is None
-            or not row["notify_chat"]
-            or not alert_settings(row)[event["kind"]]
-            or account is None
+            account is None
+            or account["notify_chat"] != queued["chat_id"]
+            or account["alert_link_version"] != queued["link_version"]
+            or not alert_settings(account)[event["kind"]]
             or account["publication_version"] != publisher["publication_version"]
             or not publication_allowed(family, event["steamid"], {account["steam_id"]: account}, "publish_presence")
         ):
-            return
-        await self.send_alert(row, format_event(event, snapshot["names"], family.apps, row["language"]))
+            return None
+        return format_event(event, snapshot["names"], family.apps, account["language"])
 
     async def check_presence(self, family_id: str) -> None:
         """Online and now-playing alerts; Steam is asked once for all members of the family."""
+        async with self.get(family_id)._refresh_lock:
+            await self._check_presence(family_id)
+
+    async def _check_presence(self, family_id: str) -> None:
         row = await self.db.family(family_id)
         alerts = alert_settings(row)
         family = self.items.get(family_id)
@@ -322,12 +399,26 @@ class Families:
             return
         accounts = await accounts_by_steam(self.db, family_id)
         presence = await fetch_presence(self.http, token, family.members)
+        pending = []
         for event in presence_events(self.presence.get(family_id, {}), presence):
             if alerts[event["kind"]] and publication_allowed(family, event["steamid"], accounts, "publish_presence"):
-                await self.send_presence_alert(family_id, event, accounts[event["steamid"]])
+                pending.append(
+                    {
+                        "text": format_event(event, family.snapshot["names"], family.apps, row["language"]),
+                        "coalesce_key": f"{event['kind']}:{event['steamid']}",
+                        "expires_at": time.time() + PRESENCE_ALERT_TTL,
+                        "publication": {
+                            "event": event,
+                            "telegram_id": accounts[event["steamid"]]["telegram_id"],
+                            "publication_version": accounts[event["steamid"]]["publication_version"],
+                        },
+                    }
+                )
+        await self.db.enqueue_alerts(family_id, pending)
         self.presence[family_id] = presence
         for steam_id, now in presence.items():  # keeps the 🟢 marks in menus fresh too
             family.snapshot.setdefault("players", {}).setdefault(steam_id, {}).update(now)
+        await self.deliver_alerts(family_id)
 
     async def presence_loop(self, interval: int = PRESENCE_INTERVAL) -> None:
         while True:

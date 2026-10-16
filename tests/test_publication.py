@@ -39,6 +39,7 @@ class PublicationTest(unittest.IsolatedAsyncioTestCase):
         self.row = {
             "family_id": "9",
             "notify_chat": -100,
+            "alert_link_version": 1,
             "language": "en",
             "alerts": {"online": True, "playing": True},
         }
@@ -48,6 +49,37 @@ class PublicationTest(unittest.IsolatedAsyncioTestCase):
         self.db.account.side_effect = lambda tid: next(
             (dict(a) for a in self.accounts.values() if a["telegram_id"] == tid), None
         )
+        self.db.publication_account.side_effect = lambda tid: next(
+            ({**a, **self.row} for a in self.accounts.values() if a["telegram_id"] == tid), None
+        )
+        self.pending = []
+        self.next_alert_id = 0
+
+        async def enqueue(family_id, alerts):
+            if not self.row["notify_chat"]:
+                return
+            for alert in alerts:
+                self.pending[:] = [p for p in self.pending if p["coalesce_key"] != alert["coalesce_key"]]
+                self.next_alert_id += 1
+                self.pending.append(
+                    {
+                        **alert,
+                        "id": self.next_alert_id,
+                        "chat_id": self.row["notify_chat"],
+                        "link_version": self.row["alert_link_version"],
+                    }
+                )
+
+        async def pending(family_id, now):
+            self.pending[:] = [p for p in self.pending if p["expires_at"] > now]
+            return list(self.pending)
+
+        async def delete(alert_id):
+            self.pending[:] = [p for p in self.pending if p["id"] != alert_id]
+
+        self.db.enqueue_alerts.side_effect = enqueue
+        self.db.pending_alerts.side_effect = pending
+        self.db.delete_alert.side_effect = delete
         self.bot = AsyncMock()
         self.families = Families(self.db, None, self.bot)
         self.family = self.families.get("9")

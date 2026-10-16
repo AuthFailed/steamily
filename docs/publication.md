@@ -19,8 +19,10 @@ Every consent change or reset replaces an account's publication version. Buttons
 presence events carry that version, so old work cannot become valid again after opting out
 and back in, or leaving and rejoining. Presence delivery checks fresh Steam membership and
 the current account, version, consent and group settings immediately before sending. If
-membership cannot be verified, the event is not published. This does not introduce retries
-or a persistent notification queue.
+membership cannot be verified, the event is not published. The existing durable alert queue
+retains the structured presence event and publication version across retries and restarts.
+Presence expires after five minutes; legacy presence rows without consent metadata are
+discarded rather than sent. Other library/membership notifications keep their delivery rules.
 
 Rendered Telegram links and presence are rebuilt from current account rows for every newly
 opened card. Generated charts use Steam names and contain no Telegram identities or live
