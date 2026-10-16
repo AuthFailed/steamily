@@ -86,8 +86,7 @@ class Families:
         await self.db.ensure_family(family_id, snapshot["name"])
         await self.db.save_account(telegram_id, steam_id, family_id, auth.refresh_token, country, auth.last_renewal)
         self.auths.pop(telegram_id, None)
-        if (await self.db.family(family_id))["owner_telegram_id"] is None:  # nobody owns it: the next to register does
-            await self.make_owner(family_id, telegram_id)
+        await self.db.claim_initial_owner(family_id, telegram_id)
         family = self.get(family_id)
         family.snapshot = snapshot
         try:  # the login itself succeeded; store details can catch up on the next poll

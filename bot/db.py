@@ -195,6 +195,29 @@ class Db:
             name,
         )
 
+    async def claim_initial_owner(self, family_id: str, telegram_id: int) -> None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            owner = await connection.fetchval(
+                """
+                UPDATE families SET owner_telegram_id = $2
+                WHERE family_id = $1 AND owner_telegram_id IS NULL
+                RETURNING owner_telegram_id
+                """,
+                family_id,
+                telegram_id,
+            )
+            if owner is not None:
+                approved = await connection.fetchval(
+                    """
+                    UPDATE accounts SET status = 'approved' WHERE telegram_id = $1 AND family_id = $2
+                    RETURNING telegram_id
+                    """,
+                    owner,
+                    family_id,
+                )
+                if approved is None:
+                    raise RuntimeError("Initial owner account is no longer registered in this family")
+
     async def update_family(self, family_id: str, **fields) -> None:
         allowed = {"name", "notify_chat", "state", "language", "owner_telegram_id", "alerts"}
         assert fields and set(fields) <= allowed, fields

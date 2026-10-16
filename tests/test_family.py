@@ -1,5 +1,8 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
+
+from asyncpg import CheckViolationError
 
 from bot.family import Families
 from bot.steam_auth import TokenRejected
@@ -55,6 +58,67 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.bot.send_message.assert_awaited_once()
         self.assertEqual(self.bot.send_message.await_args.args[0], -100)
         self.assertIn("CS2", self.bot.send_message.await_args.args[1])
+
+    async def test_concurrent_first_registrations_approve_only_the_owner(self):
+        await self.db.ensure_family("9", "Fam")
+        for telegram_id, status in ((3, "approved"), (4, "blocked")):
+            await self.db.save_account(telegram_id, str(telegram_id), "9", "refresh", "KZ")
+            await self.db.set_status(telegram_id, status)
+        saved, unclaimed = asyncio.Barrier(2), asyncio.Barrier(2)
+        save_account, family = self.db.save_account, self.db.family
+
+        async def save_together(*args, **kwargs):
+            await save_account(*args, **kwargs)
+            await saved.wait()
+
+        async def read_together(family_id):
+            row = await family(family_id)
+            if row["owner_telegram_id"] is None:
+                await unclaimed.wait()  # force both old check-then-write paths to see no owner
+            return row
+
+        with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))),
+            patch.object(self.db, "save_account", save_together),
+            patch.object(self.db, "family", read_together),
+        ):
+            await asyncio.wait_for(
+                asyncio.gather(
+                    self.families.register(1, "refresh", ALICE),
+                    self.families.register(2, "refresh", BOB),
+                ),
+                timeout=10,
+            )
+        owner = (await self.db.family("9"))["owner_telegram_id"]
+        self.assertIn(owner, (1, 2))
+        statuses = {a["telegram_id"]: a["status"] for a in await self.db.family_accounts("9")}
+        self.assertEqual(statuses, {owner: "approved", 3 - owner: "pending", 3: "approved", 4: "blocked"})
+
+    async def test_repeated_registration_preserves_owner_and_member_statuses(self):
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            await self.families.register(1, "refresh", ALICE)
+            await self.families.register(2, "refresh", BOB)
+            await self.db.set_status(2, "approved")
+            await self.families.register(3, "refresh", "76561198000000003")
+            await self.db.set_status(3, "blocked")
+            for telegram_id, steam_id in ((1, ALICE), (2, BOB), (3, "76561198000000003")):
+                await self.families.register(telegram_id, "replacement", steam_id)
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 1)
+        statuses = {a["telegram_id"]: a["status"] for a in await self.db.family_accounts("9")}
+        self.assertEqual(statuses, {1: "approved", 2: "approved", 3: "blocked"})
+
+    async def test_failed_initial_approval_rolls_back_owner_claim(self):
+        await self.db.pool.execute(
+            "ALTER TABLE accounts ADD CONSTRAINT reject_owner_approval CHECK (telegram_id <> 1 OR status <> 'approved')"
+        )
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            with self.assertRaisesRegex(CheckViolationError, "reject_owner_approval"):
+                await self.families.register(1, "refresh", ALICE)
+            self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+            self.assertEqual((await self.db.account(1))["status"], "pending")
+            await self.families.register(2, "refresh", BOB)
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 2)
+        self.assertEqual((await self.db.account(2))["status"], "approved")
 
     async def test_rejected_token_is_dropped_but_outage_keeps_it(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):

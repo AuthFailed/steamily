@@ -52,6 +52,16 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
         self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
 
+    async def test_initial_owner_claim_requires_an_account_in_the_family(self):
+        await self.db.ensure_family("other", "Other")
+        await self.db.save_account(10, "1", "other", "token")
+        await self.db.set_status(10, "blocked")
+        with self.assertRaises(RuntimeError):
+            await self.db.claim_initial_owner("9", 10)
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+        account = await self.db.account(10)
+        self.assertEqual((account["family_id"], account["status"]), ("other", "blocked"))
+
     async def test_token_and_renewal_time_are_saved_together(self):
         await self.db.save_account(10, "1", "9", "first", "KZ", token_renewed_at=100_000.0)
         await self.db.set_refresh_token(10, "rotated", 186_400.0)
