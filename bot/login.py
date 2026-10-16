@@ -14,6 +14,7 @@ from aiogram import Bot
 from aiogram_dialog import BaseDialogManager, StartMode
 from qrcode.image.pure import PyPNGImage
 
+from .db import SteamAlreadyLinked
 from .family import Families
 from .i18n import t
 from .states import Menu
@@ -76,6 +77,9 @@ class Logins:
             steam_id = jwt_payload(refresh_token)["sub"]
             try:
                 family = await self.families.register(telegram_id, refresh_token, steam_id)
+            except SteamAlreadyLinked:
+                result = "already_linked"
+                return
             except NoFamily:
                 result = "no_family"
                 return

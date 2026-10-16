@@ -11,6 +11,7 @@ from aiogram_dialog.test_tools.keyboard import InlineButtonTextLocator as Btn
 from aiogram_dialog.test_tools.memory_storage import JsonMemoryStorage
 
 from bot.__main__ import create_dispatcher
+from bot.db import SteamAlreadyLinked
 from bot.family import Families
 from bot.login import qr_png
 from bot.steam import SteamActionError
@@ -290,6 +291,8 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         return next(b for row in self.last().reply_markup.inline_keyboard for b in row if b.text == text)
 
     async def test_library_pagination_search_filters_and_game(self):
+        with self.assertRaises(SteamAlreadyLinked):
+            await self.families.register(NEWCOMER, "duplicate", ALICE)
         client = self.client(FRIEND)
         await client.send("/start")
         self.assertNotIn("Admin", self.buttons())
@@ -342,6 +345,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.buttons()[0], "Game 15 ×2 · $15.00")
         await client.click(self.last(), Btn("Game 15 ×2 · \\$15.00"))
         self.assertIn("store.steampowered.com/app/15/", self.last().text)
+        self.assertIn('<a href="https://t.me/alice_tg">@alice_tg</a>', self.last().text)
         await client.click(self.last(), Btn("Home"))
         self.assertIn("Family library", self.buttons())
 
@@ -462,6 +466,8 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("will be posted here", self.families.bot.send_message.await_args.args[1])
 
     async def test_inline_search_shows_family_owners_in_senders_currency(self):
+        with self.assertRaises(SteamAlreadyLinked):
+            await self.families.register(NEWCOMER, "duplicate", ALICE)
         await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
         await self.db.set_language(FRIEND, "ru")
         cards = {
@@ -547,6 +553,8 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("You are now the owner", self.families.bot.send_message.await_args.args[1])
 
     async def test_family_overview_stats_and_member_card(self):
+        with self.assertRaises(SteamAlreadyLinked):
+            await self.families.register(NEWCOMER, "duplicate", ALICE)
         client = self.client(FRIEND)
         await client.send("/start")
         shown = []
@@ -591,6 +599,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("Members"))
         await client.click(self.last(), Btn("🟢 Alice"))
         card = self.last().text
+        self.assertIn('<a href="https://t.me/alice_tg">@alice_tg</a>', card)
         self.assertIn("Level: 102", card)
         self.assertIn("Games brought: 20 (only theirs: 14)", card)
         self.assertNotIn("Remove from family", self.buttons())  # owner only

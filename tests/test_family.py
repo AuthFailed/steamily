@@ -2,6 +2,9 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from asyncpg import CheckViolationError
+
+from bot.db import SteamAlreadyLinked
 from bot.family import Families
 from bot.steam import NoFamily
 from bot.steam_auth import TokenRejected
@@ -57,6 +60,99 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.bot.send_message.assert_awaited_once()
         self.assertEqual(self.bot.send_message.await_args.args[0], -100)
         self.assertIn("CS2", self.bot.send_message.await_args.args[1])
+
+    async def test_concurrent_registration_keeps_one_link_and_its_owner(self):
+        ready = asyncio.Event()
+        arrivals = 0
+
+        async def fetch_snapshot(*args):
+            nonlocal arrivals
+            arrivals += 1
+            if arrivals == 2:
+                ready.set()
+            await ready.wait()  # both registrations passed the initial link check
+            return snapshot([])
+
+        with patch("bot.family.fetch_family_snapshot", side_effect=fetch_snapshot):
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    self.families.register(1, "first", ALICE),
+                    self.families.register(2, "second", ALICE),
+                    return_exceptions=True,
+                ),
+                timeout=5,
+            )
+        self.assertEqual(sum(isinstance(result, SteamAlreadyLinked) for result in results), 1)
+        accounts = await self.db.family_accounts("9")
+        self.assertEqual(len(accounts), 1)
+        account = accounts[0]
+        self.assertEqual(account["steam_id"], ALICE)
+        self.assertEqual(account["status"], "approved")
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], account["telegram_id"])
+        self.assertEqual(self.db.refresh_token(account), "first" if account["telegram_id"] == 1 else "second")
+
+    async def test_concurrent_first_registrations_approve_only_the_owner(self):
+        await self.db.ensure_family("9", "Fam")
+        for telegram_id, status in ((3, "approved"), (4, "blocked")):
+            await self.db.save_account(telegram_id, str(telegram_id), "9", "refresh", "KZ")
+            await self.db.set_status(telegram_id, status)
+        saved, unclaimed = asyncio.Barrier(2), asyncio.Barrier(2)
+        save_account, family = self.db.save_account, self.db.family
+
+        async def save_together(*args, **kwargs):
+            await save_account(*args, **kwargs)
+            await saved.wait()
+
+        async def read_together(family_id):
+            row = await family(family_id)
+            if row["owner_telegram_id"] is None:
+                await unclaimed.wait()  # force both old check-then-write paths to see no owner
+            return row
+
+        current = {**snapshot([]), "members": [ALICE, BOB, "3", "4"]}
+        with (
+            patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)),
+            patch.object(self.db, "save_account", save_together),
+            patch.object(self.db, "family", read_together),
+        ):
+            await asyncio.wait_for(
+                asyncio.gather(
+                    self.families.register(1, "refresh", ALICE),
+                    self.families.register(2, "refresh", BOB),
+                ),
+                timeout=10,
+            )
+        owner = (await self.db.family("9"))["owner_telegram_id"]
+        self.assertIn(owner, (1, 2))
+        statuses = {a["telegram_id"]: a["status"] for a in await self.db.family_accounts("9")}
+        self.assertEqual(statuses, {owner: "approved", 3 - owner: "pending", 3: "approved", 4: "blocked"})
+
+    async def test_repeated_registration_preserves_owner_and_member_statuses(self):
+        current = {**snapshot([]), "members": [ALICE, BOB, "76561198000000003"]}
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)):
+            await self.families.register(1, "refresh", ALICE)
+            await self.families.register(2, "refresh", BOB)
+            await self.db.set_status(2, "approved")
+            await self.families.register(3, "refresh", "76561198000000003")
+            await self.db.set_status(3, "blocked")
+            for telegram_id, steam_id in ((1, ALICE), (2, BOB), (3, "76561198000000003")):
+                await self.families.register(telegram_id, "replacement", steam_id)
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 1)
+        statuses = {a["telegram_id"]: a["status"] for a in await self.db.family_accounts("9")}
+        self.assertEqual(statuses, {1: "approved", 2: "approved", 3: "blocked"})
+
+    async def test_failed_initial_approval_rolls_back_owner_claim(self):
+        await self.db.pool.execute(
+            "ALTER TABLE accounts ADD CONSTRAINT reject_owner_approval CHECK (telegram_id <> 1 OR status <> 'approved')"
+        )
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+            with self.assertRaisesRegex(CheckViolationError, "reject_owner_approval"):
+                await self.families.register(1, "refresh", ALICE)
+            self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+            self.assertEqual((await self.db.account(1))["status"], "pending")
+            await self.families.register(2, "refresh", BOB)
+        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 2)
+        self.assertEqual((await self.db.account(2))["status"], "approved")
 
     async def test_rejected_token_is_dropped_but_outage_keeps_it(self):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
@@ -234,11 +330,12 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.db.account(2))["status"], "approved")
 
     async def test_changed_steam_identity_cannot_keep_ownership(self):
-        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=snapshot([]))):
+        current = {**snapshot([]), "members": [ALICE, BOB, "76561198000000003"]}
+        with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=current)):
             await self.families.register(1, "alice", ALICE)
             await self.families.register(2, "bob", BOB)
             await self.db.set_status(2, "approved")
-            await self.families.register(1, "bob-login", BOB)
+            await self.families.register(1, "carol-login", "76561198000000003")
         self.assertEqual((await self.db.account(1))["status"], "pending")
         self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 2)
 
@@ -343,6 +440,31 @@ class RegistrationTokenTest(unittest.IsolatedAsyncioTestCase):
         account = await self.db.account(1)
         self.assertEqual((self.db.refresh_token(account), account["token_renewed_at"]), ("new-login", 100_000.0))
         self.assertTrue(all(dict(c.args[2])[3] == 0 for c in self.steam_call.await_args_list))
+
+    async def test_duplicate_link_is_rejected_before_steam_calls_or_account_changes(self):
+        await self.families.register(1, "original", ALICE)
+        await self.families.register(2, "other", BOB)
+        await self.db.set_telegram_profile(1, "alice_tg", "Alice")
+        await self.db.set_language(1, "ru")
+        await self.db.set_notify_requests(1, False)
+        await self.db.update_family("9", alerts={"online": True}, notify_chat=-100)
+
+        for status in ("approved", "pending", "blocked"):
+            await self.db.set_status(1, status)
+            accounts = await self.db.family_accounts("9")
+            family = await self.db.family("9")
+            cached_auths = dict(self.families.auths)
+            self.steam_call.reset_mock()
+            for telegram_id in (2, 3):  # an existing different link and a first login
+                with self.subTest(status=status, telegram_id=telegram_id):
+                    with self.assertRaises(SteamAlreadyLinked):
+                        await self.families.register(telegram_id, "duplicate", ALICE)
+                    self.assertEqual(await self.db.family_accounts("9"), accounts)
+                    self.assertEqual(await self.db.family("9"), family)
+                    self.assertEqual(self.families.auths, cached_auths)
+            self.steam_call.assert_not_awaited()
+        self.assertEqual(await self.db.language(1), "ru")
+        self.assertFalse(await self.db.notify_requests(1))
 
     async def test_different_steam_account_does_not_inherit_renewal_time(self):
         await self.families.register(1, "original", ALICE)

@@ -77,6 +77,7 @@ class Families:
 
     async def register(self, telegram_id: int, refresh_token: str, steam_id: str) -> Family:
         """Called after a successful Steam login. Raises RuntimeError if the account has no family."""
+        await self.db.check_steam_link(telegram_id, steam_id)
         account = await self.db.account(telegram_id)
         last_renewal = account["token_renewed_at"] if account and account["steam_id"] == steam_id else 0.0
         auth = SteamAuth(self.http, refresh_token, steam_id, last_renewal=last_renewal)
@@ -94,6 +95,9 @@ class Families:
         await self.db.ensure_family(family_id, snapshot["name"])
         await self.db.save_account(telegram_id, steam_id, family_id, auth.refresh_token, country, auth.last_renewal)
         self.auths.pop(telegram_id, None)
+        saved = await self.db.account(telegram_id)
+        if saved["status"] != "blocked" and (not account or account["steam_id"] == steam_id or changed_family):
+            await self.db.claim_initial_owner(family_id, telegram_id)
         await self._reconcile_accounts(family_id, snapshot["members"])
         family = self.get(family_id)
         family.snapshot = snapshot
