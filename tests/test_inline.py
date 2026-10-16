@@ -15,6 +15,7 @@ ALICE = "76561198000000001"
 def response(data, status=200):
     request = MagicMock()
     request.__aenter__.return_value.status = status
+    request.__aenter__.return_value.headers = {}
     request.__aenter__.return_value.json.return_value = data
     return request
 

@@ -18,8 +18,9 @@ class NoFamily(RuntimeError):
 
 async def get_json(http: aiohttp.ClientSession, method: str, params: dict) -> dict:
     async with http.get(f"{API}/{method}/", params=params) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Steam {method} failed with HTTP {response.status}")
+        eresult = response.headers.get("x-eresult", "1")
+        if response.status != 200 or eresult != "1":
+            raise RuntimeError(f"Steam {method} failed with HTTP {response.status}, EResult {eresult}")
         return await response.json(content_type=None)
 
 
