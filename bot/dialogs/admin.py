@@ -54,13 +54,20 @@ async def member_getter(dialog_manager: DialogManager, db: Db, family: Family, l
 
 async def set_status(manager: DialogManager, status: str | None) -> None:
     db: Db = manager.middleware_data["db"]
+    family: Family = manager.middleware_data["family"]
     telegram_id = manager.dialog_data["telegram_id"]
     if status:
-        await db.set_status(telegram_id, status)
+        changed = await db.set_status(
+            telegram_id,
+            status,
+            family_id=family.family_id,
+            members=family.members if status == "approved" else None,
+        )
     else:
-        await db.delete_account(telegram_id)
+        changed = await db.delete_account(telegram_id, family_id=family.family_id)
     # Reset the user's own dialogs so they immediately see their new access level.
-    await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
+    if changed:
+        await manager.bg(user_id=telegram_id, chat_id=telegram_id).start(Menu.main, mode=StartMode.RESET_STACK)
 
 
 async def approve(callback: CallbackQuery, button: Button, manager: DialogManager):
