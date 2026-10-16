@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+  image:
+    needs: release
+    if: needs.release.outputs.release_created == 'true'
+    # GITHUB_TOKEN-created tags do not trigger another workflow run.
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.release.outputs.tag_name }}
+    secrets: inherit
