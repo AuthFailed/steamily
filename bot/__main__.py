@@ -14,14 +14,15 @@ from aiogram_dialog.api.exceptions import OutdatedIntent, UnknownIntent
 from aiogram_dialog.utils import remove_intent_id
 from aiogram_dialog.widgets.kbd import Start, SwitchTo
 
-from .config import poll_seconds, required
+from .config import ConfigError, load_config
 from .db import Db, PgStorage
 from .dialogs import deny_action
 from .dialogs.admin import admin_dialog
 from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
 from .dialogs.menu import menu_dialog
-from .family import Families, role
+from .family import PRESENCE_INTERVAL, Families, role
+from .health import STATUS_PATH, Health
 from .i18n import DEFAULT, t
 from .inline import router as inline_router
 from .login import Logins
@@ -215,28 +216,44 @@ def background_finished(task: asyncio.Task) -> None:
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    bot = Bot(required("TELEGRAM_BOT_TOKEN"), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    db = await Db.connect(required("DATABASE_URL"), required("SECRET_KEY"))
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as http:
-        families = Families(db, http, bot)
-        logins = Logins(families, bot)
-        dp = create_dispatcher(db, families, logins)
-        families.bot_username = (await bot.me()).username
-        loops = [
-            asyncio.create_task(families.refresh_loop(poll_seconds()), name="family-refresh"),
-            asyncio.create_task(families.presence_loop(), name="family-presence"),
-            asyncio.create_task(families.delivery_loop(), name="family-delivery"),
-        ]
-        for loop in loops:
-            loop.add_done_callback(background_finished)
+    try:
+        settings = load_config()
+    except ConfigError as error:
+        raise SystemExit(str(error)) from None
+    STATUS_PATH.unlink(missing_ok=True)
+    bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    try:
+        db = await Db.connect(settings.database_url, settings.secret_key)
         try:
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as http:
+                health = Health(settings.poll_interval_seconds)
+                health.intervals["presence"] = PRESENCE_INTERVAL
+                families = Families(db, http, bot, health=health)
+                logins = Logins(families, bot)
+                dp = create_dispatcher(db, families, logins)
+                families.bot_username = (await bot.me()).username
+                loops = {
+                    "refresh": asyncio.create_task(
+                        families.refresh_loop(settings.poll_interval_seconds), name="family-refresh"
+                    ),
+                    "presence": asyncio.create_task(families.presence_loop(), name="family-presence"),
+                    "delivery": asyncio.create_task(families.delivery_loop(), name="family-delivery"),
+                }
+                monitor = asyncio.create_task(health.monitor(loops, db), name="health-monitor")
+                for task in [*loops.values(), monitor]:
+                    task.add_done_callback(background_finished)
+                try:
+                    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types(), close_bot_session=False)
+                finally:
+                    for task in [*loops.values(), monitor]:
+                        task.cancel()
+                    await asyncio.gather(*loops.values(), monitor, return_exceptions=True)
+                    STATUS_PATH.unlink(missing_ok=True)
+                    await logins.close()
         finally:
-            for loop in loops:
-                loop.cancel()
-            await asyncio.gather(*loops, return_exceptions=True)
-            await logins.close()
             await db.pool.close()
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
