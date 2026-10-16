@@ -1,0 +1,20 @@
+{
+  "response": {
+    "entries": [
+      {
+        "steamid": 76561198000000001,
+        "appid": 10,
+        "seconds_played": "3600"
+      },
+      {
+        "steamid": "76561198000000002",
+        "appid": 10,
+        "seconds_played": 1800
+      },
+      {
+        "steamid": "76561198000000003",
+        "appid": 20
+      }
+    ]
+  }
+}

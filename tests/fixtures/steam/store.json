@@ -1,0 +1,74 @@
+{
+  "response": {
+    "store_items": [
+      {
+        "appid": 10,
+        "name": "Fixture Game",
+        "basic_info": {
+          "short_description": "A co-op fixture game."
+        },
+        "assets": {
+          "asset_url_format": "apps/10/fixture/${FILENAME}",
+          "small_capsule": "capsule_231x87.jpg"
+        },
+        "best_purchase_option": {
+          "final_price_in_cents": "1234",
+          "formatted_final_price": "$12.34"
+        },
+        "tags": [
+          {
+            "tagid": 1,
+            "weight": 10
+          },
+          {
+            "tagid": 2,
+            "weight": 80
+          },
+          {
+            "tagid": 3,
+            "weight": 40
+          },
+          {
+            "tagid": 4,
+            "weight": 70
+          },
+          {
+            "tagid": 5,
+            "weight": 20
+          },
+          {
+            "tagid": 6,
+            "weight": 60
+          }
+        ],
+        "categories": {
+          "supported_player_categoryids": [
+            2,
+            9
+          ]
+        }
+      },
+      {
+        "appid": 20,
+        "name": "Fixture Free Game",
+        "is_free": true,
+        "basic_info": null,
+        "assets": null,
+        "best_purchase_option": null,
+        "categories": {
+          "supported_player_categoryids": [
+            2
+          ]
+        }
+      },
+      {
+        "appid": 30,
+        "name": "Fixture Unavailable Game"
+      },
+      {
+        "appid": 40
+      },
+      {}
+    ]
+  }
+}
