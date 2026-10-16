@@ -232,6 +232,179 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.save_store_cache("DE", {"apps": {"620": {"price": 999}}})
         self.assertEqual(await self.db.store_cache("DE"), {"apps": {"620": {"price": 999}}})
 
+    async def test_observation_and_alerts_commit_together_and_survive_reconnect(self):
+        state = {"members": ["1", "2"], "ownership": {"620": ["1"]}}
+        await self.db.observe_family("9", state, "Observed", [{"text": "Game added"}, {"text": "Member joined"}])
+        await self.db.pool.close()
+        self.db = await Db.connect(TEST_DATABASE_URL, Fernet.generate_key().decode())
+        family = await self.db.family("9")
+        self.assertEqual((family["state"], family["name"]), (state, "Observed"))
+        pending = await self.db.pending_alerts("9", 100)
+        self.assertEqual([row["text"] for row in pending], ["Game added", "Member joined"])
+        self.assertEqual([row["chat_id"] for row in pending], [-100, -100])
+        self.assertEqual([row["family_id"] for row in await self.db.alert_families()], ["9"])
+        await self.db.delete_alert(pending[0]["id"])
+        self.assertEqual([row["text"] for row in await self.db.pending_alerts("9", 100)], ["Member joined"])
+
+    async def test_observation_rolls_back_if_alert_enqueue_fails(self):
+        before = await self.db.family("9")
+        with self.assertRaises(asyncpg.NotNullViolationError):
+            await self.db.observe_family("9", {"members": []}, "Changed", [{"text": "first"}, {"text": None}])
+        self.assertEqual(await self.db.family("9"), before)
+        self.assertEqual(await self.db.pending_alerts("9", 100), [])
+
+    async def test_unlinked_family_observation_does_not_create_alerts(self):
+        await self.db.update_family("9", notify_chat=None)
+        await self.db.observe_family("9", {"members": []}, "Changed", [{"text": "not sent"}])
+        await self.db.enqueue_alerts("9", [{"text": "also not sent"}])
+        self.assertEqual((await self.db.family("9"))["name"], "Changed")
+        self.assertEqual(await self.db.pending_alerts("9", 100), [])
+        self.assertEqual(await self.db.alert_families(), [])
+
+    async def test_presence_coalesces_with_new_identity_and_expires(self):
+        await self.db.enqueue_alerts("9", [{"text": "durable"}, {"text": "Online", "coalesce_key": "presence:1"}])
+        original = await self.db.pending_alerts("9", 100)
+        await self.db.enqueue_alerts("9", [{"text": "Playing", "coalesce_key": "presence:1", "expires_at": 200}])
+        pending = await self.db.pending_alerts("9", 100)
+        self.assertEqual([row["text"] for row in pending], ["durable", "Playing"])
+        self.assertNotEqual(pending[-1]["id"], original[-1]["id"])
+        await self.db.delete_alert(original[-1]["id"])
+        self.assertEqual([row["text"] for row in await self.db.pending_alerts("9", 100)], ["durable", "Playing"])
+        self.assertEqual([row["text"] for row in await self.db.pending_alerts("9", 200)], ["durable"])
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 1)
+
+    async def test_retry_delay_and_migration_preserve_pending_identity(self):
+        await self.db.enqueue_alerts("9", [{"text": "durable"}])
+        alert_id = (await self.db.pending_alerts("9", 100))[0]["id"]
+        await self.db.defer_alerts("9", -100, 200)
+        self.assertEqual(await self.db.pending_alerts("9", 199), [])
+        self.assertTrue(await self.db.migrate_chat(-100, -100123))
+        self.assertEqual(await self.db.pending_alerts("9", 199), [])
+        pending = await self.db.pending_alerts("9", 200)
+        self.assertEqual((pending[0]["id"], pending[0]["chat_id"]), (alert_id, -100123))
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 200)
+        self.assertFalse(await self.db.migrate_chat(-100, -100123))
+        await self.db.defer_alerts("9", -100, 999)
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 200)
+
+    async def test_chat_migration_rejects_stale_and_occupied_destinations(self):
+        await self.db.ensure_family("other", "Other")
+        await self.db.update_family("other", notify_chat=-200)
+        await self.db.enqueue_alerts("9", [{"text": "durable"}])
+        self.assertFalse(await self.db.migrate_chat(-100, -200))
+        self.assertEqual((await self.db.family("9"))["notify_chat"], -100)
+        self.assertEqual((await self.db.pending_alerts("9", 100))[0]["chat_id"], -100)
+        await self.db.update_family("9", notify_chat=-300)
+        self.assertFalse(await self.db.migrate_chat(-100, -400))
+        self.assertEqual((await self.db.family("9"))["notify_chat"], -300)
+
+    async def test_stale_send_response_cannot_migrate_or_unlink_another_family(self):
+        await self.db.update_family("9", notify_chat=-200)
+        await self.db.ensure_family("other", "Other")
+        await self.db.update_family("other", notify_chat=-100)
+        await self.db.enqueue_alerts("other", [{"text": "other family's alert"}])
+        self.assertFalse(await self.db.migrate_chat(-100, -300, family_id="9"))
+        await self.db.unlink_chat(-100, family_id="9")
+        self.assertEqual((await self.db.family("9"))["notify_chat"], -200)
+        self.assertEqual((await self.db.family("other"))["notify_chat"], -100)
+        self.assertEqual((await self.db.pending_alerts("other", 100))[0]["chat_id"], -100)
+
+    async def test_stale_send_response_cannot_change_a_relinked_same_chat(self):
+        link_version = (await self.db.family("9"))["alert_link_version"]
+        await self.db.unlink_chat(-100)
+        await self.db.update_family("9", notify_chat=-100)
+        await self.db.enqueue_alerts("9", [{"text": "new binding"}])
+        self.assertFalse(await self.db.migrate_chat(-100, -300, family_id="9", link_version=link_version))
+        await self.db.unlink_chat(-100, family_id="9", link_version=link_version)
+        self.assertEqual((await self.db.family("9"))["notify_chat"], -100)
+        self.assertEqual((await self.db.pending_alerts("9", 100))[0]["text"], "new binding")
+
+    async def test_inflight_failure_defers_migrated_alert_but_not_a_manual_relink(self):
+        await self.db.enqueue_alerts("9", [{"text": "in flight"}])
+        link_version = (await self.db.pending_alerts("9", 100))[0]["link_version"]
+        await self.db.migrate_chat(-100, -200)
+        await self.db.defer_alerts("9", -100, 300, link_version=link_version)
+        await self.db.defer_alerts("9", -100, 200, link_version=link_version)
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 300)
+        await self.db.update_family("9", notify_chat=-300)
+        await self.db.enqueue_alerts("9", [{"text": "new link"}])
+        await self.db.defer_alerts("9", -100, 999, link_version=link_version)
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 0)
+
+    async def test_inflight_presence_failure_defers_its_coalesced_replacement(self):
+        await self.db.enqueue_alerts("9", [{"text": "Online", "coalesce_key": "presence:1"}])
+        link_version = (await self.db.pending_alerts("9", 100))[0]["link_version"]
+        await self.db.enqueue_alerts("9", [{"text": "Playing", "coalesce_key": "presence:1"}])
+        await self.db.defer_alerts("9", -100, 300, link_version=link_version)
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 300)
+        self.assertEqual(await self.db.pending_alerts("9", 299), [])
+        self.assertEqual((await self.db.pending_alerts("9", 300))[0]["text"], "Playing")
+
+    async def test_inflight_presence_failure_survives_both_migration_and_coalescing(self):
+        await self.db.enqueue_alerts("9", [{"text": "Online", "coalesce_key": "presence:1"}])
+        event = (await self.db.pending_alerts("9", 100))[0]
+        await self.db.migrate_chat(-100, -200)
+        await self.db.enqueue_alerts("9", [{"text": "Playing", "coalesce_key": "presence:1"}])
+        await self.db.defer_alerts("9", -100, 300, link_version=event["link_version"])
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 300)
+        self.assertEqual(await self.db.pending_alerts("9", 299), [])
+
+    async def test_manual_relink_and_unlink_discard_pending_and_retry(self):
+        await self.db.enqueue_alerts("9", [{"text": "old destination"}])
+        link_version = (await self.db.family("9"))["alert_link_version"]
+        await self.db.defer_alerts("9", -100, 200)
+        await self.db.update_family("9", notify_chat=-100, language="ru")
+        self.assertEqual(len(await self.db.pending_alerts("9", 200)), 1)
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 200)
+        self.assertEqual((await self.db.family("9"))["alert_link_version"], link_version)
+        await self.db.update_family("9", notify_chat=-200)
+        self.assertEqual(await self.db.pending_alerts("9", 200), [])
+        self.assertEqual((await self.db.family("9"))["alert_retry_at"], 0)
+        self.assertEqual((await self.db.family("9"))["alert_link_version"], link_version + 1)
+        await self.db.enqueue_alerts("9", [{"text": "new destination"}])
+        await self.db.defer_alerts("9", -200, 300)
+        await self.db.unlink_chat(-100)
+        self.assertEqual((await self.db.family("9"))["notify_chat"], -200)
+        await self.db.unlink_chat(-200)
+        family = await self.db.family("9")
+        self.assertEqual((family["notify_chat"], family["alert_retry_at"]), (None, 0))
+        self.assertEqual(family["alert_link_version"], link_version + 2)
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+
+    async def test_unlink_waits_for_observation_and_clears_its_committed_alert(self):
+        inserted, release = asyncio.Event(), asyncio.Event()
+        enqueue = self.db._enqueue_alerts
+
+        async def pause_after_enqueue(*args):
+            await enqueue(*args)
+            inserted.set()
+            await release.wait()
+
+        with patch.object(self.db, "_enqueue_alerts", side_effect=pause_after_enqueue):
+            observation = asyncio.create_task(self.db.observe_family("9", {}, "New", [{"text": "concurrent"}]))
+            await asyncio.wait_for(inserted.wait(), 5)
+            unlink = asyncio.create_task(self.db.unlink_chat(-100))
+            try:
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(unlink), 0.05)
+            finally:
+                release.set()
+                await asyncio.wait_for(asyncio.gather(observation, unlink), 5)
+        self.assertIsNone((await self.db.family("9"))["notify_chat"])
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
+
+    async def test_alert_schema_upgrade_is_idempotent_and_keeps_existing_family(self):
+        await self.db.pool.execute("DROP TABLE IF EXISTS pending_alerts")
+        await self.db.pool.execute("ALTER TABLE families DROP COLUMN IF EXISTS alert_retry_at")
+        await self.db.pool.execute("ALTER TABLE families DROP COLUMN IF EXISTS alert_link_version")
+        await self.db.pool.execute(SCHEMA)
+        await self.db.pool.execute(SCHEMA)
+        family = await self.db.family("9")
+        self.assertEqual((family["name"], family["notify_chat"], family["alert_retry_at"]), ("Fam", -100, 0))
+        self.assertEqual(family["alert_link_version"], 0)
+        await self.db.enqueue_alerts("9", [{"text": "after upgrade"}])
+        self.assertEqual((await self.db.pending_alerts("9", 100))[0]["text"], "after upgrade")
+
     async def test_changing_family_requires_new_approval(self):
         await self.db.ensure_family("other", "Other")
         for status in ("approved", "blocked"):
