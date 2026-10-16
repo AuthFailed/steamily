@@ -7,7 +7,8 @@ import asyncpg
 from aiogram.fsm.storage.base import StorageKey
 from cryptography.fernet import Fernet
 
-from bot.db import SCHEMA, Db, PgStorage, SteamAlreadyLinked
+from bot.db import Db, PgStorage, SteamAlreadyLinked
+from bot.migrations import migrate
 from bot.states import Menu
 from tests.pg import TEST_DATABASE_URL, fresh_db, needs_pg
 
@@ -362,6 +363,10 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             for table in ("accounts", "families", "telegram_users")
         }
 
+    async def migrate_db(self):
+        async with self.db.pool.acquire() as connection:
+            await migrate(connection)
+
     async def test_unique_steam_schema_upgrade_is_idempotent_and_keeps_existing_data(self):
         await self.db.save_account(10, "1", "9", "legacy-token", "KZ", 123.0)
         await self.db.set_status(10, "approved")
@@ -369,9 +374,9 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.set_language(10, "ru")
         await self.db.update_family("9", owner_telegram_id=10)
         before = await self.snapshot_links()
-        await self.db.pool.execute("DROP INDEX IF EXISTS accounts_steam_id_key")
-        await self.db.pool.execute(SCHEMA)
-        await self.db.pool.execute(SCHEMA)
+        await self.db.pool.execute("DROP TABLE schema_migrations; DROP INDEX accounts_steam_id_key")
+        await self.migrate_db()
+        await self.migrate_db()
         self.assertEqual(await self.snapshot_links(), before)
         with self.assertRaises(asyncpg.UniqueViolationError):
             await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')")
@@ -381,7 +386,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         await self.db.set_status(10, "approved")
         await self.db.update_family("9", owner_telegram_id=10)
         await self.db.set_language(10, "ru")
-        await self.db.pool.execute("DROP INDEX IF EXISTS accounts_steam_id_key")
+        await self.db.pool.execute("DROP TABLE schema_migrations; DROP INDEX accounts_steam_id_key")
         await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')")
         before = await self.snapshot_links()
         created_pools = []
@@ -403,8 +408,8 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
                 await pool.close()
 
         await self.db.delete_account(20)  # An operator explicitly reviewed this losing link.
-        await self.db.pool.execute(SCHEMA)
-        await self.db.pool.execute(SCHEMA)
+        await self.migrate_db()
+        await self.migrate_db()
         self.assertEqual((await self.db.account(10))["owner_telegram_id"], 10)
         self.assertEqual(self.db.refresh_token(await self.db.account(10)), "legacy-token")
         with self.assertRaises(asyncpg.UniqueViolationError):
@@ -590,16 +595,48 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 0)
 
     async def test_alert_schema_upgrade_is_idempotent_and_keeps_existing_family(self):
+        await self.db.pool.execute("DROP TABLE schema_migrations")
         await self.db.pool.execute("DROP TABLE IF EXISTS pending_alerts")
         await self.db.pool.execute("ALTER TABLE families DROP COLUMN IF EXISTS alert_retry_at")
         await self.db.pool.execute("ALTER TABLE families DROP COLUMN IF EXISTS alert_link_version")
-        await self.db.pool.execute(SCHEMA)
-        await self.db.pool.execute(SCHEMA)
+        await self.migrate_db()
+        await self.migrate_db()
         family = await self.db.family("9")
         self.assertEqual((family["name"], family["notify_chat"], family["alert_retry_at"]), ("Fam", -100, 0))
         self.assertEqual(family["alert_link_version"], 0)
         await self.db.enqueue_alerts("9", [{"text": "after upgrade"}])
         self.assertEqual((await self.db.pending_alerts("9", 100))[0]["text"], "after upgrade")
+
+    async def test_alert_health_counts_only_live_events_for_current_chat_links(self):
+        self.assertEqual(await self.db.alert_health(200), {"pending_retry": 0, "deferred": 0})
+        await self.db.enqueue_alerts(
+            "9",
+            [
+                {"text": "private durable message"},
+                {"text": "fresh presence", "expires_at": 201},
+                {"text": "expired", "expires_at": 199},
+                {"text": "expires now", "expires_at": 200},
+            ],
+        )
+        await self.db.ensure_family("other", "Other")
+        await self.db.update_family("other", notify_chat=-200)
+        await self.db.enqueue_alerts(
+            "other",
+            [
+                {"text": "deferred durable"},
+                {"text": "deferred presence", "expires_at": 400},
+                {"text": "deferred expired", "expires_at": 150},
+            ],
+        )
+        await self.db.defer_alerts("other", -200, 300)
+        await self.db.ensure_family("unlinked", "Unlinked")
+        await self.db.pool.execute("""
+            INSERT INTO pending_alerts (family_id, chat_id, text)
+            VALUES ('9', -999, 'obsolete link'), ('unlinked', -300, 'unlinked destination')
+        """)
+        self.assertEqual(await self.db.alert_health(200), {"pending_retry": 4, "deferred": 2})
+        self.assertEqual(await self.db.alert_health(300), {"pending_retry": 3, "deferred": 0})
+        self.assertEqual(await self.db.pool.fetchval("SELECT count(*) FROM pending_alerts"), 9)
 
     async def test_changing_family_requires_new_approval(self):
         await self.db.ensure_family("other", "Other")

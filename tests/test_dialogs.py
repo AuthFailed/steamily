@@ -151,11 +151,13 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await self.db.pool.close()
 
-    def last(self):
-        return self.messages.last_message()
+    def last(self, chat_id=None):
+        if chat_id is None:
+            return self.messages.last_message()
+        return next(message for message in reversed(self.messages.sent_messages) if message.chat.id == chat_id)
 
-    def buttons(self):
-        return [b.text for row in self.last().reply_markup.inline_keyboard for b in row]
+    def buttons(self, chat_id=None):
+        return [b.text for row in self.last(chat_id).reply_markup.inline_keyboard for b in row]
 
     def client(self, user_id, chat_id=None, chat_type="private"):
         return BotClient(self.dp, user_id=user_id, chat_id=chat_id or user_id, chat_type=chat_type)
@@ -568,35 +570,35 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def open_bot_members(self, client):
         await client.send("/start")
-        self.assertNotIn("Admin", self.buttons())  # merged into family management
-        await client.click(self.last(), Btn("Family"))
-        await client.click(self.last(), Btn("Manage family"))
+        self.assertNotIn("Admin", self.buttons(client.chat.id))  # merged into family management
+        await client.click(self.last(client.chat.id), Btn("Family"))
+        await client.click(self.last(client.chat.id), Btn("Manage family"))
 
     async def test_owner_approves_and_blocks_from_family_management(self):
         self.families.member_stats = AsyncMock(return_value={})
         client = self.client(OWNER)
         await self.open_bot_members(client)
-        await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
-        self.assertEqual(self.buttons()[:2], ["✅ Bob", "⏳ Carol"])  # the owner is not listed
+        await client.click(self.last(OWNER), Btn(r"Bot members \(1 pending\)"))
+        self.assertEqual(self.buttons(OWNER)[:2], ["✅ Bob", "⏳ Carol"])  # the owner is not listed
 
-        await client.click(self.last(), Btn("⏳ Carol"))
-        await client.click(self.last(), Btn("Approve"))
+        await client.click(self.last(OWNER), Btn("⏳ Carol"))
+        await client.click(self.last(OWNER), Btn("Approve"))
         self.assertEqual((await self.db.account(PENDING))["status"], "approved")
         await self.client(PENDING).send("/start")
-        self.assertIn("Family library", self.buttons())
+        self.assertIn("Family library", self.buttons(PENDING))
 
         await self.open_bot_members(client)
-        await client.click(self.last(), Btn(r"Bot members \(0 pending\)"))
-        await client.click(self.last(), Btn("✅ Bob"))
-        await client.click(self.last(), Btn("Block"))
+        await client.click(self.last(OWNER), Btn(r"Bot members \(0 pending\)"))
+        await client.click(self.last(OWNER), Btn("✅ Bob"))
+        await client.click(self.last(OWNER), Btn("Block"))
         self.assertEqual((await self.db.account(FRIEND))["status"], "blocked")
         await self.client(FRIEND).send("/start")
-        self.assertIn("blocked", self.last().text)
+        self.assertIn("blocked", self.last(FRIEND).text)
 
         await self.open_bot_members(client)
-        await client.click(self.last(), Btn(r"Bot members \(0 pending\)"))
-        await client.click(self.last(), Btn("◀️ Back"))
-        self.assertIn("Manage family", self.last().text)  # back where it was opened
+        await client.click(self.last(OWNER), Btn(r"Bot members \(0 pending\)"))
+        await client.click(self.last(OWNER), Btn("◀️ Back"))
+        self.assertIn("Manage family", self.last(OWNER).text)  # back where it was opened
 
     async def test_approval_refreshes_member_menu_without_erasing_telegram_profile(self):
         await self.client(PENDING).send("/start")
@@ -606,10 +608,12 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn(r"Bot members \(1 pending\)"))
         await client.click(self.last(), Btn("⏳ Carol"))
         completed = asyncio.Event()
+        release = asyncio.Event()
         escaped = []
         process_update = Updater._process_update
 
         async def process_background(updater, bot, update):
+            await release.wait()
             try:
                 await process_update(updater, bot, update)
             except Exception as error:
@@ -618,13 +622,20 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
                 completed.set()
 
         with patch.object(Updater, "_process_update", process_background):
-            await client.click(self.last(), Btn("Approve"))
-            await asyncio.wait_for(completed.wait(), timeout=2)
+            try:
+                await client.click(self.last(), Btn("Approve"))
+                await client.click(self.last(), Btn("◀️ Back"))
+                await client.click(self.last(), Btn("◀️ Back"))
+            finally:
+                release.set()
+                await asyncio.wait_for(completed.wait(), timeout=2)
         self.assertFalse(escaped)
+        self.assertEqual(self.last().chat.id, PENDING)
+        self.assertIn("Manage family", self.last(OWNER).text)
         account = await self.db.account(PENDING)
         self.assertEqual(account["status"], "approved")
         self.assertEqual((account["tg_username"], account["tg_name"]), ("carol_tg", "Carol T"))
-        member_menu = [message for message in self.messages.sent_messages if message.chat.id == PENDING][-1]
+        member_menu = self.last(PENDING)
         buttons = [button.text for row in member_menu.reply_markup.inline_keyboard for button in row]
         self.assertIn("Family library", buttons)
 
