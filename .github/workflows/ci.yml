@@ -9,6 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Conventional Commits in English
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # New branches and force-pushes have no usable base: check the pushed commit itself.
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            commits=$(git rev-list --no-merges "$BASE..$HEAD")
+          else
+            commits="$HEAD"
+          fi
+          status=0
+          for commit in $commits; do
+            git log -1 --format=%B "$commit" | python3 scripts/check_commit_msg.py - || { echo "  in $commit"; status=1; }
+          done
+          exit $status
+
   lint:
     runs-on: ubuntu-latest
     steps:
