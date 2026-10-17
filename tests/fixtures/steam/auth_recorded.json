@@ -1,0 +1,56 @@
+{
+  "renewal": [
+    {
+      "status": 302,
+      "headers": {
+        "Location": "https://store.steampowered.com/login/settoken"
+      }
+    },
+    {
+      "status": 302,
+      "headers": {
+        "Location": "https://store.steampowered.com/pointssummary/ajaxgetasyncconfig"
+      }
+    },
+    {
+      "status": 302,
+      "headers": {
+        "Location": "https://store.steampowered.com/pointssummary/ajaxgetasyncconfig"
+      }
+    },
+    {
+      "status": 200,
+      "headers": {},
+      "body": {
+        "success": 1,
+        "data": {
+          "webapi_token": "e30.eyJzdWIiOiI3NjU2MTE5ODAwMDAwMDAwMSIsImF1ZCI6WyJ3ZWI6c3RvcmUiXSwiZXhwIjoyMDAwMDAwMDAwfQ.recorded-invalid-signature"
+        }
+      }
+    }
+  ],
+  "steam_id": "76561198000000001",
+  "refresh_cookie": "76561198000000001%7C%7Ce30.eyJzdWIiOiI3NjU2MTE5ODAwMDAwMDAwMSIsImF1ZCI6WyJkZXJpdmUiLCJ3ZWIiXSwiZXhwIjoyMDAwMDAwMDAwfQ.recorded-invalid-signature",
+  "begin": {
+    "status": 200,
+    "headers": {
+      "x-eresult": "1"
+    },
+    "body_hex": "089221122268747470733a2f2f732e7465616d2f712f7265636f726465642d72656461637465641a137265636f726465642d726571756573742d6964250000a040"
+  },
+  "pending": {
+    "status": 200,
+    "headers": {
+      "x-eresult": "1"
+    },
+    "body_hex": ""
+  },
+  "rejected": {
+    "status": 200,
+    "headers": {
+      "x-eresult": "15"
+    },
+    "body_hex": "",
+    "request_refresh_token": "recorded-invalid-refresh"
+  }
+}

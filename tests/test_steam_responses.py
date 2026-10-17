@@ -226,11 +226,34 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(snapshot["players"], {})
                 self.assertEqual(snapshot["playtime"], [])
 
-    async def test_required_library_http_failure_does_not_become_an_empty_snapshot(self):
-        self.failures["IFamilyGroupsService/GetSharedLibraryApps/v1"] = (503, {})
-        with self.assertRaisesRegex(RuntimeError, "GetSharedLibraryApps/v1 failed with HTTP 503"):
-            await fetch_family_snapshot(self.http, "fixture-access")
-        self.assertEqual(len(self.requests), 2)
+    async def test_required_library_failure_does_not_become_an_empty_snapshot(self):
+        for status, headers in ((503, {}), (200, {"x-eresult": "15"})):
+            with self.subTest(status=status):
+                self.requests.clear()
+                self.failures["IFamilyGroupsService/GetSharedLibraryApps/v1"] = (status, headers)
+                with self.assertRaisesRegex(RuntimeError, f"GetSharedLibraryApps/v1 failed with HTTP {status}"):
+                    await fetch_family_snapshot(self.http, "fixture-access")
+                self.assertEqual(len(self.requests), 2)
+
+    async def test_incomplete_library_does_not_become_an_empty_snapshot(self):
+        for library in ({}, {"response": {}}, {"response": {"apps": None}}, {"response": {"apps": {}}}):
+            with self.subTest(library=library):
+                self.responses["IFamilyGroupsService/GetSharedLibraryApps/v1"] = library
+                with self.assertRaisesRegex(RuntimeError, "incomplete family-library response"):
+                    await fetch_family_snapshot(self.http, "fixture-access")
+
+    async def test_empty_library_and_absent_optional_records_preserve_family(self):
+        self.responses["IFamilyGroupsService/GetSharedLibraryApps/v1"] = {"response": {"apps": []}}
+        self.responses["IPlayerService/GetPlayerLinkDetails/v1"] = {"response": {}}
+        self.responses["IFamilyGroupsService/GetPlaytimeSummary/v1"] = {"response": {}}
+
+        snapshot = await fetch_family_snapshot(self.http, "fixture-access")
+
+        self.assertEqual(snapshot["members"], [ALICE, BOB, CHARLIE])
+        self.assertEqual(snapshot["apps"], [])
+        self.assertEqual(snapshot["names"], {})
+        self.assertEqual(snapshot["players"], {})
+        self.assertEqual(snapshot["playtime"], [])
 
     async def test_store_cards_parse_localized_request_assets_and_unavailable_items(self):
         cards = await store_cards(self.http, [10, 20, 30, 40], "ru", "KZ")

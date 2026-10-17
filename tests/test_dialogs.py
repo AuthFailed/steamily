@@ -951,6 +951,18 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         alerts = (await self.db.family(FAMILY))["alerts"]
         self.assertEqual((alerts["online"], alerts["games"]), (True, False))
 
+        self.families.bot = AsyncMock()
+        await self.db.enqueue_alerts(FAMILY, [{"text": "Pending before unlink"}])
+        self.assertEqual(len(await self.db.pending_alerts(FAMILY, 0)), 1)
+        await client.click(self.last(), Btn("✂️ Unlink group"))
+        self.assertIsNone((await self.db.family(FAMILY))["notify_chat"])
+        self.assertIn("No group yet", self.last().text)
+        self.assertEqual(await self.db.pending_alerts(FAMILY, 0), [])
+        await self.db.enqueue_alerts(FAMILY, [{"text": "After unlink"}])
+        await self.families.deliver_alerts(FAMILY)
+        self.assertEqual(await self.db.pending_alerts(FAMILY, 0), [])
+        self.families.bot.send_message.assert_not_awaited()
+
     async def test_stale_admin_card_cannot_change_a_target_in_another_family(self):
         client = self.client(OWNER)
         await self.db.ensure_family("8", "Other")

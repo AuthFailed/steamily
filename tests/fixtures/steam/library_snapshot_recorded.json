@@ -1,0 +1,38 @@
+{
+  "response": {
+    "apps": [
+      {
+        "appid": 201,
+        "name": "Recorded game 201",
+        "owner_steamids": [
+          "76561198000000001"
+        ],
+        "exclude_reason": 0,
+        "rt_time_acquired": 1700000020,
+        "app_type": 1
+      },
+      {
+        "appid": 202,
+        "name": "Recorded game 202",
+        "owner_steamids": [
+          "76561198000000001"
+        ],
+        "exclude_reason": 3,
+        "rt_time_acquired": 1700000020,
+        "app_type": 1
+      },
+      {
+        "appid": 203,
+        "name": "Recorded game 203",
+        "owner_steamids": [
+          "76561198000000001",
+          "76561198000000005",
+          "76561198000000002"
+        ],
+        "exclude_reason": 0,
+        "rt_time_acquired": 1700000020,
+        "app_type": 1
+      }
+    ]
+  }
+}
