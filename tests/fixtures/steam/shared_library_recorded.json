@@ -1,0 +1,35 @@
+{
+  "response": {
+    "apps": [
+      {
+        "appid": 201,
+        "name": "Recorded included title",
+        "owner_steamids": [
+          "a",
+          "b"
+        ],
+        "exclude_reason": 0,
+        "rt_time_acquired": 1700000000,
+        "app_type": 1
+      },
+      {
+        "appid": 202,
+        "name": "Recorded excluded title",
+        "owner_steamids": [
+          "a"
+        ],
+        "exclude_reason": 1,
+        "rt_time_acquired": 1700000000,
+        "app_type": 1
+      },
+      {
+        "appid": 203,
+        "owner_steamids": [
+          "a",
+          "b"
+        ],
+        "app_type": 1
+      }
+    ]
+  }
+}
