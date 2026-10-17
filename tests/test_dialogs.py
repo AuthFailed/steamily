@@ -957,6 +957,183 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
         self.assertIn("Family library", self.buttons())
 
+    async def test_purchase_request_details_and_confirmation_keep_the_selected_request(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        requests = [
+            {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1},
+            {
+                "request_id": "102",
+                "requester_steamid": CAROL,
+                "time_requested": 2,
+                "requested_packageids": [10, 20],
+                "requested_bundleids": [30],
+                "gidshoppingcart": "404",
+            },
+        ]
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=requests)),
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            self.assertIn("Carol · 01.01.1970 · #101", self.buttons())
+            self.assertIn("Carol · 01.01.1970 · #102", self.buttons())
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #102"))
+            self.assertIn("Purchase request", self.last().text)
+            self.assertIn("Carol", self.last().text)
+            self.assertIn("01.01.1970", self.last().text)
+            self.assertIn("102", self.last().text)
+            self.assertIn("Package #10", self.last().text)
+            self.assertIn("Package #20", self.last().text)
+            self.assertIn("Bundle #30", self.last().text)
+            self.assertIn("Cart: 404", self.last().text)
+            steam_link = next(
+                button
+                for row in self.last().reply_markup.inline_keyboard
+                for button in row
+                if button.text == "Open in Steam"
+            )
+            self.assertEqual(steam_link.url, "https://store.steampowered.com/cart/purchaserequest/9/102")
+            decline.assert_not_awaited()
+            await client.click(self.last(), Btn("Decline request"))
+            self.assertIn("Decline purchase request #102?", self.last().text)
+            self.assertIn("102", self.last().text)
+            decline.assert_not_awaited()
+            await client.click(self.last(), Btn("◀️ Back"))
+            decline.assert_not_awaited()
+            self.assertIn("Purchase request", self.last().text)
+            await client.click(self.last(), Btn("Decline request"))
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_awaited_once_with(None, "token", FAMILY, "102")
+        self.assertIn("✅ Done", self.last().text)
+
+    async def test_purchase_request_without_item_details_is_explicit_and_safe_to_leave(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=[request])),
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            self.assertIn("Item names and prices are incomplete", self.last().text)
+            self.assertIn("Carol", self.last().text)
+            self.assertIn("101", self.last().text)
+            await client.click(self.last(), Btn("◀️ Back"))
+            self.assertIn("Carol · 01.01.1970 · #101", self.buttons())
+        decline.assert_not_awaited()
+
+    async def test_old_purchase_confirmation_cannot_decline_another_selected_request(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        requests = [
+            {"request_id": request_id, "requester_steamid": CAROL, "time_requested": 1} for request_id in ("101", "102")
+        ]
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=requests)),
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            old_confirmation = self.last()
+            await client.click(self.last(), Btn("◀️ Back"))
+            await client.click(self.last(), Btn("◀️ Back"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #102"))
+            await client.click(self.last(), Btn("Decline request"))
+            await client.click(old_confirmation, Btn("Yes, decline"))
+            decline.assert_not_awaited()
+            self.assertIn("Decline purchase request #102?", self.last().text)
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_awaited_once_with(None, "token", FAMILY, "102")
+
+    async def test_purchase_confirmation_rechecks_that_request_is_pending(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        for latest in ([], [{**request, "is_completed": True}]):
+            with (
+                self.subTest(latest=latest),
+                patch("bot.steam.get_json", AsyncMock(return_value={"response": {"requests": [request]}})) as requests,
+                patch("bot.steam.post_json", AsyncMock()) as decline,
+            ):
+                await self.open_bot_members(client)
+                await client.click(self.last(), Btn("🛒 Purchase requests"))
+                await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+                await client.click(self.last(), Btn("Decline request"))
+                requests.reset_mock()
+                requests.return_value = {"response": {"requests": latest}}
+                await client.click(self.last(), Btn("Yes, decline"))
+                requests.assert_awaited()
+                decline.assert_not_awaited()
+                self.assertIn("no longer open", self.last().text)
+                self.assertNotIn("✅ Done", self.last().text)
+
+    async def test_purchase_confirmation_read_failure_never_declines(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.steam.get_json", AsyncMock(return_value={"response": {"requests": [request]}})) as requests,
+            patch("bot.steam.post_json", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            requests.side_effect = RuntimeError("Steam unavailable")
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_not_awaited()
+        self.assertRegex(self.last().text, r"(?i)could not|failed|unavailable|Steam refused")
+        self.assertNotIn("✅ Done", self.last().text)
+
+    async def test_purchase_decline_error_never_shows_success(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=[request])),
+            patch(
+                "bot.dialogs.family.decline_purchase", AsyncMock(side_effect=SteamActionError("Request refused"))
+            ) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_awaited_once_with(None, "token", FAMILY, "101")
+        self.assertIn("❌ Steam refused: Request refused", self.last().text)
+        self.assertNotIn("✅ Done", self.last().text)
+
+    async def test_purchase_confirmation_denies_owner_revocation_before_steam_lookup(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=[request])) as requests,
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            card = self.last()
+            requests.reset_mock()
+            self.families.owner_token.reset_mock()
+            await self.families.make_owner(FAMILY, FRIEND)
+            with patch.object(CallbackQuery, "answer", AsyncMock()) as answer:
+                await client.click(card, Btn("Yes, decline"))
+        requests.assert_not_awaited()
+        decline.assert_not_awaited()
+        self.families.owner_token.assert_not_awaited()
+        self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+        self.assertIn("Family library", self.buttons())
+
     async def test_saved_steam_invite_cannot_follow_owner_to_another_family(self):
         client = self.client(OWNER)
         await self.open_bot_members(client)

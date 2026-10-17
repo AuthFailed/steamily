@@ -43,3 +43,5 @@ class FamilyView(StatesGroup):
     invites = State()
     rename = State()
     purchases = State()
+    purchase = State()
+    decline_purchase = State()

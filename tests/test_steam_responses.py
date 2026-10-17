@@ -7,7 +7,15 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from bot.steam import fetch_family_snapshot, parse_players, parse_snapshot, parse_store_item, store_cards
+from bot.steam import (
+    SteamActionError,
+    decline_purchase,
+    fetch_family_snapshot,
+    parse_players,
+    parse_snapshot,
+    parse_store_item,
+    store_cards,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures/steam"
 ALICE, BOB, CHARLIE = (f"7656119800000000{i}" for i in (1, 2, 3))
@@ -123,6 +131,31 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
         api_patch = patch("bot.steam.API", str(server.make_url("")).rstrip("/"))
         api_patch.start()
         self.addCleanup(api_patch.stop)
+
+    async def test_decline_rechecks_the_exact_pending_request_before_posting(self):
+        method = "IFamilyGroupsService/GetPurchaseRequests/v1"
+        action = "IFamilyGroupsService/RespondToRequestedPurchase/v1"
+        self.responses[action] = {"response": {}}
+        for requests in ([], [{"request_id": "102", "is_completed": True}], [{"request_id": "101"}]):
+            with self.subTest(requests=requests):
+                self.requests.clear()
+                self.responses[method] = {"response": {"requests": requests}}
+                with self.assertRaises(SteamActionError):
+                    await decline_purchase(self.http, "fixture-access", "42", "102")
+                self.assertEqual([verb for verb, _, _ in self.requests], ["GET"])
+
+        self.responses[method] = {"response": {"requests": [{"request_id": "101"}, {"request_id": "102"}]}}
+        self.requests.clear()
+        await decline_purchase(self.http, "fixture-access", "42", "102")
+        self.assertEqual([verb for verb, _, _ in self.requests], ["GET", "POST"])
+        self.assertEqual(
+            self.requests[-1],
+            (
+                "POST",
+                action,
+                {"access_token": "fixture-access", "family_groupid": "42", "request_id": "102", "action": "1"},
+            ),
+        )
 
     async def test_snapshot_fetches_json_endpoints_and_post_only_playtime_summary(self):
         snapshot = await fetch_family_snapshot(self.http, "fixture-access")
