@@ -86,10 +86,10 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.db.game_responses(self.account))[0]["response"], "together")
         self.assertEqual(await self.db.game_marks(10), {})
 
-    async def test_version_eight_upgrade_preserves_statuses_and_login(self):
+    async def test_version_nine_upgrade_preserves_statuses_events_and_login(self):
         async with self.db.pool.acquire() as connection:
             await connection.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-            with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:8]):
+            with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:9]):
                 await migrate(connection)
             await connection.execute("INSERT INTO families (family_id, name) VALUES ('9', 'Existing')")
             await connection.execute(
@@ -101,11 +101,25 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO game_statuses (telegram_id, appid, name, status) "
                 "VALUES (10, 10, 'Existing game', 'playing')"
             )
+            event_id = await connection.fetchval(
+                "INSERT INTO game_nights (family_id, creator_telegram_id, creator_steam_id, chat_id, link_version, "
+                "starts_at, timezone, appids) VALUES ('9', 10, '1', -100, 0, '2099-01-02T18:00:00Z', 'UTC', '{10,20}') "
+                "RETURNING id"
+            )
+            await connection.execute(
+                "INSERT INTO game_night_participants (event_id, telegram_id, steam_id, vote, rsvp) "
+                "VALUES ($1, 10, '1', 10, 'going')",
+                event_id,
+            )
+            event = await connection.fetchrow("SELECT * FROM game_nights")
+            participant = await connection.fetchrow("SELECT * FROM game_night_participants")
             before = dict(await connection.fetchrow("SELECT * FROM accounts"))
             await migrate(connection)
             after = dict(await connection.fetchrow("SELECT * FROM accounts"))
             self.assertTrue(after.pop("game_response_version"))
             self.assertEqual(after, before)
+            self.assertEqual(await connection.fetchrow("SELECT * FROM game_nights"), event)
+            self.assertEqual(await connection.fetchrow("SELECT * FROM game_night_participants"), participant)
             self.assertEqual(
                 [
                     tuple(row)
@@ -113,7 +127,7 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
                         "SELECT version, name FROM schema_migrations WHERE version >= 8 ORDER BY version"
                     )
                 ],
-                [(8, "008_game_statuses.sql"), (9, "009_game_responses.sql")],
+                [(8, "008_game_statuses.sql"), (9, "009_game_nights.sql"), (10, "010_game_responses.sql")],
             )
         self.account = dict(await self.db.account(10))
         self.assertEqual(self.db.refresh_token(self.account), "existing-token")
@@ -247,7 +261,7 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
         await self.respond(self.account, 10, "recommend")
         async with self.db.pool.acquire() as connection:
             await migrate(connection)
-            await connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+            await connection.execute("DELETE FROM schema_migrations WHERE version = 10")
             await migrate(connection)
         self.assertEqual((await self.db.account(10))["status"], "approved")
         self.assertEqual(len(await self.db.game_responses(self.account)), 1)

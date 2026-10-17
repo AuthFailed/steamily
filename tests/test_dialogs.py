@@ -86,6 +86,11 @@ class AccountMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
+        # Avoid aiogram-dialog intent collisions when tests open dialogs within one second.
+        intent_ids = count()
+        intent_patch = patch("aiogram_dialog.api.entities.stack.new_id", side_effect=lambda: f"{next(intent_ids):08x}")
+        intent_patch.start()
+        cls.addClassCleanup(intent_patch.stop)
         cls.messages = MockMessageManager()
         cls.logins = StubLogins()
         cls.dp = create_dispatcher(None, None, cls.logins, storage=JsonMemoryStorage(), message_manager=cls.messages)
