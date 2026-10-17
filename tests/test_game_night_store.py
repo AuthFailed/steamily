@@ -273,14 +273,18 @@ class GameNightStoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_schema_migration_replay_preserves_events(self):
         event_id = await self.event()
         async with self.db.pool.acquire() as connection:
-            await connection.execute(MIGRATIONS[-1].read_text())
+            await connection.execute(MIGRATIONS[8].read_text())
             await migrate(connection)
         self.assertIsNotNone(await self.store.get(event_id, -100))
 
     async def test_upgrade_from_released_backlog_schema_preserves_private_data(self):
         async with self.db.pool.acquire() as connection:
-            await connection.execute("DROP TABLE game_night_participants, game_nights")
-            await connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+            await connection.execute("""
+                DROP TRIGGER invalidate_owner_transfer ON families;
+                DROP FUNCTION invalidate_owner_transfer();
+                DROP TABLE owner_transfers, game_night_participants, game_nights;
+                DELETE FROM schema_migrations WHERE version >= 9;
+            """)
             history = await connection.fetch("SELECT * FROM schema_migrations ORDER BY version")
         self.assertEqual(len(history), 8)
         self.assertEqual(history[-1]["name"], "008_game_statuses.sql")
@@ -293,7 +297,10 @@ class GameNightStoreTest(unittest.IsolatedAsyncioTestCase):
             await migrate(connection)
             upgraded = await connection.fetch("SELECT * FROM schema_migrations ORDER BY version")
         self.assertEqual(upgraded[:8], history)
-        self.assertEqual([(row["version"], row["name"]) for row in upgraded[8:]], [(9, "009_game_nights.sql")])
+        self.assertEqual(
+            [(row["version"], row["name"]) for row in upgraded[8:]],
+            [(9, "009_game_nights.sql"), (10, "010_owner_transfers.sql")],
+        )
         self.assertEqual(await self.db.account(100), account)
         self.assertEqual(await self.db.family("9"), family)
         self.assertEqual(await self.db.game_marks(100), marks)

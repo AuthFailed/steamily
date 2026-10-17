@@ -1817,12 +1817,143 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("New member alerts: off", self.buttons())
         self.families.bot = AsyncMock()
         await client.click(self.last(), Btn("Log out"))
-        self.assertIn("a random other family member", self.last().text)
+        self.assertIn("random approved", self.last().text)
         with patch("bot.family.random.choice", lambda items: items[0]):
             await client.click(self.last(), Btn("Yes, log out"))
         self.assertEqual((await self.db.account(FRIEND))["owner_telegram_id"], FRIEND)
         self.assertEqual(self.families.bot.send_message.await_args.args[0], FRIEND)
         self.assertIn("You are now the owner", self.families.bot.send_message.await_args.args[1])
+
+    async def open_owner_transfer(self, client):
+        await client.send("/start")
+        await client.click(self.last(), Btn("Settings"))
+        await client.click(self.last(), Btn("Bot ownership"))
+
+    async def test_bot_ownership_transfer_requires_selected_members_acceptance(self):
+        family = self.families.get(FAMILY)
+        family.snapshot["roles"][BOB] = 2  # bot ownership is independent of Steam adult/child roles
+        family.snapshot["names"][ALICE] = "Alice <admin>"
+        await self.db.set_language(FRIEND, "ru")
+        owner, friend, pending = self.client(OWNER), self.client(FRIEND), self.client(PENDING)
+        self.families._fetch = AsyncMock(return_value=family.snapshot)
+        await self.open_owner_transfer(owner)
+        self.assertIn("Bob", self.buttons())
+        self.assertNotIn("Carol", self.buttons())
+        self.assertIn("does not change your Steam family", self.last().text)
+        with patch.object(type(owner.bot), "send_message", AsyncMock()) as send:
+            await owner.click(self.last(), Btn("Bob"))
+        self.assertEqual((await self.db.family(FAMILY))["owner_telegram_id"], OWNER)
+        self.assertEqual({call.args[0] for call in send.await_args_list}, {OWNER, FRIEND})
+        self.assertTrue(any("Alice &lt;admin&gt;" in call.args[1] for call in send.await_args_list))
+        self.assertTrue(any("владельца бота" in call.args[1] for call in send.await_args_list))
+        await pending.send("/start")
+        self.assertNotIn("Ownership invitation", self.buttons())
+        await friend.send("/start")
+        await friend.click(self.last(), Btn("Приглашение стать владельцем"))
+        self.assertIn("Alice &lt;admin&gt;", self.last().text)
+        self.assertIn("24", self.last().text)
+        with patch.object(type(friend.bot), "send_message", AsyncMock()) as send:
+            await friend.click(self.last(), Btn("Принять владение ботом"))
+        self.assertEqual((await self.db.family(FAMILY))["owner_telegram_id"], FRIEND)
+        self.assertEqual((await self.db.account(OWNER))["status"], "approved")
+        self.assertEqual({call.args[0] for call in send.await_args_list}, {OWNER, FRIEND})
+        self.assertEqual(family.snapshot["roles"][BOB], 2)
+
+    async def test_owner_transfer_cancel_and_stale_invitation_cannot_accept_replacement(self):
+        owner, friend = self.client(OWNER), self.client(FRIEND)
+        self.families._fetch = AsyncMock(return_value=self.families.get(FAMILY).snapshot)
+        await self.open_owner_transfer(owner)
+        with patch.object(type(owner.bot), "send_message", AsyncMock()):
+            await owner.click(self.last(), Btn("Bob"))
+            old_cancel = self.last(OWNER)
+            await friend.send("/start")
+            await friend.click(self.last(), Btn("Ownership invitation"))
+            old_accept = self.last(FRIEND)
+            await owner.click(old_cancel, Btn("Cancel invitation"))
+            self.assertIsNone(await self.db.owner_transfer(FAMILY))
+            await owner.click(self.last(OWNER), Btn("Bob"))
+            replacement = await self.db.owner_transfer(FAMILY)
+            with patch.object(CallbackQuery, "answer", AsyncMock()):
+                await owner.click(old_cancel, Btn("Cancel invitation"))
+                await friend.click(old_accept, Btn("Accept bot ownership"))
+        self.assertEqual((await self.db.owner_transfer(FAMILY))["id"], replacement["id"])
+        self.assertEqual((await self.db.family(FAMILY))["owner_telegram_id"], OWNER)
+
+    async def test_owner_transfer_rejects_forged_pending_and_invalid_candidates(self):
+        owner = self.client(OWNER)
+        self.families._fetch = AsyncMock(return_value=self.families.get(FAMILY).snapshot)
+        await self.open_owner_transfer(owner)
+        picker = self.last()
+        button = self.button("Bob")
+        for target in (str(PENDING), "invalid", "9" * 24):
+            forged = button.model_copy(update={"callback_data": button.callback_data.rsplit(":", 1)[0] + f":{target}"})
+            message = picker.model_copy(update={"reply_markup": InlineKeyboardMarkup(inline_keyboard=[[forged]])})
+            with patch.object(CallbackQuery, "answer", AsyncMock()) as answer:
+                await owner.click(message, Btn("Bob"))
+            self.assertTrue(any(call.kwargs.get("show_alert") for call in answer.await_args_list))
+            self.assertIsNone(await self.db.owner_transfer(FAMILY))
+
+    async def test_expired_owner_transfer_has_no_accept_button_and_stale_accept_is_harmless(self):
+        owner, friend = self.client(OWNER), self.client(FRIEND)
+        self.families._fetch = AsyncMock(return_value=self.families.get(FAMILY).snapshot)
+        await self.open_owner_transfer(owner)
+        with patch.object(type(owner.bot), "send_message", AsyncMock()):
+            await owner.click(self.last(), Btn("Bob"))
+        await friend.send("/start")
+        await friend.click(self.last(), Btn("Ownership invitation"))
+        invitation = self.last()
+        await self.db.pool.execute("UPDATE owner_transfers SET expires_at=now() - interval '1 second'")
+        with patch.object(CallbackQuery, "answer", AsyncMock()):
+            await friend.click(invitation, Btn("Accept bot ownership"))
+        self.assertEqual((await self.db.family(FAMILY))["owner_telegram_id"], OWNER)
+        self.assertNotIn("Accept bot ownership", self.buttons())
+        self.assertIn("This invitation is unavailable", self.last().text)
+
+    async def test_owner_transfer_stale_owner_and_blocked_recipient_have_no_access(self):
+        owner, friend = self.client(OWNER), self.client(FRIEND)
+        self.families._fetch = AsyncMock(return_value=self.families.get(FAMILY).snapshot)
+        await self.open_owner_transfer(owner)
+        picker = self.last()
+        await self.families.make_owner(FAMILY, FRIEND)
+        with patch.object(CallbackQuery, "answer", AsyncMock()):
+            await owner.click(picker, Btn("Bob"))
+        self.assertIsNone(await self.db.owner_transfer(FAMILY))
+        await self.families.make_owner(FAMILY, OWNER)
+        await self.open_owner_transfer(owner)
+        with patch.object(type(owner.bot), "send_message", AsyncMock()):
+            await owner.click(self.last(), Btn("Bob"))
+        await friend.send("/start")
+        await friend.click(self.last(), Btn("Ownership invitation"))
+        invitation = self.last()
+        await self.db.set_status(FRIEND, "blocked")
+        with patch.object(CallbackQuery, "answer", AsyncMock()):
+            await friend.click(invitation, Btn("Accept bot ownership"))
+        self.assertEqual((await self.db.family(FAMILY))["owner_telegram_id"], OWNER)
+
+    async def test_owner_transfer_delivery_and_callback_failures_do_not_hide_committed_result(self):
+        owner, friend = self.client(OWNER), self.client(FRIEND)
+        self.families._fetch = AsyncMock(return_value=self.families.get(FAMILY).snapshot)
+        await self.open_owner_transfer(owner)
+        with patch.object(type(owner.bot), "send_message", AsyncMock()):
+            await owner.click(self.last(), Btn("Bob"))
+        await friend.send("/start")
+        await friend.click(self.last(), Btn("Ownership invitation"))
+        with (
+            patch.object(
+                type(friend.bot), "send_message", AsyncMock(side_effect=[RuntimeError("blocked"), None])
+            ) as send,
+            patch.object(CallbackQuery, "answer", AsyncMock(side_effect=RuntimeError("expired callback"))),
+        ):
+            await friend.click(self.last(), Btn("Accept bot ownership"))
+        self.assertEqual((await self.db.family(FAMILY))["owner_telegram_id"], FRIEND)
+        self.assertEqual(send.await_count, 2)
+
+    async def test_owner_logout_copy_does_not_offer_pending_successor(self):
+        await self.db.set_status(FRIEND, "blocked")
+        owner = self.client(OWNER)
+        await owner.send("/delete")
+        self.assertIn("no approved", self.last().text)
+        self.assertIn("fresh Steam login", self.last().text)
 
     async def test_failed_steam_logout_keeps_account_and_confirmation_for_retry(self):
         client = self.client(FRIEND)

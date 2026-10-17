@@ -23,13 +23,14 @@ from .dialogs.admin import admin_dialog
 from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
 from .dialogs.menu import menu_dialog
+from .dialogs.ownership import ownership_dialog
 from .family import PRESENCE_INTERVAL, Families, role
 from .game_night import router as game_night_router
 from .health import STATUS_PATH, Health
 from .i18n import DEFAULT, t
 from .inline import router as inline_router
 from .login import Logins
-from .states import Admin, FamilyView, Games, Menu
+from .states import Admin, FamilyView, Games, Menu, Ownership
 
 router = Router()
 log = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ class AccountMiddleware(BaseMiddleware):
 OWNER_STATES = {
     *Admin.__all_states__,
     Menu.group_alerts,
+    Ownership.manage,
     FamilyView.remove,
     FamilyView.manage,
     FamilyView.invite,
@@ -135,6 +137,9 @@ class AccessMiddleware(BaseMiddleware):
             denied |= any(state.group in (Games, FamilyView, Admin) for state in states) and user_role not in (
                 "member",
                 "owner",
+            )
+            denied |= Ownership.invitation in states and (
+                account is None or account["status"] != "approved" or not account["refresh_token"]
             )
             if denied:
                 if owner_action:
@@ -218,7 +223,16 @@ async def background_dialog_failed(event: ErrorEvent):
 def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, **dialog_options) -> Dispatcher:
     dp = Dispatcher(storage=storage or PgStorage(db), db=db, families=families, logins=logins)
     dp.message.outer_middleware(GroupMigrationMiddleware())
-    dp.include_routers(router, game_night_router, inline_router, menu_dialog, games_dialog, family_dialog, admin_dialog)
+    dp.include_routers(
+        router,
+        game_night_router,
+        inline_router,
+        menu_dialog,
+        games_dialog,
+        family_dialog,
+        admin_dialog,
+        ownership_dialog,
+    )
     setup_dialogs(dp, **dialog_options)
     for observer in (dp.message, dp.callback_query, dp.observers[DIALOG_EVENT_NAME]):
         observer.outer_middleware(AccountMiddleware())
