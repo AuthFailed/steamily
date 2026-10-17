@@ -61,6 +61,7 @@ Send `/privacy` for the in-bot summary. The application stores the following:
 | Telegram user ID, username and display name; linked SteamID, family ID, registration time and approval status | Identify the linked account, control access, and show Telegram profile links when the member permits publication | Until logout or administrative removal |
 | Encrypted Steam refresh token, token renewal time, temporary access token | Authenticate Steam checks and requested family actions | Until logout or administrative removal; the persisted refresh token is also cleared if Steam rejects it |
 | Language, notification and publication preferences, publication version and Steam store country | Render the bot and local prices, deliver selected alerts, and reject work using withdrawn publication consent | Until logout or administrative removal |
+| Game responses (family, account and game IDs, Recommend / Want to play together / Not interested, named-recommendation choice) and response version | Show family opinion counts, optional named recommendations and the recommended-games filter; reject stale buttons | Responses remain until cleared, logout, administrative removal, loss of approval/session or a Steam account/family change; the opaque response version remains with the account until deletion |
 | Saved dialog state and data, including login/menu state and temporary user input | Keep dialogs working across updates and restarts | Replaced as dialogs change; all of the user's saved dialog rows are deleted on logout or administrative removal |
 | Telegram or Steam IDs selected in another active user's saved family-management dialog | Keep that user's member selection while they navigate | Retained in that viewer's dialog until it is closed or reset, or the viewer logs out; does not restore the selected person's account or credentials |
 | Current family name/ID, members and roles, invitations, profile names/links, online/game presence, shared library and ownership/acquisition data, and playtime supplied by Steam | Show family information and statistics, detect changes, and send alerts | The latest snapshot replaces the previous one; retained while at least one account remains registered for the family |
@@ -125,7 +126,17 @@ new preferences and requires a fresh Steam login and any necessary approval.
 If you cannot access your Telegram account, contact the instance operator to
 verify ownership and arrange removal.
 
-Any future user-linked backlog marks, transfer requests or votes must follow the
+Game cards explain visibility before you respond: recommendation and play-together
+totals are visible to approved family members. Not interested is visible only to
+you. Recommendations are anonymous unless you choose **Recommend with my name**;
+that choice shows your Steam name/profile, with Telegram links only under your
+separate publication setting. Each game has one response, which you can change or
+clear. Responses are separate from a personal backlog. Leaving the family,
+losing bot approval or a Steam session, changing linked account/family, logout and
+administrative deletion remove your responses. Current cards exclude departed
+members; previously delivered messages cannot reliably be recalled.
+
+Any future user-linked backlog marks or transfer requests must follow the
 same logout and administrative-removal rules. They are not exceptions to this
 policy and are not implemented by this document.
 

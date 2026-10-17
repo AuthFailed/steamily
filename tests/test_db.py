@@ -466,11 +466,13 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             expected = {**dict(account), "status": expected_status}
             if account["telegram_id"] == 10:
                 self.assertNotEqual(current["publication_version"], account["publication_version"])
+                self.assertNotEqual(current["game_response_version"], account["game_response_version"])
                 expected.update(
                     refresh_token=None,
                     token_renewed_at=0.0,
                     publication_version=current["publication_version"],
                     token_generation=current["token_generation"],
+                    game_response_version=current["game_response_version"],
                 )
                 self.assertGreater(current["token_generation"], account["token_generation"])
             self.assertEqual(current, expected)
@@ -1292,6 +1294,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             for table in tables
         }
         publication_versions = []
+        response_versions = []
         for _ in range(2):
             await self.db.pool.close()
             self.db = await Db.connect(TEST_DATABASE_URL, secret_key)
@@ -1305,6 +1308,8 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(after["accounts"][0].pop("publish_telegram"))
             publication_versions.append(after["accounts"][0].pop("publication_version"))
             self.assertTrue(publication_versions[-1])
+            response_versions.append(after["accounts"][0].pop("game_response_version"))
+            self.assertTrue(response_versions[-1])
             self.assertEqual(after["families"][0].pop("alert_retry_at"), 0.0)
             self.assertEqual(after["families"][0].pop("alert_link_version"), 0)
             self.assertIsNone(after["families"][0].pop("reader_telegram_id"))
@@ -1316,6 +1321,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
                     "INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '1', '9')"
                 )
         self.assertEqual(publication_versions[0], publication_versions[1])
+        self.assertEqual(response_versions[0], response_versions[1])
 
         await self.db.pool.execute("INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (20, '2', '9')")
         account = await self.db.account(20)

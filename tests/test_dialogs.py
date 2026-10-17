@@ -601,6 +601,116 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
     def button(self, text):
         return next(b for row in self.last().reply_markup.inline_keyboard for b in row if b.text == text)
 
+    async def test_game_opinions_change_privacy_and_clear_without_duplicate_votes(self):
+        client = self.client(FRIEND)
+        family = self.families.get(FAMILY)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01.*"))
+        self.assertIn("Not interested stays private", self.last().text)
+        self.assertIn("Steam name", self.last().text)
+        self.assertIn("Recommend: 0", self.last().text)
+        original = self.last()
+        with patch.object(self.families, "_fetch", AsyncMock(return_value=family.snapshot)):
+            await client.click(original, Btn("Recommend anonymously"))
+            await client.click(original, Btn("Recommend anonymously"))
+            self.assertIn("Recommend: 1", self.last().text)
+            named_card = self.last()
+            await client.click(self.last(), Btn("Recommend with my name"))
+            self.assertIn("steamcommunity.com/profiles/" + BOB, self.last().text)
+            await client.click(self.last(), Btn("Recommend anonymously"))
+            self.assertNotIn("steamcommunity.com/profiles/" + BOB, self.last().text)
+            await client.click(named_card, Btn("Recommend with my name"))
+            self.assertNotIn("steamcommunity.com/profiles/" + BOB, self.last().text)
+            await client.click(self.last(), Btn("Want to play together"))
+            self.assertIn("Recommend: 0", self.last().text)
+            self.assertIn("Want to play together: 1", self.last().text)
+            await client.click(self.last(), Btn("Not interested"))
+        self.assertIn("Your response: Not interested", self.last().text)
+        owner = self.client(OWNER)
+        await owner.send("/start")
+        await owner.click(self.last(), Btn("Family library"))
+        await owner.click(self.last(), Btn(r"Game 01.*"))
+        self.assertIn("Recommend: 0", self.last().text)
+        self.assertIn("Your response: None", self.last().text)
+        self.assertNotIn("Your response: Not interested", self.last().text)
+        # Clearing a private response must still work while Steam is down.
+        with patch.object(self.families, "_fetch", AsyncMock(side_effect=TimeoutError)):
+            await client.click(self.last(FRIEND), Btn("Clear my response"))
+        self.assertIn("Your response: None", self.last().text)
+
+    async def test_fresh_response_check_updates_missing_game_and_steam_failure_cannot_vote(self):
+        client = self.client(FRIEND)
+        family = self.families.get(FAMILY)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01.*"))
+        with patch.object(self.families, "_fetch", AsyncMock(side_effect=TimeoutError)):
+            await client.click(self.last(), Btn("Recommend with my name"))
+        self.assertEqual(await self.db.game_responses(await self.db.account(FRIEND)), [])
+        missing = {**family.snapshot, "apps": [a for a in family.apps if a["appid"] != 1]}
+        with patch.object(self.families, "_fetch", AsyncMock(return_value=missing)):
+            await client.click(self.last(), Btn("Recommend with my name"))
+        self.assertIn("no longer in the family library", self.last().text)
+        self.assertNotIn("Shareable copies:", self.last().text)
+        self.assertNotIn("Recommend with my name", self.buttons())
+        self.assertEqual(await self.db.game_responses(await self.db.account(FRIEND)), [])
+
+    async def test_recommended_filter_and_unavailable_game_keep_sharing_claims_honest(self):
+        client = self.client(FRIEND)
+        family = self.families.get(FAMILY)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 03.*"))
+        with patch.object(self.families, "_fetch", AsyncMock(return_value=family.snapshot)):
+            await client.click(self.last(), Btn("Recommend anonymously"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(".*Recommended only"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        await client.click(self.last(), Btn(r"Game 03.*"))
+        old_card = self.last()
+        family.snapshot["apps"] = [a for a in family.apps if a["appid"] != 3]
+        await client.click(old_card, Btn("Clear my response"))
+        self.assertIn("Game 03", self.last().text)
+        self.assertIn("no longer in the family library", self.last().text)
+        self.assertNotIn("Your access: family sharing", self.last().text)
+        self.assertNotIn("Shareable copies:", self.last().text)
+        self.assertNotIn("Recommend anonymously", self.buttons())
+        self.assertIn("store.steampowered.com/app/3/", self.last().text)
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>0</b>", self.last().text)
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("♻️ Reset filters"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>19</b>", self.last().text)
+
+    async def test_stale_opinion_buttons_cannot_restore_departed_or_deleted_votes(self):
+        client = self.client(FRIEND)
+        family = self.families.get(FAMILY)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01.*"))
+        old_card = self.last()
+        with patch.object(self.families, "_fetch", AsyncMock(return_value=family.snapshot)):
+            await client.click(old_card, Btn("Recommend with my name"))
+        await self.db.delete_account(FRIEND)
+        await self.db.save_account(FRIEND, BOB, FAMILY, "replacement")
+        await self.db.set_status(FRIEND, "approved")
+        with patch.object(self.families, "_fetch", AsyncMock(return_value=family.snapshot)):
+            await client.click(old_card, Btn("Recommend with my name"))
+        self.assertEqual(await self.db.game_responses(await self.db.account(FRIEND)), [])
+        await self.db.set_language(FRIEND, "en")
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01.*"))
+        old_card = self.last()
+        departed = {**family.snapshot, "members": [ALICE, CAROL]}
+        with patch.object(self.families, "_fetch", AsyncMock(return_value=departed)):
+            await client.click(old_card, Btn("Recommend with my name"))
+        self.assertEqual(await self.db.game_responses(await self.db.account(FRIEND)), [])
+
     async def test_library_pagination_search_filters_and_game(self):
         await self.db.set_publication(
             OWNER,

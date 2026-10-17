@@ -31,6 +31,8 @@ TEXTS = {
         "The encrypted Steam refresh token lets the bot check Steam and perform requested actions; "
         "the operator holds its decryption key. Your Steam password is not stored. Saved dialogs keep menus "
         "working after a restart.\n\n"
+        "Game responses support family counts and optional named recommendations; Not interested stays private. "
+        "Clear them on the game card. Logout, removal or loss of family access/session also deletes them.\n\n"
         "<b>Publication choices</b>\nSettings has separate permissions for your presence and Telegram identity, "
         "both off by default. Only you can enable them. Logout or loss of family access resets them. "
         "Already delivered messages cannot reliably be recalled.\n\n"
@@ -285,6 +287,27 @@ TEXTS = {
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "This game is no longer in the family library.",
+        "recommended_on": "✅ Recommended only",
+        "recommended_off": "⬜ Recommended only",
+        "recommended_filter": "👍 Recommended by the family",
+        "response_counts": "👍 Recommend: {recommend} · 🤝 Want to play together: {together}",
+        "response_named": "Recommended by: {names}",
+        "response_own": "Your response: {response}",
+        "response_none": "None",
+        "response_recommend": "Recommend anonymously",
+        "response_together": "Want to play together",
+        "response_named_recommend": "Recommend with my name",
+        "response_not_interested": "Not interested",
+        "response_privacy": "One response per game; choose another to change it, or clear it. "
+        "Your family sees recommendation and play-together totals. Not interested stays private. "
+        "Only ‘Recommend with my name’ shares your Steam name and profile; your Telegram link follows Settings. "
+        "This does not change your personal backlog. Already sent messages may keep earlier responses.",
+        "response_btn_r": "Recommend anonymously",
+        "response_btn_n": "Recommend with my name",
+        "response_btn_t": "Want to play together",
+        "response_btn_i": "Not interested",
+        "response_btn_c": "Clear my response",
+        "response_unavailable": "Could not verify this card, account or current family. Reopen the game and try again.",
         "price_unknown": "Price unknown",
         "multiplayer": "👥 Multiplayer",
         "singleplayer": "👤 Single-player",
@@ -391,6 +414,9 @@ TEXTS = {
         "Зашифрованный refresh token Steam позволяет проверять Steam и выполнять запрошенные действия; "
         "ключ расшифровки есть у оператора. Пароль Steam не хранится. Сохранённые диалоги восстанавливают "
         "меню после перезапуска.\n\n"
+        "Ответы об играх нужны для семейных счётчиков и рекомендаций с именем; «Не интересует» видите только вы. "
+        "Удалить ответ можно в карточке игры. Выход, удаление или потеря доступа "
+        "к семье/сеанса тоже удаляет ответы.\n\n"
         "<b>Разрешения на публикацию</b>\nВ настройках отдельно разрешается показ вашего присутствия и Telegram, "
         "оба выключены по умолчанию. Включить их можете только вы. Выход или потеря доступа к семье "
         "сбрасывает разрешения. Уже отправленные сообщения нельзя надёжно отозвать.\n\n"
@@ -648,6 +674,28 @@ TEXTS = {
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "Этой игры больше нет в библиотеке семьи.",
+        "recommended_on": "✅ Только рекомендованные",
+        "recommended_off": "⬜ Только рекомендованные",
+        "recommended_filter": "👍 Рекомендовано семьёй",
+        "response_counts": "👍 Рекомендуют: {recommend} · 🤝 Хотят играть вместе: {together}",
+        "response_named": "Рекомендуют: {names}",
+        "response_own": "Ваш ответ: {response}",
+        "response_none": "Нет",
+        "response_recommend": "Рекомендую анонимно",
+        "response_named_recommend": "Рекомендую с моим именем",
+        "response_together": "Хочу играть вместе",
+        "response_not_interested": "Не интересует",
+        "response_privacy": "Один ответ на игру: выберите другой, чтобы изменить его, или удалите. "
+        "Семья видит число рекомендаций и желающих играть вместе. «Не интересует» видите только вы. "
+        "Только «Рекомендовать с моим именем» показывает ваше имя и профиль Steam; "
+        "ссылка Telegram зависит от Настроек. "
+        "Это не меняет ваш личный список игр. Отправленные сообщения могут сохранять прежние ответы.",
+        "response_btn_r": "Рекомендовать анонимно",
+        "response_btn_n": "Рекомендовать с моим именем",
+        "response_btn_t": "Хочу играть вместе",
+        "response_btn_i": "Не интересует",
+        "response_btn_c": "Удалить мой ответ",
+        "response_unavailable": "Не удалось проверить карточку, аккаунт или текущую семью. Откройте игру заново.",
         "price_unknown": "Цена неизвестна",
         "multiplayer": "👥 Мультиплеер",
         "singleplayer": "👤 Одиночная",
