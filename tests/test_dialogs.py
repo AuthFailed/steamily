@@ -680,6 +680,113 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await owner.click(self.last(), Btn("Family library"))
         self.assertIn("Game 01 · $1.00", self.buttons())
 
+    async def test_maximum_price_accepts_decimals_and_resets_filters(self):
+        store = self.families.stores["US"]["apps"]
+        store["1"].update(price=0, price_text="Free")
+        store["2"].update(price=None, price_text=None)
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("»"))
+        await client.click(self.last(), Btn("Filters"))
+        self.assertIn("Unknown prices", self.last().text)
+        await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+        self.assertIn("maximum price in $", self.last().text)
+        for invalid in ("-1", "1.001", "$5", "NaN"):
+            await client.send(invalid)
+            self.assertIn("Enter a non-negative amount", self.last().text)
+        await client.send("5,00")
+        self.assertIn("• Up to 5.00 $", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>4</b>", self.last().text)
+        self.assertIn("Up to 5.00 $", self.last().text)
+        self.assertIn("Game 05 · $5.00", self.buttons())
+        self.assertNotIn("Game 02", " ".join(self.buttons()))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Free"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        self.assertIn("Game 01 · Free", self.buttons())
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Any price"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>20</b>", self.last().text)
+        self.assertIn("1 / 4", self.buttons())
+        self.assertNotIn("Up to", self.last().text)
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+        await client.send("0")
+        await client.click(self.last(), Btn("♻️ Reset filters"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>20</b>", self.last().text)
+
+    async def test_maximum_price_uses_kzt_units_and_can_be_cancelled(self):
+        await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
+        self.families.stores["KZ"] = {
+            "apps": {
+                "1": {"price": 100050, "price_text": "1 000,50₸"},
+                "2": {"price": 100051, "price_text": "1 000,51₸"},
+            }
+        }
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(r"Maximum price \(₸\)"))
+        self.assertIn("maximum price in ₸", self.last().text)
+        await client.send("1000.50")
+        self.assertIn("• Up to 1000.50 ₸", self.buttons())
+        await client.click(self.last(), Btn(".*Up to 1000.50 ₸"))
+        await client.send("-100")
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Up to 1000.50 ₸", self.last().text)
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        self.assertIn("Game 01 · 1 000,50₸", self.buttons())
+
+    async def test_budget_is_unavailable_without_local_currency_data(self):
+        await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        self.assertNotIn("$", " ".join(self.buttons()))
+        await client.click(self.last(), Btn("Filters"))
+        self.assertNotIn("Maximum price", " ".join(self.buttons()))
+        self.assertIn("Local currency is unavailable", self.last().text)
+        await client.click(self.last(), Btn("Free"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>0</b>", self.last().text)
+
+    async def test_budget_is_reset_when_the_viewers_store_country_changes(self):
+        client = self.client(FRIEND)
+        for country, price_text in (("KZ", "500₸"), ("CA", "$500.00")):
+            with self.subTest(country=country):
+                await self.db.pool.execute("UPDATE accounts SET country = NULL WHERE telegram_id = $1", FRIEND)
+                await client.send("/start")
+                await client.click(self.last(), Btn("Family library"))
+                await client.click(self.last(), Btn("Filters"))
+                await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+                await client.send("5")
+                self.families.stores[country] = {"apps": {"1": {"price": 50000, "price_text": price_text}}}
+                await self.db.pool.execute("UPDATE accounts SET country = $1 WHERE telegram_id = $2", country, FRIEND)
+                await client.click(self.last(), Btn("◀️ Back"))
+                self.assertIn("Games: <b>20</b>", self.last().text)
+                self.assertIn("Store region changed", self.last().text)
+                self.assertNotIn("Up to", self.last().text)
+
+    async def test_budget_input_is_not_reinterpreted_after_a_country_change(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+        self.families.stores["KZ"] = {"apps": {"1": {"price": 50000, "price_text": "500₸"}}}
+        await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
+        await client.send("5")
+        self.assertIn("Store region changed", self.last().text)
+        self.assertIn("• Any price", self.buttons())
+        self.assertIn("Maximum price (₸)", self.buttons())
+
     async def test_play_together_lives_in_filters(self):
         client = self.client(FRIEND)
         await client.send("/start")
