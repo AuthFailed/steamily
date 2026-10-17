@@ -142,7 +142,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
                     "price": i * 100,
                     "price_text": f"${i}.00",
                     "tags": [19] if i % 2 else [],
-                    "multiplayer": i % 3 == 0,
+                    "play_mode": "multiplayer" if i % 3 == 0 else "singleplayer",
                 }
                 for i in range(1, 21)
             },
@@ -680,6 +680,113 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await owner.click(self.last(), Btn("Family library"))
         self.assertIn("Game 01 · $1.00", self.buttons())
 
+    async def test_maximum_price_accepts_decimals_and_resets_filters(self):
+        store = self.families.stores["US"]["apps"]
+        store["1"].update(price=0, price_text="Free")
+        store["2"].update(price=None, price_text=None)
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("»"))
+        await client.click(self.last(), Btn("Filters"))
+        self.assertIn("Unknown prices", self.last().text)
+        await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+        self.assertIn("maximum price in $", self.last().text)
+        for invalid in ("-1", "1.001", "$5", "NaN"):
+            await client.send(invalid)
+            self.assertIn("Enter a non-negative amount", self.last().text)
+        await client.send("5,00")
+        self.assertIn("• Up to 5.00 $", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>4</b>", self.last().text)
+        self.assertIn("Up to 5.00 $", self.last().text)
+        self.assertIn("Game 05 · $5.00", self.buttons())
+        self.assertNotIn("Game 02", " ".join(self.buttons()))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Free"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        self.assertIn("Game 01 · Free", self.buttons())
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Any price"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>20</b>", self.last().text)
+        self.assertIn("1 / 4", self.buttons())
+        self.assertNotIn("Up to", self.last().text)
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+        await client.send("0")
+        await client.click(self.last(), Btn("♻️ Reset filters"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>20</b>", self.last().text)
+
+    async def test_maximum_price_uses_kzt_units_and_can_be_cancelled(self):
+        await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
+        self.families.stores["KZ"] = {
+            "apps": {
+                "1": {"price": 100050, "price_text": "1 000,50₸"},
+                "2": {"price": 100051, "price_text": "1 000,51₸"},
+            }
+        }
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(r"Maximum price \(₸\)"))
+        self.assertIn("maximum price in ₸", self.last().text)
+        await client.send("1000.50")
+        self.assertIn("• Up to 1000.50 ₸", self.buttons())
+        await client.click(self.last(), Btn(".*Up to 1000.50 ₸"))
+        await client.send("-100")
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Up to 1000.50 ₸", self.last().text)
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        self.assertIn("Game 01 · 1 000,50₸", self.buttons())
+
+    async def test_budget_is_unavailable_without_local_currency_data(self):
+        await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        self.assertNotIn("$", " ".join(self.buttons()))
+        await client.click(self.last(), Btn("Filters"))
+        self.assertNotIn("Maximum price", " ".join(self.buttons()))
+        self.assertIn("Local currency is unavailable", self.last().text)
+        await client.click(self.last(), Btn("Free"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>0</b>", self.last().text)
+
+    async def test_budget_is_reset_when_the_viewers_store_country_changes(self):
+        client = self.client(FRIEND)
+        for country, price_text in (("KZ", "500₸"), ("CA", "$500.00")):
+            with self.subTest(country=country):
+                await self.db.pool.execute("UPDATE accounts SET country = NULL WHERE telegram_id = $1", FRIEND)
+                await client.send("/start")
+                await client.click(self.last(), Btn("Family library"))
+                await client.click(self.last(), Btn("Filters"))
+                await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+                await client.send("5")
+                self.families.stores[country] = {"apps": {"1": {"price": 50000, "price_text": price_text}}}
+                await self.db.pool.execute("UPDATE accounts SET country = $1 WHERE telegram_id = $2", country, FRIEND)
+                await client.click(self.last(), Btn("◀️ Back"))
+                self.assertIn("Games: <b>20</b>", self.last().text)
+                self.assertIn("Store region changed", self.last().text)
+                self.assertNotIn("Up to", self.last().text)
+
+    async def test_budget_input_is_not_reinterpreted_after_a_country_change(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+        self.families.stores["KZ"] = {"apps": {"1": {"price": 50000, "price_text": "500₸"}}}
+        await self.db.pool.execute("UPDATE accounts SET country = 'KZ' WHERE telegram_id = $1", FRIEND)
+        await client.send("5")
+        self.assertIn("Store region changed", self.last().text)
+        self.assertIn("• Any price", self.buttons())
+        self.assertIn("Maximum price (₸)", self.buttons())
+
     async def test_play_together_lives_in_filters(self):
         client = self.client(FRIEND)
         await client.send("/start")
@@ -965,6 +1072,183 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         ):
             await client.click(card, Btn("🛒 Purchase requests"))
         requests.assert_not_awaited()
+        self.families.owner_token.assert_not_awaited()
+        self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
+        self.assertIn("Family library", self.buttons())
+
+    async def test_purchase_request_details_and_confirmation_keep_the_selected_request(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        requests = [
+            {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1},
+            {
+                "request_id": "102",
+                "requester_steamid": CAROL,
+                "time_requested": 2,
+                "requested_packageids": [10, 20],
+                "requested_bundleids": [30],
+                "gidshoppingcart": "404",
+            },
+        ]
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=requests)),
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            self.assertIn("Carol · 01.01.1970 · #101", self.buttons())
+            self.assertIn("Carol · 01.01.1970 · #102", self.buttons())
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #102"))
+            self.assertIn("Purchase request", self.last().text)
+            self.assertIn("Carol", self.last().text)
+            self.assertIn("01.01.1970", self.last().text)
+            self.assertIn("102", self.last().text)
+            self.assertIn("Package #10", self.last().text)
+            self.assertIn("Package #20", self.last().text)
+            self.assertIn("Bundle #30", self.last().text)
+            self.assertIn("Cart: 404", self.last().text)
+            steam_link = next(
+                button
+                for row in self.last().reply_markup.inline_keyboard
+                for button in row
+                if button.text == "Open in Steam"
+            )
+            self.assertEqual(steam_link.url, "https://store.steampowered.com/cart/purchaserequest/9/102")
+            decline.assert_not_awaited()
+            await client.click(self.last(), Btn("Decline request"))
+            self.assertIn("Decline purchase request #102?", self.last().text)
+            self.assertIn("102", self.last().text)
+            decline.assert_not_awaited()
+            await client.click(self.last(), Btn("◀️ Back"))
+            decline.assert_not_awaited()
+            self.assertIn("Purchase request", self.last().text)
+            await client.click(self.last(), Btn("Decline request"))
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_awaited_once_with(None, "token", FAMILY, "102")
+        self.assertIn("✅ Done", self.last().text)
+
+    async def test_purchase_request_without_item_details_is_explicit_and_safe_to_leave(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=[request])),
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            self.assertIn("Item names and prices are incomplete", self.last().text)
+            self.assertIn("Carol", self.last().text)
+            self.assertIn("101", self.last().text)
+            await client.click(self.last(), Btn("◀️ Back"))
+            self.assertIn("Carol · 01.01.1970 · #101", self.buttons())
+        decline.assert_not_awaited()
+
+    async def test_old_purchase_confirmation_cannot_decline_another_selected_request(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        requests = [
+            {"request_id": request_id, "requester_steamid": CAROL, "time_requested": 1} for request_id in ("101", "102")
+        ]
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=requests)),
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            old_confirmation = self.last()
+            await client.click(self.last(), Btn("◀️ Back"))
+            await client.click(self.last(), Btn("◀️ Back"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #102"))
+            await client.click(self.last(), Btn("Decline request"))
+            await client.click(old_confirmation, Btn("Yes, decline"))
+            decline.assert_not_awaited()
+            self.assertIn("Decline purchase request #102?", self.last().text)
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_awaited_once_with(None, "token", FAMILY, "102")
+
+    async def test_purchase_confirmation_rechecks_that_request_is_pending(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        for latest in ([], [{**request, "is_completed": True}]):
+            with (
+                self.subTest(latest=latest),
+                patch("bot.steam.get_json", AsyncMock(return_value={"response": {"requests": [request]}})) as requests,
+                patch("bot.steam.post_json", AsyncMock()) as decline,
+            ):
+                await self.open_bot_members(client)
+                await client.click(self.last(), Btn("🛒 Purchase requests"))
+                await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+                await client.click(self.last(), Btn("Decline request"))
+                requests.reset_mock()
+                requests.return_value = {"response": {"requests": latest}}
+                await client.click(self.last(), Btn("Yes, decline"))
+                requests.assert_awaited()
+                decline.assert_not_awaited()
+                self.assertIn("no longer open", self.last().text)
+                self.assertNotIn("✅ Done", self.last().text)
+
+    async def test_purchase_confirmation_read_failure_never_declines(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.steam.get_json", AsyncMock(return_value={"response": {"requests": [request]}})) as requests,
+            patch("bot.steam.post_json", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            requests.side_effect = RuntimeError("Steam unavailable")
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_not_awaited()
+        self.assertRegex(self.last().text, r"(?i)could not|failed|unavailable|Steam refused")
+        self.assertNotIn("✅ Done", self.last().text)
+
+    async def test_purchase_decline_error_never_shows_success(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=[request])),
+            patch(
+                "bot.dialogs.family.decline_purchase", AsyncMock(side_effect=SteamActionError("Request refused"))
+            ) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            await client.click(self.last(), Btn("Yes, decline"))
+        decline.assert_awaited_once_with(None, "token", FAMILY, "101")
+        self.assertIn("❌ Steam refused: Request refused", self.last().text)
+        self.assertNotIn("✅ Done", self.last().text)
+
+    async def test_purchase_confirmation_denies_owner_revocation_before_steam_lookup(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        request = {"request_id": "101", "requester_steamid": CAROL, "time_requested": 1}
+        client = self.client(OWNER)
+        with (
+            patch("bot.dialogs.family.purchase_requests", AsyncMock(return_value=[request])) as requests,
+            patch("bot.dialogs.family.decline_purchase", AsyncMock()) as decline,
+        ):
+            await self.open_bot_members(client)
+            await client.click(self.last(), Btn("🛒 Purchase requests"))
+            await client.click(self.last(), Btn("Carol · 01.01.1970 · #101"))
+            await client.click(self.last(), Btn("Decline request"))
+            card = self.last()
+            requests.reset_mock()
+            self.families.owner_token.reset_mock()
+            await self.families.make_owner(FAMILY, FRIEND)
+            with patch.object(CallbackQuery, "answer", AsyncMock()) as answer:
+                await client.click(card, Btn("Yes, decline"))
+        requests.assert_not_awaited()
+        decline.assert_not_awaited()
         self.families.owner_token.assert_not_awaited()
         self.assertTrue(any(call.args and call.args[0] for call in answer.await_args_list))
         self.assertIn("Family library", self.buttons())

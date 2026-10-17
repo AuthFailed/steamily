@@ -20,6 +20,7 @@ class Games(StatesGroup):
     pages = State()
     sort = State()
     filters = State()
+    budget = State()
     genre = State()
     players = State()
     game = State()
@@ -43,3 +44,5 @@ class FamilyView(StatesGroup):
     invites = State()
     rename = State()
     purchases = State()
+    purchase = State()
+    decline_purchase = State()

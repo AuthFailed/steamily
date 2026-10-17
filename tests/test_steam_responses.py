@@ -7,7 +7,16 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from bot.steam import fetch_family_snapshot, parse_players, parse_snapshot, parse_store_item, store_cards
+from bot.steam import (
+    SteamActionError,
+    decline_purchase,
+    fetch_family_snapshot,
+    parse_players,
+    parse_snapshot,
+    parse_store_item,
+    store_cards,
+    update_store_cache,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures/steam"
 ALICE, BOB, CHARLIE = (f"7656119800000000{i}" for i in (1, 2, 3))
@@ -81,14 +90,15 @@ class SteamResponseParsingTest(unittest.TestCase):
                     "price": 1234,
                     "price_text": "$12.34",
                     "tags": [2, 4, 6, 3, 5],
-                    "multiplayer": True,
+                    "play_mode": "multiplayer",
                 },
             )
             self.assertEqual(parse_store_item(free)["price"], 0)
             self.assertEqual(parse_store_item(free)["price_text"], "Free")
-            self.assertFalse(parse_store_item(free)["multiplayer"])
+            self.assertEqual(parse_store_item(free)["play_mode"], "singleplayer")
             self.assertIsNone(parse_store_item(unavailable)["price"])
             self.assertEqual(parse_store_item(unavailable)["tags"], [])
+            self.assertIsNone(parse_store_item(unavailable)["play_mode"])
 
 
 class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
@@ -99,6 +109,7 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
             "IPlayerService/GetPlayerLinkDetails/v1": fixture("players"),
             "IFamilyGroupsService/GetPlaytimeSummary/v1": fixture("playtime"),
             "IStoreBrowseService/GetItems/v1": fixture("store"),
+            "IStoreService/GetTagList/v1": {"response": {"tags": [{"tagid": 19, "name": "Action"}]}},
         }
         self.failures = {}
         self.requests = []
@@ -123,6 +134,31 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
         api_patch = patch("bot.steam.API", str(server.make_url("")).rstrip("/"))
         api_patch.start()
         self.addCleanup(api_patch.stop)
+
+    async def test_decline_rechecks_the_exact_pending_request_before_posting(self):
+        method = "IFamilyGroupsService/GetPurchaseRequests/v1"
+        action = "IFamilyGroupsService/RespondToRequestedPurchase/v1"
+        self.responses[action] = {"response": {}}
+        for requests in ([], [{"request_id": "102", "is_completed": True}], [{"request_id": "101"}]):
+            with self.subTest(requests=requests):
+                self.requests.clear()
+                self.responses[method] = {"response": {"requests": requests}}
+                with self.assertRaises(SteamActionError):
+                    await decline_purchase(self.http, "fixture-access", "42", "102")
+                self.assertEqual([verb for verb, _, _ in self.requests], ["GET"])
+
+        self.responses[method] = {"response": {"requests": [{"request_id": "101"}, {"request_id": "102"}]}}
+        self.requests.clear()
+        await decline_purchase(self.http, "fixture-access", "42", "102")
+        self.assertEqual([verb for verb, _, _ in self.requests], ["GET", "POST"])
+        self.assertEqual(
+            self.requests[-1],
+            (
+                "POST",
+                action,
+                {"access_token": "fixture-access", "family_groupid": "42", "request_id": "102", "action": "1"},
+            ),
+        )
 
     async def test_snapshot_fetches_json_endpoints_and_post_only_playtime_summary(self):
         snapshot = await fetch_family_snapshot(self.http, "fixture-access")
@@ -245,6 +281,31 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
                 "data_request": {"include_basic_info": True, "include_assets": True},
             },
         )
+
+    async def test_store_cache_keeps_unavailable_and_missing_play_modes_unknown(self):
+        cache = {}
+        with patch("bot.steam.time.time", return_value=2_000_000_000.0):
+            self.assertTrue(await update_store_cache(self.http, cache, [30, 50], "US"))
+            for appid in ("30", "50"):
+                self.assertIsNone(cache["apps"][appid]["play_mode"])
+            self.assertFalse(await update_store_cache(self.http, cache, [30, 50], "US"))
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_store_cache_refreshes_recent_legacy_false_play_modes_once(self):
+        cache = {
+            "tag_names": {"19": "Action"},
+            "apps": {
+                "10": {"fetched": 2_000_000_000.0, "play_mode": "multiplayer"},
+                "20": {"fetched": 2_000_000_000.0, "multiplayer": False},
+                "30": {"fetched": 2_000_000_000.0, "play_mode": None},
+            },
+        }
+        with patch("bot.steam.time.time", return_value=2_000_000_001.0):
+            self.assertTrue(await update_store_cache(self.http, cache, [10, 20, 30], "US"))
+            self.assertEqual(cache["apps"]["20"]["play_mode"], "singleplayer")
+            self.assertFalse(await update_store_cache(self.http, cache, [10, 20, 30], "US"))
+        self.assertEqual(json.loads(self.requests[0][2]["input_json"])["ids"], [{"appid": 20}])
+        self.assertEqual(len(self.requests), 2)
 
 
 if __name__ == "__main__":

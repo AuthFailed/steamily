@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from matplotlib.colors import to_rgba
 from PIL import Image
 
 from bot import charts
@@ -25,6 +26,37 @@ class ChartTest(unittest.TestCase):
             image.load()  # decode the full file, not just the PNG header
             for low, high in image.convert("RGB").getextrema():
                 self.assertGreater(high - low, 100)  # visible plot/text against the dark background
+
+    def test_horizontal_bars_keep_rows_separate_when_display_labels_repeat(self):
+        prefix = "A" * 31
+        cases = [
+            ("members", [("Alice", 10), ("Alice", 4)], ["Alice", "Alice"], [4, 10], ["4 h", "10 h"]),
+            (
+                "games",
+                [(prefix + " first game", 10), (prefix + " second game", 4)],
+                [prefix + "…", prefix + "…"],
+                [4, 10],
+                ["4 h", "10 h"],
+            ),
+            ("empty", [], ["—"], [0], ["0 h"]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for title, items, labels, values, annotations in cases:
+                with self.subTest(chart=title), patch.object(charts, "_save", wraps=charts._save) as save:
+                    path = charts.bars(title, items, " h", directory=Path(directory))
+                    self.assert_png(path)
+                    axes = save.call_args.args[0].axes[0]
+                    bars = axes.containers[0].patches
+                    positions = list(range(len(values)))
+                    self.assertEqual([bar.get_y() + bar.get_height() / 2 for bar in bars], positions)
+                    self.assertEqual([bar.get_width() for bar in bars], values)
+                    self.assertEqual(list(axes.get_yticks()), positions)
+                    self.assertEqual([label.get_text() for label in axes.get_yticklabels()], labels)
+                    self.assertEqual([text.get_text() for text in axes.texts], annotations)
+                    self.assertEqual(
+                        [bar.get_facecolor() for bar in bars],
+                        [to_rgba(color) for color in charts.COLORS[: len(values)][::-1]],
+                    )
 
     def test_all_stats_render_empty_and_large_libraries(self):
         now = datetime(2026, 10, 16, tzinfo=UTC).timestamp()

@@ -1,8 +1,8 @@
 # Steam response fixtures
 
-These are **synthetic wire-shape examples**, not recorded Steam responses. They
-were authored from the fields consumed by `bot/steam.py`, `bot/steam_auth.py`, and
-`bot/steam_browser.py`.
+Except for `shared_library_recorded.json`, these are **synthetic wire-shape
+examples**, not recorded Steam responses. They were authored from the fields
+consumed by `bot/steam.py`, `bot/steam_auth.py`, and `bot/steam_browser.py`.
 No account, session, QR code, refresh token, or access token is real. The JWT-shaped
 access token contains only a test expiry and has no valid signature.
 
@@ -16,8 +16,9 @@ The JSON examples cover family membership, library ownership, player links and
 presence, playtime, and store items, including optional or missing fields. Tests
 use a local HTTP server and never contact Steam.
 
-Issue #8 also calls for sanitized recordings from Steam. None were supplied or
-present in the repository when these examples were added; these fixtures do not
-claim that part of the acceptance criteria is complete. Replace or supplement
-them with reviewed, sanitized captures when available, preserving the boundary
-cases in the synthetic samples.
+`shared_library_recorded.json` adds sanitized library rows captured from Steam
+for issue #12, along with an explicitly derived missing-metadata variant; see
+[provenance and sanitization details](../README.md#recorded-steam-response).
+The authentication, membership, player, playtime, and store examples remain
+synthetic, so this library recording does not complete the broader recorded
+response coverage requested by issue #8.
