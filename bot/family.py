@@ -510,7 +510,11 @@ class Families:
                         )
             state["observed"] = {
                 "members": snapshot["members"],
-                "apps": [{"appid": app["appid"], "name": app["name"]} for app in snapshot["apps"]],
+                "names": snapshot["names"],
+                "apps": [
+                    {key: app[key] for key in ("appid", "name", "owners", "exclude_reason") if key in app}
+                    for app in snapshot["apps"]
+                ],
             }
             await self.db.observe_family(family_id, state, snapshot["name"], pending)
             if self.items.get(family_id) is not family:
