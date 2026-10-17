@@ -11,6 +11,11 @@ your response on the card, and use **Filters → Recommended only** to find fami
 recommendations. Responses are separate from personal backlog status and disappear
 when the member loses access or deletes their account.
 
+Open **Family → Slots and cooldowns** for occupied, invited/reserved and empty
+places, the reported invitation cooldown, and each member's explicit restriction
+on joining another family. Dates include UTC and the last successful update;
+missing dates stay unknown. The view does not change membership or set reminders.
+
 ## Create the Telegram bot
 
 Open [@BotFather](https://t.me/BotFather), run `/newbot`, and keep its token private.
