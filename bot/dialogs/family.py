@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Data, Dialog, DialogManager, Window
 from aiogram_dialog.api.entities import MediaAttachment
 from aiogram_dialog.widgets.input import TextInput
-from aiogram_dialog.widgets.kbd import Button, Cancel, Group, Row, ScrollingGroup, Select, Start, SwitchTo
+from aiogram_dialog.widgets.kbd import Button, Cancel, Group, Row, ScrollingGroup, Select, Start, SwitchTo, Url
 from aiogram_dialog.widgets.link_preview import LinkPreview
 from aiogram_dialog.widgets.media import DynamicMedia
 from aiogram_dialog.widgets.text import Format
@@ -22,6 +22,7 @@ from ..family import Families, Family, accounts_by_steam, person_link, publicati
 from ..i18n import Tr, t
 from ..states import Admin, FamilyView, Games
 from ..steam import (
+    PurchaseRequestUnavailable,
     SteamActionError,
     cancel_invite,
     decline_purchase,
@@ -221,6 +222,8 @@ async def act(manager: DialogManager, action, *args) -> None:
     except TokenRejected:
         await families._reject_token(account)
         manager.dialog_data["notice"] = t(lang, "relogin")
+    except PurchaseRequestUnavailable:
+        manager.dialog_data["notice"] = t(lang, "purchase_unavailable")
     except SteamActionError as error:
         manager.dialog_data["notice"] = t(lang, "action_failed", error=escape(str(error)))
     except Exception as error:
@@ -296,25 +299,70 @@ async def on_rename(message: Message, widget, manager: DialogManager, name: str)
 async def purchases_getter(dialog_manager: DialogManager, family: Family, families: Families, account, **kwargs):
     account = await current_owner(dialog_manager)
     if account is None:
-        return {"requests": [], "denied": True}
+        return {"requests": [], "purchases": [], "denied": True, "purchase_error": ""}
+    error_text = ""
+    lang = dialog_manager.middleware_data["lang"]
     try:
         requests = await purchase_requests(families.http, await families.owner_token(account), family.family_id)
     except TokenRejected:
         await families._reject_token(account)
         requests = []
+        error_text = t(lang, "relogin")
     except Exception as error:
         log.warning("Could not load purchase requests (%s)", type(error).__name__)
         requests = []
+        error_text = t(lang, "purchases_failed")
+    requests = [r for r in requests if not r.get("is_completed")]
     return {
         "denied": False,
+        "purchase_error": error_text,
+        "purchases": requests,
         "requests": [
-            (str(r["request_id"]), f"❌ {family.name(str(r['requester_steamid']))} · {date(r.get('time_requested'))}")
+            (
+                str(r["request_id"]),
+                f"{family.name(str(r['requester_steamid']))} · {date(r.get('time_requested'))} · #{r['request_id']}",
+            )
             for r in requests
         ],
     }
 
 
+async def on_request(callback: CallbackQuery, widget, manager: DialogManager, request_id: str):
+    manager.dialog_data["request_id"] = request_id
+    await manager.switch_to(FamilyView.purchase)
+
+
+async def purchase_getter(dialog_manager: DialogManager, family: Family, families: Families, account, lang, **kwargs):
+    data = await purchases_getter(dialog_manager, family, families, account)
+    request_id = dialog_manager.dialog_data["request_id"]
+    request = next((r for r in data["purchases"] if str(r["request_id"]) == request_id), None)
+    data.update(
+        request_id=escape(request_id), available=request is not None, confirmation=[request_id] if request else []
+    )
+    if request:
+        items = []
+        for field, path, key in (
+            ("requested_packageids", "sub", "purchase_package"),
+            ("requested_bundleids", "bundle", "purchase_bundle"),
+        ):
+            for item_id in request.get(field, []):
+                item_id = int(item_id)
+                items.append(
+                    f'<a href="https://store.steampowered.com/{path}/{item_id}/">{t(lang, key)} #{item_id}</a>'
+                )
+        data.update(
+            requester=escape(family.name(str(request["requester_steamid"]))),
+            requested=date(request.get("time_requested")),
+            cart=escape(str(request.get("gidshoppingcart") or "—")),
+            items="\n".join(items) or "—",
+            steam_url=f"https://store.steampowered.com/cart/purchaserequest/{int(family.family_id)}/{int(request_id)}",
+        )
+    return data
+
+
 async def on_decline(callback: CallbackQuery, widget, manager: DialogManager, request_id: str):
+    if request_id != manager.dialog_data.get("request_id"):
+        return
     await act(manager, decline_purchase, request_id)
 
 
@@ -456,16 +504,54 @@ family_dialog = Dialog(
     Window(
         Header("admin", "purchases"),
         Tr("owner_action_denied", when="denied"),
-        Tr("purchases_empty", when=~F["requests"] & ~F["denied"]),
+        Format("{purchase_error}", when="purchase_error"),
+        Tr("purchases_empty", when=~F["requests"] & ~F["denied"] & ~F["purchase_error"]),
         Group(
             Select(
-                Format("{item[1]}"), id="request", item_id_getter=lambda r: r[0], items="requests", on_click=on_decline
+                Format("{item[1]}"), id="request", item_id_getter=lambda r: r[0], items="requests", on_click=on_request
             ),
             width=1,
         ),
         back_to(FamilyView.manage, "back_manage", when=~F["denied"]),
         getter=purchases_getter,
         state=FamilyView.purchases,
+    ),
+    Window(
+        Header("admin", "purchase"),
+        Tr("owner_action_denied", when="denied"),
+        Format("{purchase_error}", when="purchase_error"),
+        Tr("purchase_unavailable", when=~F["available"] & ~F["denied"] & ~F["purchase_error"]),
+        Tr("purchase_details", when="available"),
+        NO_PREVIEW,
+        Url(Tr("btn_purchase_steam"), Format("{steam_url}"), id="purchase_steam", when="available"),
+        SwitchTo(
+            Tr("btn_decline_purchase"),
+            id="decline",
+            state=FamilyView.decline_purchase,
+            when="available",
+            style=look(color=RED),
+        ),
+        back_to(FamilyView.purchases, "back_purchases", when=~F["denied"]),
+        getter=purchase_getter,
+        state=FamilyView.purchase,
+    ),
+    Window(
+        Header("admin", "decline_purchase"),
+        Tr("owner_action_denied", when="denied"),
+        Format("{purchase_error}", when="purchase_error"),
+        Tr("purchase_unavailable", when=~F["available"] & ~F["denied"] & ~F["purchase_error"]),
+        Tr("purchase_details", when="available"),
+        NO_PREVIEW,
+        Select(
+            Tr("btn_decline_purchase_yes"),
+            id="decline_yes",
+            item_id_getter=lambda request_id: request_id,
+            items="confirmation",
+            on_click=on_decline,
+        ),
+        back_to(FamilyView.purchase, "back_purchase", when=~F["denied"]),
+        getter=purchase_getter,
+        state=FamilyView.decline_purchase,
     ),
     on_start=on_start,
 )

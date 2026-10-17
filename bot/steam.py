@@ -103,6 +103,10 @@ class SteamActionError(RuntimeError):
     pass
 
 
+class PurchaseRequestUnavailable(SteamActionError):
+    pass
+
+
 # Changes to the Steam family itself. They run on the acting user's own Steam account.
 async def invite_member(http, access_token: str, family_id: str, steam_id: str, role: int) -> dict:
     return await post_json(
@@ -149,6 +153,9 @@ async def purchase_requests(http, access_token: str, family_id: str) -> list[dic
 
 
 async def decline_purchase(http, access_token: str, family_id: str, request_id: str) -> None:
+    requests = await purchase_requests(http, access_token, family_id)
+    if not any(str(request["request_id"]) == request_id for request in requests):
+        raise PurchaseRequestUnavailable("This purchase request is no longer open")
     await post_json(
         http,
         "IFamilyGroupsService/RespondToRequestedPurchase/v1",
