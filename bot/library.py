@@ -70,7 +70,7 @@ def query(
             continue
         if tag and int(tag) not in info.get("tags", []):
             continue
-        if multiplayer and not info.get("multiplayer"):
+        if multiplayer and info.get("play_mode") != "multiplayer":
             continue
         if len(app["owners"]) < len(players):
             continue

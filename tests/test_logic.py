@@ -63,9 +63,9 @@ class ReconcileTest(unittest.TestCase):
 STORE = {
     "tag_names": {"19": "Action", "1685": "Co-op"},
     "apps": {
-        "1": {"price": 0, "tags": [19], "multiplayer": True},
-        "2": {"price": 1999, "tags": [19, 1685], "multiplayer": True},
-        "3": {"price": 299, "tags": [], "multiplayer": False},
+        "1": {"price": 0, "tags": [19], "play_mode": "multiplayer"},
+        "2": {"price": 1999, "tags": [19, 1685], "play_mode": "multiplayer"},
+        "3": {"price": 299, "tags": [], "play_mode": "singleplayer"},
     },
 }
 APPS = [
@@ -90,6 +90,13 @@ class QueryTest(unittest.TestCase):
         self.assertEqual(names(query(APPS, STORE, price="lt5")), ["Gamma"])
         self.assertEqual(names(query(APPS, STORE, price="5to20")), ["Beta Co-op"])
         self.assertEqual(names(query(APPS, STORE, multiplayer=True)), ["Alpha Strike", "Beta Co-op"])
+
+    def test_unknown_play_modes_are_included_unless_multiplayer_is_required(self):
+        apps = APPS + [app(5, "Unknown", ["a"])]
+        store = {"apps": {**STORE["apps"], "5": {"play_mode": None}}}
+
+        self.assertEqual(names(query(apps, store)), ["Alpha Strike", "Beta Co-op", "Delisted", "Gamma", "Unknown"])
+        self.assertEqual(names(query(apps, store, multiplayer=True)), ["Alpha Strike", "Beta Co-op"])
 
     def test_players_need_enough_copies(self):
         self.assertEqual(names(query(APPS, STORE, players=["a", "b"])), ["Beta Co-op", "Delisted"])
@@ -154,10 +161,28 @@ class SteamParsingTest(unittest.TestCase):
         }
         info = parse_store_item(item)
         self.assertEqual(
-            (info["price"], info["price_text"], info["tags"], info["multiplayer"]), (999, "$9.99", [2, 1], True)
+            (info["price"], info["price_text"], info["tags"], info["play_mode"]),
+            (999, "$9.99", [2, 1], "multiplayer"),
         )
         self.assertEqual(parse_store_item({"is_free": True})["price"], 0)
         self.assertIsNone(parse_store_item({})["price"])
+
+    def test_play_mode_requires_supported_player_categories(self):
+        for categories, expected in (
+            ([1], "multiplayer"),
+            ([9], "multiplayer"),
+            ([2, 9], "multiplayer"),
+            ([2], "singleplayer"),
+            ([], None),
+            ([999], None),
+        ):
+            with self.subTest(categories=categories):
+                item = {"categories": {"supported_player_categoryids": categories}}
+                self.assertEqual(parse_store_item(item)["play_mode"], expected)
+
+        for item in ({}, {"categories": {}}, {"categories": {"feature_categoryids": [2]}}):
+            with self.subTest(item=item):
+                self.assertIsNone(parse_store_item(item)["play_mode"])
 
 
 class SteamFetchTest(unittest.IsolatedAsyncioTestCase):

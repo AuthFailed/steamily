@@ -154,7 +154,7 @@ async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: s
     lines = [
         f"💲 {escape(info.get('price_text') or t(lang, 'price_unknown'))}",
         f"🏷 {escape(tags)}" if tags else None,
-        t(lang, "multiplayer" if info.get("multiplayer") else "singleplayer"),
+        t(lang, info.get("play_mode") or "mode_unknown"),
         t(lang, "copies_line", n=len(game["owners"]), owners=owners),
         t(lang, "shareable_copies_line", n=shareable),
         t(lang, "access_" + access),
