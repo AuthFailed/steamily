@@ -61,6 +61,7 @@ Send `/privacy` for the in-bot summary. The application stores the following:
 | Telegram user ID, username and display name; linked SteamID, family ID, registration time and approval status | Identify the linked account, control access, and show Telegram profile links when the member permits publication | Until logout or administrative removal |
 | Encrypted Steam refresh token, token renewal time, temporary access token | Authenticate Steam checks and requested family actions | Until logout or administrative removal; the persisted refresh token is also cleared if Steam rejects it |
 | Language, notification and publication preferences, publication version and Steam store country | Render the bot and local prices, deliver selected alerts, and reject work using withdrawn publication consent | Until logout or administrative removal |
+| Telegram user ID, Steam app ID, saved game name and one personal status (Backlog, Playing or Completed) | Keep your manual game marks and filter your library; marks are private to your bot account, with database access controlled by the host operator | Until cleared, logout (`/delete`), or administrative removal; retained if a game leaves the shared library |
 | Saved dialog state and data, including login/menu state and temporary user input | Keep dialogs working across updates and restarts | Replaced as dialogs change; all of the user's saved dialog rows are deleted on logout or administrative removal |
 | Game-night creator identity, group/message IDs, proposed time/timezone, shortlisted games, votes and attendance responses | Coordinate sessions inside the linked group; attendees use Steam names without Telegram profile links | Responses are deleted with their account; deleting the creator's account deletes their events and all responses. Otherwise retained with the family, including closed/cancelled events; unlinking disables actions but does not delete records |
 | Telegram or Steam IDs selected in another active user's saved family-management dialog | Keep that user's member selection while they navigate | Retained in that viewer's dialog until it is closed or reset, or the viewer logs out; does not restore the selected person's account or credentials |
@@ -77,6 +78,10 @@ history described above, with no fixed expiry while a family has registered
 accounts. It does not archive every old snapshot or sent notification. The
 current Steam snapshot can also contain older acquisition, membership and
 playtime information supplied by Steam.
+
+Personal game marks do not sync with Steam achievements or playtime and are not
+shown to fellow users. Marked games that leave the shared library remain in
+**Unavailable marked games (N)** until you clear them or delete your bot data.
 
 Family information is visible to the family's authorized bot users and can be
 sent to its configured Telegram notification chat. Steam supplies this data for
@@ -108,8 +113,9 @@ service.
 Send `/delete` or open **Settings → Log out**, then confirm. This also works when
 your Steam session has expired or you have only chosen preferences and never
 linked Steam. Logging out deletes the local account and encrypted token, Telegram
-profile reference, preferences, and saved dialog state. It also cancels a pending
-login and invalidates cached credentials and user-specific runtime data.
+profile reference, preferences, personal game marks, and saved dialog state. It
+also cancels a pending login and invalidates cached credentials and user-specific
+runtime data.
 Administrative removal uses the same deletion rules.
 
 If you are the family's bot owner, the confirmation explains how ownership is
@@ -126,7 +132,7 @@ new preferences and requires a fresh Steam login and any necessary approval.
 If you cannot access your Telegram account, contact the instance operator to
 verify ownership and arrange removal.
 
-Any future user-linked backlog marks, transfer requests or votes must follow the
+Any future user-linked transfer requests or votes must follow the
 same logout and administrative-removal rules. They are not exceptions to this
 policy and are not implemented by this document.
 

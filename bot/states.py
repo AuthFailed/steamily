@@ -24,6 +24,7 @@ class Games(StatesGroup):
     genre = State()
     players = State()
     game = State()
+    missing = State()
 
 
 class Admin(StatesGroup):

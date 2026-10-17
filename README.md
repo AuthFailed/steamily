@@ -126,6 +126,18 @@ The bot stores the durable refresh credential encrypted in PostgreSQL. Access to
 
 Only the required Store transfer is completed during browser finalization. Other website destinations receive no transfer credentials. HTTPS destinations, account identity and token expiry are checked before credentials are used.
 
+## Personal game statuses
+
+Approved family users can open a game card and mark it **Backlog**, **Playing**,
+or **Completed**, or clear its status. In the library's **Filters**, select a status
+alongside the existing filters. Marks are manual and do not sync with Steam
+achievements or playtime. If a marked game leaves the shared library, it remains
+under **Unavailable marked games (N)**, where its status can be cleared.
+
+Your marks are private to your bot account; fellow users cannot see them. The
+hosting operator controls the database. Marks survive restarts and are deleted
+when you log out, use `/delete`, or are administratively removed.
+
 ## Scheduled reads
 
 Each family has one persisted reader account. Initial selection prefers its approved bot owner, then another approved account with a saved session. That selection survives restarts and bot-owner changes. It does not grant Steam adult permissions.

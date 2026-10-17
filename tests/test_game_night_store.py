@@ -277,6 +277,31 @@ class GameNightStoreTest(unittest.IsolatedAsyncioTestCase):
             await migrate(connection)
         self.assertIsNotNone(await self.store.get(event_id, -100))
 
+    async def test_upgrade_from_released_backlog_schema_preserves_private_data(self):
+        async with self.db.pool.acquire() as connection:
+            await connection.execute("DROP TABLE game_night_participants, game_nights")
+            await connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+            history = await connection.fetch("SELECT * FROM schema_migrations ORDER BY version")
+        self.assertEqual(len(history), 8)
+        self.assertEqual(history[-1]["name"], "008_game_statuses.sql")
+        self.assertTrue(await self.db.set_game_status(100, "1", "9", 10, "One", "playing"))
+        marks = await self.db.game_marks(100)
+        account = await self.db.account(100)
+        family = await self.db.family("9")
+
+        async with self.db.pool.acquire() as connection:
+            await migrate(connection)
+            upgraded = await connection.fetch("SELECT * FROM schema_migrations ORDER BY version")
+        self.assertEqual(upgraded[:8], history)
+        self.assertEqual([(row["version"], row["name"]) for row in upgraded[8:]], [(9, "009_game_nights.sql")])
+        self.assertEqual(await self.db.account(100), account)
+        self.assertEqual(await self.db.family("9"), family)
+        self.assertEqual(await self.db.game_marks(100), marks)
+        event_id = await self.event()
+        result = await self.act(event_id, "vote", 20)
+        self.assertEqual(result["chosen_appid"], 20)
+        self.assertEqual(await self.db.game_marks(100), marks)
+
     async def test_status_changes_cannot_pass_the_access_check_while_the_action_is_waiting(self):
         event_id = await self.event()
         async with self.db.pool.acquire() as connection, connection.transaction():
