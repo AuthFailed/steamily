@@ -4,6 +4,11 @@ A self-hosted Telegram bot for Steam Families: shared games, family statistics,
 and change notifications. It uses Telegram long polling; no public port or
 webhook domain is required.
 
+Open **Family → Slots and cooldowns** for occupied, invited/reserved and empty
+places, the reported invitation cooldown, and each member's explicit restriction
+on joining another family. Dates include UTC and the last successful update;
+missing dates stay unknown. The view does not change membership or set reminders.
+
 ## Create the Telegram bot
 
 Open [@BotFather](https://t.me/BotFather), run `/newbot`, and keep its token private.

@@ -58,6 +58,7 @@ class RecordedSteamTest(unittest.IsolatedAsyncioTestCase):
                 "joined": {member: 1700000000 + index for index, member in enumerate(MEMBERS)},
                 "roles": dict.fromkeys(MEMBERS, 1),
                 "free_spots": 1,
+                "calendar": {"checked_at": 2_000_000_000.0, "member_cooldowns": {}, "free_spots": 1},
                 "pending_invites": [],
                 "names": {member: f"Recorded member {index:02}" for index, member in enumerate(MEMBERS, 1)},
                 "players": {

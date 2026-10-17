@@ -1,0 +1,46 @@
+{
+  "response": {
+    "family_groupid": "42",
+    "is_not_member_of_any_group": false,
+    "role": 1,
+    "cooldown_seconds_remaining": 0,
+    "family_group": {
+      "name": "Recorded calendar family",
+      "free_spots": 1,
+      "slot_cooldown_remaining_seconds": 0,
+      "slot_cooldown_overrides": 0,
+      "members": [
+        {
+          "steamid": "76561198000000001",
+          "role": 1,
+          "time_joined": 1700000000,
+          "cooldown_seconds_remaining": 0
+        },
+        {
+          "steamid": "76561198000000002",
+          "role": 1,
+          "time_joined": 1700000001,
+          "cooldown_seconds_remaining": 0
+        },
+        {
+          "steamid": "76561198000000003",
+          "role": 1,
+          "time_joined": 1700000002,
+          "cooldown_seconds_remaining": 0
+        },
+        {
+          "steamid": "76561198000000004",
+          "role": 1,
+          "time_joined": 1700000003,
+          "cooldown_seconds_remaining": 0
+        },
+        {
+          "steamid": "76561198000000005",
+          "role": 1,
+          "time_joined": 1700000004,
+          "cooldown_seconds_remaining": 0
+        }
+      ]
+    }
+  }
+}
