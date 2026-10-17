@@ -452,13 +452,26 @@ class SteamAuthWireTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["path"], "/IAuthenticationService/BeginAuthSessionViaQR/v1/")
         self.assertEqual(request["content_type"], "multipart/form-data")
         self.assertEqual(request["fields"], {"input_protobuf_encoded"})
-        self.assertEqual(request["protobuf"], bytes.fromhex("1a0c0a08537465616d696c7910022209436f6d6d756e697479"))
+        self.assertEqual(request["protobuf"], bytes.fromhex(self.fixtures["begin"]["request_hex"]))
         self.assertEqual(request["headers"]["user-agent"], "Steamily")
         self.assertNotIn("cookie", request["headers"])
 
     async def test_qr_begin_defaults_poll_interval_when_steam_omits_it(self):
         self.response = self.fixtures["begin_without_interval"]
         self.assertEqual((await begin_qr_login(self.http))["interval"], 5.0)
+
+    async def test_qr_begin_rejects_invalid_poll_intervals(self):
+        prefix = self.fixtures["begin_without_interval"]["body_hex"]
+        for name, interval in [
+            ("zero", "00000000"),
+            ("negative", "000080bf"),
+            ("infinite", "0000807f"),
+            ("nan", "0000c07f"),
+            ("truncated", "0000"),
+        ]:
+            self.response = {"body_hex": prefix + "25" + interval}
+            with self.subTest(interval=name), self.assertRaisesRegex(RuntimeError, "could not start browser login"):
+                await begin_qr_login(self.http)
 
     async def test_qr_poll_waits_rotates_and_returns_approved_refresh_token(self):
         login = await begin_qr_login(self.http)

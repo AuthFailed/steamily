@@ -1,7 +1,8 @@
 # Steam response fixtures
 
 These are **synthetic wire-shape examples**, not recorded Steam responses. They
-were authored from the fields consumed by `bot/steam.py` and `bot/steam_auth.py`.
+were authored from the fields consumed by `bot/steam.py`, `bot/steam_auth.py`, and
+`bot/steam_browser.py`.
 No account, session, QR code, refresh token, or access token is real. The JWT-shaped
 access token contains only a test expiry and has no valid signature.
 

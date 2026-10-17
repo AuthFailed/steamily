@@ -403,6 +403,35 @@ class BrowserRenewalTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("secret", str(error.exception))
             self.assertIsNone(error.exception.__cause__)
 
+    async def test_explicit_auth_results_reject_the_browser_session(self):
+        for code in [5, 15, 26, 27, 43]:
+            for response in [
+                Response("secret-token", headers={"x-eresult": str(code)}),
+                Response({"error": code, "message": "secret-token"}),
+            ]:
+                save = AsyncMock()
+                with self.subTest(code=code, headers=bool(response.headers)), self.assertRaises(TokenRejected) as error:
+                    await browser.renew_access_token(HTTP(response), cookie(), ALICE, on_refresh=save)
+                self.assertNotIn("secret-token", str(error.exception))
+                save.assert_not_awaited()
+
+    async def test_temporary_auth_results_preserve_cookie_and_allow_retry(self):
+        durable, access = cookie(), token()
+        for code in [16, 84]:
+            for response in [
+                Response("secret-token", headers={"x-eresult": str(code)}),
+                Response({"error": code, "message": "secret-token"}),
+            ]:
+                http = HTTP(response, Response({"webapi_token": access}))
+                save = AsyncMock()
+                with self.subTest(code=code, headers=bool(response.headers)), self.assertRaises(RuntimeError) as error:
+                    await browser.renew_access_token(http, durable, ALICE, on_refresh=save)
+                self.assertNotIn("secret-token", str(error.exception))
+                self.assertEqual(
+                    await browser.renew_access_token(http, durable, ALICE, on_refresh=save), (access, durable)
+                )
+                save.assert_not_awaited()
+
 
 class SessionRevocationTest(unittest.IsolatedAsyncioTestCase):
     async def test_revoke_sends_only_this_browser_refresh_jwt_and_permanent_action(self):
