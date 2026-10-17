@@ -18,7 +18,8 @@ MIGRATIONS = tuple(
         "007_browser_sessions.sql",
         "008_game_statuses.sql",
         "009_game_nights.sql",
-        "010_game_responses.sql",
+        "010_owner_transfers.sql",
+        "011_game_responses.sql",
     )
 )
 

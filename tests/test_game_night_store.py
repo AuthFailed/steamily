@@ -279,8 +279,12 @@ class GameNightStoreTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_upgrade_from_released_backlog_schema_preserves_private_data(self):
         async with self.db.pool.acquire() as connection:
-            await connection.execute("DROP TABLE game_night_participants, game_nights")
-            await connection.execute("DELETE FROM schema_migrations WHERE version >= 9")
+            await connection.execute("""
+                DROP TRIGGER invalidate_owner_transfer ON families;
+                DROP FUNCTION invalidate_owner_transfer();
+                DROP TABLE owner_transfers, game_night_participants, game_nights;
+                DELETE FROM schema_migrations WHERE version >= 9;
+            """)
             history = await connection.fetch("SELECT * FROM schema_migrations ORDER BY version")
         self.assertEqual(len(history), 8)
         self.assertEqual(history[-1]["name"], "008_game_statuses.sql")
@@ -295,7 +299,7 @@ class GameNightStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(upgraded[:8], history)
         self.assertEqual(
             [(row["version"], row["name"]) for row in upgraded[8:]],
-            [(9, "009_game_nights.sql"), (10, "010_game_responses.sql")],
+            [(9, "009_game_nights.sql"), (10, "010_owner_transfers.sql"), (11, "011_game_responses.sql")],
         )
         self.assertEqual(await self.db.account(100), account)
         self.assertEqual(await self.db.family("9"), family)

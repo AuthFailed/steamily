@@ -492,7 +492,7 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.db.refresh_token(account))
             self.assertEqual(account["token_renewed_at"], 0.0)
 
-    async def test_reconcile_members_prefers_approved_then_oldest_pending_and_excludes_blocked(self):
+    async def test_reconcile_members_uses_approved_successors_without_promoting_pending_or_blocked(self):
         for telegram_id, steam_id, status in ((10, "1", "blocked"), (20, "2", "pending"), (30, "3", "approved")):
             await self.db.save_account(telegram_id, steam_id, "9", "token")
             await self.db.set_status(telegram_id, status)
@@ -503,16 +503,20 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
 
         await self.db.set_status(30, "blocked")
         await self.db.reconcile_members("9", ["1", "2", "3"])
-        self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 20)
-        self.assertEqual((await self.db.account(20))["status"], "approved")
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+        self.assertEqual((await self.db.account(20))["status"], "pending")
         self.assertEqual((await self.db.account(30))["status"], "blocked")
 
-    async def test_reconcile_members_bootstraps_legacy_owner_and_keeps_valid_tokenless_owner(self):
+    async def test_explicit_initial_claim_then_reconcile_keeps_valid_tokenless_owner(self):
         for telegram_id, steam_id in ((20, "2"), (10, "1")):
             await self.db.save_account(telegram_id, steam_id, "9", "token")
         await self.db.pool.execute(
             "UPDATE accounts SET created_at = created_at - interval '1 day' WHERE telegram_id = 20"
         )
+        await self.db.reconcile_members("9", ["1", "2"])
+        self.assertIsNone((await self.db.family("9"))["owner_telegram_id"])
+        self.assertEqual((await self.db.account(20))["status"], "pending")
+        await self.db.claim_initial_owner("9", 20)
         await self.db.reconcile_members("9", ["1", "2"])
         self.assertEqual((await self.db.family("9"))["owner_telegram_id"], 20)
         await self.db.set_refresh_token(20, None)
