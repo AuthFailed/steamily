@@ -33,6 +33,7 @@ class Admin(StatesGroup):
 
 class FamilyView(StatesGroup):
     info = State()
+    slots = State()
     stats = State()
     stat = State()
     members = State()

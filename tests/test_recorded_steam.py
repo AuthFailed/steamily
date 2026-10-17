@@ -45,7 +45,8 @@ class RecordedSteamTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(api_patch.stop)
 
     async def test_recorded_family_players_library_and_playtime_form_one_snapshot(self):
-        snapshot = await fetch_family_snapshot(self.http, "recorded-access")
+        with patch("bot.steam.time.time", return_value=2_000_000_000.0):
+            snapshot = await fetch_family_snapshot(self.http, "recorded-access")
 
         self.assertEqual(
             snapshot,
@@ -56,6 +57,7 @@ class RecordedSteamTest(unittest.IsolatedAsyncioTestCase):
                 "joined": {member: 1700000000 + index for index, member in enumerate(MEMBERS)},
                 "roles": dict.fromkeys(MEMBERS, 1),
                 "free_spots": 1,
+                "calendar": {"checked_at": 2_000_000_000.0, "member_cooldowns": {}, "free_spots": 1},
                 "pending_invites": [],
                 "names": {member: f"Recorded member {index:02}" for index, member in enumerate(MEMBERS, 1)},
                 "players": {

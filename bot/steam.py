@@ -44,6 +44,7 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
             "include_family_group_response": "true",
         },
     )
+    family_checked_at = time.time()
     response = family.get("response", {})
     if response.get("is_not_member_of_any_group") is True:
         raise NoFamily("This Steam account is not joined to a Steam Family")
@@ -72,7 +73,7 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
         )
     except (aiohttp.ClientError, RuntimeError):
         players = {}
-    snapshot = parse_snapshot(family, library, players)
+    snapshot = parse_snapshot(family, library, players, family_checked_at=family_checked_at)
     try:  # who played which borrowed game, for stats; optional
         playtime = await post_json(
             http,
@@ -211,7 +212,7 @@ async def fetch_user_country(http: aiohttp.ClientSession, access_token: str, ste
         return None
 
 
-def parse_snapshot(family: dict, library: dict, players: dict) -> dict:
+def parse_snapshot(family: dict, library: dict, players: dict, *, family_checked_at: float | None = None) -> dict:
     response = family.get("response", {})
     if response.get("is_not_member_of_any_group") is True:
         raise NoFamily("This Steam account is not joined to a Steam Family")
@@ -232,6 +233,17 @@ def parse_snapshot(family: dict, library: dict, players: dict) -> dict:
         "joined": {str(m["steamid"]): m.get("time_joined") for m in members},
         "roles": {str(m["steamid"]): m.get("role", 1) for m in members},
         "free_spots": group.get("free_spots", 0),
+        "calendar": {
+            "checked_at": family_checked_at,
+            "member_cooldowns": {
+                str(m["steamid"]): m["cooldown_seconds_remaining"] for m in members if "cooldown_seconds_remaining" in m
+            },
+            **{
+                key: group[key]
+                for key in ("free_spots", "slot_cooldown_remaining_seconds", "slot_cooldown_overrides")
+                if key in group
+            },
+        },
         "pending_invites": [
             {"steamid": str(i["steamid"]), "role": i.get("role", 1)} for i in group.get("pending_invites", [])
         ],

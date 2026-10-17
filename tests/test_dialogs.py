@@ -1662,7 +1662,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
             text,
         )  # Telegram name refreshed from the user's latest message
         self.assertNotIn("tg://user?id=300", text)  # no permission from the pending member
-        self.assertIn("<b>Fam</b> · 3 of 6", text)
+        self.assertIn("<b>Fam</b> · members: 3", text)
         self.assertNotIn("Free spots", text)
         self.assertTrue(shown[-1].link_preview_options.is_disabled)  # no profile picture previews
         self.assertNotIn("Manage family", self.buttons())  # owner only
@@ -1689,6 +1689,28 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("Games we both have"))
         self.assertIn("Games: <b>6</b>", self.last().text)  # 3, 6, ..., 18
         self.assertIn("Everyone has it: Bob, Alice", self.last().text)
+
+    async def test_member_opens_read_only_slots_and_loses_access_after_departure(self):
+        self.families.get(FAMILY).snapshot["calendar"] = {
+            "checked_at": 1_700_000_000,
+            "free_spots": 2,
+            "slot_cooldown_remaining_seconds": 86_400,
+            "member_cooldowns": {ALICE: 0, BOB: 172_800},
+        }
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family"))
+        await client.click(self.last(), Btn("Slots and cooldowns"))
+        self.assertIn("2023-11-15 22:13:20 UTC", self.last().text)
+        self.assertIn("Bob: until 2023-11-16 22:13:20 UTC", self.last().text)
+        self.assertIn("76561198000000009", self.last().text)
+        self.assertEqual(self.buttons(), ["◀️ Back", "Home"])
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Slots and cooldowns", self.buttons())
+        await client.click(self.last(), Btn("Slots and cooldowns"))
+        await self.db.set_status(FRIEND, "pending")
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Waiting for the family owner", self.last().text)
 
     async def test_owner_manages_the_steam_family(self):
         self.families.owner_token = AsyncMock(return_value="token")
