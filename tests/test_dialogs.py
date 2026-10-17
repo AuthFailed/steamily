@@ -142,7 +142,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
                     "price": i * 100,
                     "price_text": f"${i}.00",
                     "tags": [19] if i % 2 else [],
-                    "multiplayer": i % 3 == 0,
+                    "play_mode": "multiplayer" if i % 3 == 0 else "singleplayer",
                 }
                 for i in range(1, 21)
             },

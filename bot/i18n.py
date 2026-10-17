@@ -255,7 +255,7 @@ TEXTS = {
         "budget_unknown_prices": "Unknown prices are included only with Any price.",
         "budget_currency_unknown": "Local currency is unavailable. A maximum price needs local price data.",
         "budget_region_changed": "Store region changed. Set a new maximum price in the current currency.",
-        "sum_multiplayer": "👥 Multiplayer only",
+        "sum_multiplayer": "👥 Confirmed multiplayer only (unknown modes excluded)",
         "sum_players": "🤝 {names} (needs {n}+ copies)",
         "btn_filters": "Filters",
         "btn_sort": "Sorting",
@@ -266,7 +266,10 @@ TEXTS = {
         "sort_desc": "Use the buttons below to sort the family library. "
         "Tap the active one again to flip its direction.",
         "filters_title": "Filters",
-        "filters_desc": "Use the buttons below to filter the family library.",
+        "filters_desc": (
+            "Use the buttons below to filter the family library.\n"
+            "Multiplayer only excludes games whose mode is unknown."
+        ),
         "multiplayer_on": "✅ Multiplayer only",
         "multiplayer_off": "⬜ Multiplayer only",
         "btn_genre": "🏷 Genre: {genre}",
@@ -285,6 +288,7 @@ TEXTS = {
         "price_unknown": "Price unknown",
         "multiplayer": "👥 Multiplayer",
         "singleplayer": "👤 Single-player",
+        "mode_unknown": "❔ Mode unavailable",
         "copies_line": "📦 Owned copies: {n}{owners}",
         "shareable_copies_line": "🤝 Shareable copies: {n}",
         "access_owned": "🔑 Your access: own copy",
@@ -614,7 +618,7 @@ TEXTS = {
         "budget_unknown_prices": "Игры с неизвестной ценой показываются только с фильтром «Любая цена».",
         "budget_currency_unknown": "Местная валюта неизвестна. Для максимальной цены нужны местные цены игр.",
         "budget_region_changed": "Регион магазина изменился. Задайте максимальную цену заново в текущей валюте.",
-        "sum_multiplayer": "👥 Только мультиплеер",
+        "sum_multiplayer": "👥 Только подтверждённый мультиплеер (неизвестные режимы исключены)",
         "sum_players": "🤝 {names} (нужно копий: {n}+)",
         "btn_filters": "Фильтры",
         "btn_sort": "Сортировка",
@@ -625,7 +629,10 @@ TEXTS = {
         "sort_desc": "Используй кнопки ниже для включения сортировки семейной библиотеки. "
         "Повторное нажатие на активную кнопку меняет направление.",
         "filters_title": "Фильтры",
-        "filters_desc": "Используй кнопки ниже, чтобы отфильтровать семейную библиотеку.",
+        "filters_desc": (
+            "Используй кнопки ниже, чтобы отфильтровать семейную библиотеку.\n"
+            "Фильтр «Только мультиплеер» исключает игры с неизвестным режимом."
+        ),
         "multiplayer_on": "✅ Только мультиплеер",
         "multiplayer_off": "⬜ Только мультиплеер",
         "btn_genre": "🏷 Жанр: {genre}",
@@ -644,6 +651,7 @@ TEXTS = {
         "price_unknown": "Цена неизвестна",
         "multiplayer": "👥 Мультиплеер",
         "singleplayer": "👤 Одиночная",
+        "mode_unknown": "❔ Режим игры неизвестен",
         "copies_line": "📦 Собственных копий: {n}{owners}",
         "shareable_copies_line": "🤝 Копий для семейного доступа: {n}",
         "access_owned": "🔑 Ваша копия",
