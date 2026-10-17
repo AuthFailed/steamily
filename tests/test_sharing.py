@@ -1,8 +1,9 @@
 import json
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
-from bot.library import query
+from bot.library import query, removal_impact
 from bot.steam import parse_snapshot
 
 
@@ -41,3 +42,45 @@ class SharingTest(unittest.TestCase):
         app = dict(self.apps[2])
         app.pop("exclude_reason", None)
         self.assertEqual(query([app], {}, players=["a", "c"]), [app])
+
+
+class RemovalImpactTest(unittest.TestCase):
+    def test_only_owner_loses_title(self):
+        apps = [{"appid": 1, "name": "Solo", "owners": ["a"], "exclude_reason": 0}]
+        self.assertEqual(removal_impact(apps, "a"), [{"appid": 1, "name": "Solo", "before": 1, "after": 0}])
+
+    def test_other_owners_keep_title_with_fewer_copies(self):
+        apps = [{"appid": 1, "name": "Shared", "owners": ["a", "b", "c"], "exclude_reason": 0}]
+        self.assertEqual(removal_impact(apps, "a"), [{"appid": 1, "name": "Shared", "before": 3, "after": 2}])
+
+    def test_excluded_games_do_not_affect_shared_capacity(self):
+        for reason in (1, 999):
+            with self.subTest(reason=reason):
+                apps = [{"appid": 1, "name": "Excluded", "owners": ["a"], "exclude_reason": reason}]
+                self.assertEqual(removal_impact(apps, "a"), [])
+
+    def test_old_snapshot_without_reason_remains_shareable(self):
+        apps = [{"appid": 1, "name": "Old", "owners": ["a", "b"]}]
+        self.assertEqual(removal_impact(apps, "a"), [{"appid": 1, "name": "Old", "before": 2, "after": 1}])
+
+    def test_absent_member_and_empty_library_have_no_impact(self):
+        self.assertEqual(removal_impact([{"appid": 1, "name": "Other", "owners": ["b"]}], "a"), [])
+        self.assertEqual(removal_impact([], "a"), [])
+
+    def test_lost_titles_sort_first_then_name_and_appid(self):
+        apps = [
+            {"appid": 1, "name": "A kept title", "owners": ["a", "b"]},
+            {"appid": 3, "name": "alpha", "owners": ["a"]},
+            {"appid": 4, "name": "Beta", "owners": ["a"]},
+            {"appid": 2, "name": "ALPHA", "owners": ["a"]},
+        ]
+        self.assertEqual([app["appid"] for app in removal_impact(apps, "a")], [2, 3, 4, 1])
+
+    def test_preview_does_not_change_snapshot(self):
+        apps = [
+            {"appid": 2, "name": "Solo", "owners": ["a"], "exclude_reason": 0, "acquired": 123},
+            {"appid": 1, "name": "Shared", "owners": ["a", "b"], "exclude_reason": 0},
+        ]
+        before = deepcopy(apps)
+        removal_impact(apps, "a")
+        self.assertEqual(apps, before)

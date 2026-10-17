@@ -150,6 +150,17 @@ TEXTS = {
         "free spot and rejoining for a cooldown period (about a year), and they lose access "
         "to the family library.",
         "btn_remove_member_yes": "Yes, remove",
+        "removal_summary": "Steam ID: <code>{steam_id}</code>\nSnapshot age: {age}\n\n"
+        "Titles lost completely: <b>{lost}</b>\nTitles with fewer copies: <b>{reduced}</b>\n\n"
+        "Only shareable copies count. Game rows show copies before → remaining after removal. "
+        "This describes the current snapshot and does not guarantee future availability.",
+        "removal_age": "{seconds} s",
+        "removal_age_unknown": "unknown (older snapshot)",
+        "removal_changed": "⚠️ Membership or library data changed. Review the updated preview before confirming again.",
+        "removal_departed": "This member is no longer in this family.",
+        "removal_refresh_failed": "Could not refresh the preview. Nothing was removed; try again.",
+        "btn_removal_expand": "Show affected games",
+        "btn_removal_collapse": "Hide games",
         "manage_title": "Manage family",
         "manage_desc": "Who may use the bot, and changes to the Steam family itself "
         "(done on Steam with your own account).",
@@ -552,6 +563,18 @@ TEXTS = {
         "освободившееся место и повторное вступление на время (около года), а участник "
         "теряет доступ к библиотеке семьи.",
         "btn_remove_member_yes": "Да, удалить",
+        "removal_summary": "Steam ID: <code>{steam_id}</code>\nВозраст снимка: {age}\n\n"
+        "Полностью исчезнет игр: <b>{lost}</b>\nСтанет меньше копий у игр: <b>{reduced}</b>\n\n"
+        "Учитываются только копии, доступные семье. В списке: копий до → останется после удаления. "
+        "Это текущий снимок, он не гарантирует доступность игр в будущем.",
+        "removal_age": "{seconds} с",
+        "removal_age_unknown": "неизвестен (старый снимок)",
+        "removal_changed": "⚠️ Состав семьи или библиотека изменились. "
+        "Просмотрите обновлённые данные перед подтверждением.",
+        "removal_departed": "Этот участник уже не состоит в семье.",
+        "removal_refresh_failed": "Не удалось обновить предпросмотр. Никто не удалён; попробуйте ещё раз.",
+        "btn_removal_expand": "Показать затронутые игры",
+        "btn_removal_collapse": "Скрыть игры",
         "manage_title": "Управление семьёй",
         "manage_desc": "Кто может пользоваться ботом, и изменения самой семьи Steam "
         "(выполняются в Steam от имени вашего аккаунта).",
