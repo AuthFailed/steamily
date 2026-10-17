@@ -36,9 +36,9 @@ class SharingCardTest(unittest.IsolatedAsyncioTestCase):
         }
         manager = SimpleNamespace(
             dialog_data={"appid": 620},
-            middleware_data={"family": family, "account": {"country": "US", "steam_id": viewer}},
+            middleware_data={"family": family, "account": {"telegram_id": 1, "country": "US", "steam_id": viewer}},
         )
-        db = SimpleNamespace(family_accounts=AsyncMock(return_value=[]))
+        db = SimpleNamespace(family_accounts=AsyncMock(return_value=[]), game_marks=AsyncMock(return_value={}))
         return (await game_getter(manager, family, db, lang))["details"]
 
     async def test_card_distinguishes_known_modes_from_missing_and_legacy_details(self):
