@@ -20,6 +20,7 @@ class Games(StatesGroup):
     pages = State()
     sort = State()
     filters = State()
+    budget = State()
     genre = State()
     players = State()
     game = State()
