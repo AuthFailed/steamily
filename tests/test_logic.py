@@ -4,6 +4,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from bot import library
 from bot.family import role
 from bot.library import (
     added_per_month,
@@ -87,9 +88,27 @@ class QueryTest(unittest.TestCase):
     def test_genre_price_and_multiplayer_filters(self):
         self.assertEqual(names(query(APPS, STORE, tag="1685")), ["Beta Co-op"])
         self.assertEqual(names(query(APPS, STORE, price="free")), ["Alpha Strike"])
-        self.assertEqual(names(query(APPS, STORE, price="lt5")), ["Gamma"])
-        self.assertEqual(names(query(APPS, STORE, price="5to20")), ["Beta Co-op"])
         self.assertEqual(names(query(APPS, STORE, multiplayer=True)), ["Alpha Strike", "Beta Co-op"])
+
+    def test_budget_is_inclusive_and_excludes_unknown_prices(self):
+        for budget, expected in (
+            (0, ["Alpha Strike"]),
+            (298, ["Alpha Strike"]),
+            (299, ["Alpha Strike", "Gamma"]),
+            (1999, ["Alpha Strike", "Beta Co-op", "Gamma"]),
+        ):
+            with self.subTest(budget=budget):
+                self.assertEqual(names(query(APPS, STORE, price=budget)), expected)
+
+    def test_budget_uses_local_prices_without_currency_conversion(self):
+        store = {"apps": {"1": {"price": 0}, "2": {"price": 100000}, "3": {"price": 100001}}}
+        self.assertEqual(names(query(APPS, store, price=100000)), ["Alpha Strike", "Beta Co-op"])
+        self.assertEqual(names(query(APPS, store, price=99999)), ["Alpha Strike"])
+
+    def test_missing_prices_are_only_shown_without_a_price_filter(self):
+        self.assertEqual(names(query(APPS, {}, price="any")), ["Alpha Strike", "Beta Co-op", "Delisted", "Gamma"])
+        self.assertEqual(query(APPS, {}, price="free"), [])
+        self.assertEqual(query(APPS, {}, price=100000), [])
 
     def test_players_need_enough_copies(self):
         self.assertEqual(names(query(APPS, STORE, players=["a", "b"])), ["Beta Co-op", "Delisted"])
@@ -111,6 +130,44 @@ class QueryTest(unittest.TestCase):
 
     def test_tag_counts(self):
         self.assertEqual(tag_counts(APPS, STORE), [("19", 2), ("1685", 1)])
+
+
+class BudgetParsingTest(unittest.TestCase):
+    def test_budget_uses_exact_integer_hundredths(self):
+        for text, expected in (
+            ("0", 0),
+            ("0.29", 29),
+            ("5", 500),
+            ("5.5", 550),
+            (" 1000,50 ", 100050),
+            ("999999999999.99", 99999999999999),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(library.parse_budget(text), expected)
+
+    def test_invalid_budget_is_rejected(self):
+        for text in (
+            "",
+            " ",
+            "-1",
+            "+1",
+            "1e2",
+            "NaN",
+            "Infinity",
+            "1 000",
+            "1_000",
+            "$10",
+            ".50",
+            "1.",
+            "1.234",
+            "1,234",
+            "1,000.00",
+            "١٢",
+            "1000000000000",
+            "9" * 4096,
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                library.parse_budget(text)
 
 
 class SteamParsingTest(unittest.TestCase):
