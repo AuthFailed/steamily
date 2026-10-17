@@ -246,16 +246,18 @@ class OwnerTransferDbTest(unittest.IsolatedAsyncioTestCase):
     async def test_upgrade_preserves_existing_data_and_is_repeatable(self):
         family = await self.db.family("9")
         accounts = await self.db.family_accounts("9")
+        await self.db.set_game_status(20, "2", "9", 440, "Game", "playing")
         await self.db.pool.execute("""
             DROP TRIGGER IF EXISTS invalidate_owner_transfer ON families;
             DROP FUNCTION IF EXISTS invalidate_owner_transfer();
             DROP TABLE IF EXISTS owner_transfers;
-            DELETE FROM schema_migrations WHERE version = 8;
+            DELETE FROM schema_migrations WHERE version = 9;
         """)
         async with self.db.pool.acquire() as connection:
             await migrate(connection)
             await migrate(connection)
         self.assertEqual(await self.db.family("9"), family)
         self.assertEqual(await self.db.family_accounts("9"), accounts)
+        self.assertEqual(await self.db.game_marks(20), {440: {"name": "Game", "status": "playing"}})
         invitation = await self.create()
         self.assertIsNotNone(await self.db.accept_owner_transfer("9", 20, invitation["id"], self.members))

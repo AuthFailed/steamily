@@ -92,6 +92,60 @@ class Db:
             language,
         )
 
+    # Personal game status
+    async def game_marks(self, telegram_id: int) -> dict[int, dict]:
+        rows = await self.pool.fetch(
+            "SELECT g.appid, g.name, g.status FROM game_statuses g "
+            "JOIN accounts a USING (telegram_id) WHERE telegram_id = $1 AND a.status = 'approved'",
+            telegram_id,
+        )
+        return {row["appid"]: {"name": row["name"], "status": row["status"]} for row in rows}
+
+    async def set_game_status(
+        self,
+        telegram_id: int,
+        steam_id: str,
+        family_id: str,
+        appid: int,
+        name: str,
+        status: str | None,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
+        if type(appid) is not int or not 0 < appid <= 4294967295:
+            raise ValueError("Invalid Steam app ID")
+        if not isinstance(name, str) or not name.strip() or "\0" in name:
+            raise ValueError("Invalid game name")
+        if status not in (None, "backlog", "playing", "completed"):
+            raise ValueError("Invalid game status")
+        async with self.pool.acquire() as connection, connection.transaction():
+            # Serialize with logout and relinking so a stale click cannot recreate personal data.
+            account = await connection.fetchval(
+                "SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND steam_id = $2 "
+                "AND family_id = $3 AND status = 'approved' "
+                "AND ($4::bigint IS NULL OR token_generation = $4) FOR UPDATE",
+                telegram_id,
+                steam_id,
+                family_id,
+                expected_generation,
+            )
+            if account is None:
+                return False
+            if status is None:
+                await connection.execute(
+                    "DELETE FROM game_statuses WHERE telegram_id = $1 AND appid = $2", telegram_id, appid
+                )
+            else:
+                await connection.execute(
+                    "INSERT INTO game_statuses (telegram_id, appid, name, status) VALUES ($1, $2, $3, $4) "
+                    "ON CONFLICT (telegram_id, appid) DO UPDATE SET name = $3, status = $4",
+                    telegram_id,
+                    appid,
+                    name,
+                    status,
+                )
+            return True
+
     # Accounts
     async def account(self, telegram_id: int) -> asyncpg.Record | None:
         """The account plus its family's owner_telegram_id."""
