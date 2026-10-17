@@ -25,6 +25,7 @@ class Games(StatesGroup):
     players = State()
     game = State()
     planner = State()
+    missing = State()
 
 
 class Admin(StatesGroup):
