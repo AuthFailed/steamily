@@ -382,6 +382,76 @@ class Db:
                     await self._delete_personal_data(connection, telegram_id, removed_family)
                     return True
 
+    async def _game_response_account(self, connection: asyncpg.Connection, account: dict) -> bool:
+        # Match membership reconciliation's family-before-account lock order.
+        await connection.fetchval(
+            "SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", account.get("family_id")
+        )
+        return (
+            await connection.fetchval(
+                "SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND steam_id = $2 AND family_id = $3 "
+                "AND created_at = $4 AND publication_version = $5 AND game_response_version = $6 "
+                "AND status = 'approved' "
+                "AND refresh_token IS NOT NULL FOR UPDATE",
+                account.get("telegram_id"),
+                account.get("steam_id"),
+                account.get("family_id"),
+                account.get("created_at"),
+                account.get("publication_version"),
+                account.get("game_response_version"),
+            )
+            is not None
+        )
+
+    async def set_game_response(self, account: dict, appid: int, response: str | None, *, named: bool = False) -> bool:
+        if (
+            type(appid) is not int
+            or not 0 < appid < 2**32
+            or response not in (None, "recommend", "together", "not_interested")
+        ):
+            return False
+        async with self.pool.acquire() as connection, connection.transaction():
+            if not await self._game_response_account(connection, account):
+                return False
+            if response is None:
+                await connection.execute(
+                    "DELETE FROM game_responses WHERE family_id = $1 AND telegram_id = $2 AND appid = $3",
+                    account["family_id"],
+                    account["telegram_id"],
+                    appid,
+                )
+            else:
+                await connection.execute(
+                    "INSERT INTO game_responses (family_id, telegram_id, appid, response, named) "
+                    "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (family_id, telegram_id, appid) "
+                    "DO UPDATE SET response = EXCLUDED.response, named = EXCLUDED.named",
+                    account["family_id"],
+                    account["telegram_id"],
+                    appid,
+                    response,
+                    named if response == "recommend" else False,
+                )
+            await connection.execute(
+                "UPDATE accounts SET game_response_version = gen_random_uuid()::text WHERE telegram_id = $1",
+                account["telegram_id"],
+            )
+            return True
+
+    async def game_responses(self, account: dict) -> list[dict]:
+        async with self.pool.acquire() as connection, connection.transaction():
+            if not await self._game_response_account(connection, account):
+                return []
+            rows = await connection.fetch(
+                "SELECT r.telegram_id, a.steam_id, r.appid, r.response, r.named, a.game_response_version "
+                "FROM game_responses r JOIN accounts a ON a.telegram_id = r.telegram_id AND a.family_id = r.family_id "
+                "WHERE r.family_id = $1 AND a.status = 'approved' AND a.refresh_token IS NOT NULL "
+                "AND (r.response <> 'not_interested' OR r.telegram_id = $2) "
+                "ORDER BY r.telegram_id, r.appid",
+                account["family_id"],
+                account["telegram_id"],
+            )
+            return [dict(row) for row in rows]
+
     # Families
     async def family(self, family_id: str) -> asyncpg.Record | None:
         return await self.pool.fetchrow("SELECT * FROM families WHERE family_id = $1", family_id)

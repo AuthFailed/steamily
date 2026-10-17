@@ -4,6 +4,13 @@ A self-hosted Telegram bot for Steam Families: shared games, family statistics,
 and change notifications. It uses Telegram long polling; no public port or
 webhook domain is required.
 
+In **Family library**, approved members can recommend a game, say they want to
+play together, or privately mark it Not interested. Cards explain visibility
+before submitting; recommendations can be anonymous or named. Change or clear
+your response on the card, and use **Filters → Recommended only** to find family
+recommendations. Responses are separate from personal backlog status and disappear
+when the member loses access or deletes their account.
+
 Open **Family → Slots and cooldowns** for occupied, invited/reserved and empty
 places, the reported invitation cooldown, and each member's explicit restriction
 on joining another family. Dates include UTC and the last successful update;

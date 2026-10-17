@@ -1,5 +1,6 @@
 from html import escape
 
+import aiohttp
 from aiogram.enums import ContentType
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Data, Dialog, DialogManager, Window
@@ -40,6 +41,7 @@ from ..ui import BLUE, Header, back_home, home, look
 PAGE_SIZE = 6
 SCROLL = "games_scroll"
 BLANK = "\u2800"  # Telegram needs some button text; this shows an empty button at the list edges
+RESPONSES = {"r": "recommend", "n": "recommend", "t": "together", "i": "not_interested", "c": None}
 STATUSES = ("backlog", "playing", "completed")
 
 
@@ -106,6 +108,8 @@ def filter_summary(manager: DialogManager, family: Family, store: dict, lang: st
         lines.append(f"💲 {price_label(manager, store, lang)}")
     if filters["multiplayer"]:
         lines.append(t(lang, "sum_multiplayer"))
+    if manager.find("recommended").is_checked():
+        lines.append(t(lang, "recommended_filter"))
     if filters["mode"]:
         lines.append(t(lang, "mode_" + filters["mode"]))
     if len(filters["players"]) > 1:
@@ -118,6 +122,20 @@ def filter_summary(manager: DialogManager, family: Family, store: dict, lang: st
         lines.append(t(lang, "personal_status", status=t(lang, "status_" + status)))
     lines.append(f"↕️ {t(lang, 'sort_' + filters['sort'])} {'↓' if filters['desc'] else '↑'}")
     return "\n".join(lines)
+
+
+async def response_rows(manager: DialogManager, family: Family, db):
+    rows = await db.game_responses(manager.middleware_data["account"])
+    return [row for row in rows if row["steam_id"] in family.members]
+
+
+async def listed_games(manager: DialogManager, family: Family, marks: dict):
+    games = filtered_games(manager, family, marks)
+    if manager.find("recommended").is_checked():
+        rows = await response_rows(manager, family, manager.middleware_data["db"])
+        recommended = {row["appid"] for row in rows if row["response"] == "recommend"}
+        games = [game for game in games if game["appid"] in recommended]
+    return games
 
 
 def filtered_games(manager: DialogManager, family: Family, marks: dict) -> list[dict]:
@@ -146,7 +164,7 @@ async def list_getter(dialog_manager: DialogManager, family: Family, db, lang: s
     details = store.get("apps", {})
     marks = await db.game_marks(dialog_manager.middleware_data["account"]["telegram_id"])
     games = []
-    for game in filtered_games(dialog_manager, family, marks):
+    for game in await listed_games(dialog_manager, family, marks):
         copies = len(game["owners"])
         price = details.get(str(game["appid"]), {}).get("price_text")
         label = game["name"] + (f" ×{copies}" if copies > 1 else "") + (f" · {price}" if price else "")
@@ -182,7 +200,7 @@ async def clear_search(callback: CallbackQuery, button: Button, manager: DialogM
 
 async def pages_getter(dialog_manager: DialogManager, family: Family, db, **kwargs):
     marks = await db.game_marks(dialog_manager.middleware_data["account"]["telegram_id"])
-    count = len(filtered_games(dialog_manager, family, marks))
+    count = len(await listed_games(dialog_manager, family, marks))
     return {"page_numbers": list(range(1, max(1, -(-count // PAGE_SIZE)) + 1))}
 
 
@@ -193,35 +211,151 @@ async def on_page(callback: CallbackQuery, widget, manager: DialogManager, page:
 
 async def on_game(callback: CallbackQuery, widget, manager: DialogManager, appid: int):
     manager.dialog_data["appid"] = appid
+    game = next((a for a in manager.middleware_data["family"].apps if a["appid"] == appid), None)
+    manager.dialog_data["game_name"] = game["name"] if game else str(appid)
     await manager.switch_to(Games.game)
+
+
+async def on_response(callback: CallbackQuery, widget, manager: DialogManager, item_id: str):
+    db = manager.middleware_data["db"]
+    account = await db.account(callback.from_user.id)
+    manager.middleware_data["account"] = account
+    parts = item_id.split(":")
+    valid = (
+        len(parts) == 3
+        and parts[0] == str(manager.dialog_data.get("appid"))
+        and parts[2] in RESPONSES
+        and account is not None
+        and account["game_response_version"] == parts[1]
+        and account["family_id"] == manager.dialog_data.get("_family_id")
+        and account["status"] == "approved"
+        and bool(account["refresh_token"])
+    )
+    if valid:
+        families = manager.middleware_data["families"]
+        family = families.get(account["family_id"])
+        async with family.lock:
+            if parts[2] != "c":
+                try:
+                    snapshot = await families._fetch(account["family_id"])
+                except (aiohttp.ClientError, TimeoutError, RuntimeError):
+                    snapshot = None
+                if snapshot and snapshot["family_id"] == family.family_id:
+                    family.snapshot = snapshot
+                valid = bool(
+                    snapshot
+                    and snapshot["family_id"] == account["family_id"]
+                    and account["steam_id"] in snapshot["members"]
+                    and any(str(a["appid"]) == parts[0] for a in snapshot["apps"])
+                )
+            if valid:
+                valid = await db.set_game_response(account, int(parts[0]), RESPONSES[parts[2]], named=parts[2] == "n")
+    manager.middleware_data["account"] = await db.account(callback.from_user.id)
+    if not valid:
+        await callback.answer(t(manager.middleware_data["lang"], "response_unavailable"), show_alert=True)
 
 
 async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: str, **kwargs):
     appid = dialog_manager.dialog_data["appid"]
+    account = dialog_manager.middleware_data["account"]
+    if (
+        not account
+        or account["family_id"] != family.family_id
+        or account["status"] != "approved"
+        or not account["refresh_token"]
+    ):
+        return {
+            "game": "—",
+            "details": t(lang, "response_unavailable"),
+            "store_url": "",
+            "response_items": [],
+            "status_choices": [],
+            "has_game": False,
+        }
+    marks = await db.game_marks(account["telegram_id"])
+    rows = [row for row in await response_rows(dialog_manager, family, db) if row["appid"] == appid]
+    accounts = await accounts_by_steam(db, family.family_id)
+    viewer = accounts.get(account["steam_id"])
+    if (
+        not viewer
+        or viewer["status"] != "approved"
+        or not viewer["refresh_token"]
+        or account["steam_id"] not in family.members
+        or any(
+            viewer.get(key) != account.get(key)
+            for key in ("telegram_id", "family_id", "created_at", "publication_version", "game_response_version")
+        )
+    ):
+        return {
+            "game": "—",
+            "details": t(lang, "response_unavailable"),
+            "store_url": "",
+            "response_items": [],
+            "status_choices": [],
+            "has_game": False,
+        }
     game = next((a for a in family.apps if a["appid"] == appid), None)
-    marks = await db.game_marks(dialog_manager.middleware_data["account"]["telegram_id"])
     mark = marks.get(appid)
     status = mark["status"] if mark else "unmarked"
-    personal = {
+    status_text = t(lang, "personal_status", status=t(lang, "status_" + status)) + "\n" + t(lang, "status_private")
+    if game or mark:
+        dialog_manager.dialog_data["game_name"] = (game or mark)["name"]
+    rows = [
+        row
+        for row in rows
+        if (current := accounts.get(row["steam_id"]))
+        and current["status"] == "approved"
+        and current["refresh_token"]
+        and current["game_response_version"] == row["game_response_version"]
+        and row["steam_id"] in family.members
+    ]
+    own = next((row for row in rows if row["telegram_id"] == account["telegram_id"]), None)
+    response = "none" if own is None else ("named_recommend" if own["named"] else own["response"])
+    opinions = [
+        t(
+            lang,
+            "response_counts",
+            recommend=sum(r["response"] == "recommend" for r in rows),
+            together=sum(r["response"] == "together" for r in rows),
+        ),
+        t(
+            lang,
+            "response_named",
+            names=", ".join(
+                person_link(family, r["steam_id"], accounts)
+                for r in rows
+                if r["response"] == "recommend" and r["named"]
+            ),
+        )
+        if any(r["named"] for r in rows)
+        else None,
+        t(lang, "response_own", response=t(lang, "response_" + response)),
+        t(lang, "response_privacy"),
+    ]
+    data = {
+        "has_game": game is not None,
         "status_choices": [
             (key, ("• " if key == status else "") + t(lang, "status_" + key))
             for key in (*STATUSES, "clear")
             if (key == "clear" and mark) or (key in STATUSES and game)
         ],
+        "game": escape(game["name"] if game else dialog_manager.dialog_data.get("game_name", str(appid))),
+        "store_url": f"https://store.steampowered.com/app/{appid}/",
+        "response_items": [
+            (f"{appid}:{account['game_response_version']}:{code}", t(lang, "response_btn_" + code))
+            for code in RESPONSES
+            if game or code == "c"
+        ]
+        if account["steam_id"] in family.members
+        else [],
     }
-    status_text = t(lang, "personal_status", status=t(lang, "status_" + status)) + "\n" + t(lang, "status_private")
     if game is None:
-        return {
-            **personal,
-            "game": escape(mark["name"]) if mark else "—",
-            "details": t(lang, "game_gone") + "\n\n" + status_text,
-            "store_url": None,
-        }
+        data["details"] = "\n".join(filter(None, [t(lang, "game_gone"), status_text, *opinions, data["store_url"]]))
+        return data
     store = viewer_store(dialog_manager)
     info = store.get("apps", {}).get(str(appid), {})
     tag_names = store.get("tag_names", {})
     tags = ", ".join(tag_names[str(tag)] for tag in info.get("tags", []) if str(tag) in tag_names)
-    accounts = await accounts_by_steam(db, family.family_id)
     owners = "".join(f"\n• {person_link(family, o, accounts)}" for o in game["owners"])
     shareable = shareable_copies(game)
     access = (
@@ -249,14 +383,11 @@ async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: s
         t(lang, "access_" + access),
         sharing_warning(lang, game.get("exclude_reason", 0)),
         t(lang, "availability_unknown"),
+        *opinions,
         f"\nhttps://store.steampowered.com/app/{appid}/",
     ]
-    return {
-        **personal,
-        "game": escape(game["name"]),
-        "details": "\n".join(line for line in lines if line),
-        "store_url": f"https://store.steampowered.com/app/{appid}/",
-    }
+    data["details"] = "\n".join(line for line in lines if line)
+    return data
 
 
 async def open_planner(callback: CallbackQuery, button: Button, manager: DialogManager):
@@ -449,6 +580,7 @@ async def reset_filters(callback: CallbackQuery, button: Button, manager: Dialog
     manager.dialog_data.pop("mode", None)
     manager.dialog_data.pop("status", None)
     await manager.find("multiplayer").set_checked(False)
+    await manager.find("recommended").set_checked(False)
     await manager.find("players").reset_checked()
     await on_start(None, manager)
     await reset_page(callback, button, manager)
@@ -558,6 +690,7 @@ games_dialog = Dialog(
             ),
             width=1,
         ),
+        Checkbox(Tr("recommended_on"), Tr("recommended_off"), id="recommended", on_state_changed=reset_page),
         SwitchTo(Tr("btn_genre"), id="genre", state=Games.genre),
         SwitchTo(Tr("btn_players"), id="players_btn", state=Games.players),
         Group(
@@ -648,7 +781,14 @@ games_dialog = Dialog(
         Header("library", "game"),
         # The card also links owner profiles; the preview should still show the game.
         LinkPreview(url=Format("{store_url}"), prefer_large_media=True, when="store_url"),
-        Button(Tr("btn_plan_copies"), id="plan_copies", on_click=open_planner, when="store_url"),
+        Select(
+            Format("{item[1]}"),
+            id="vote",
+            items="response_items",
+            item_id_getter=lambda item: item[0],
+            on_click=on_response,
+        ),
+        Button(Tr("btn_plan_copies"), id="plan_copies", on_click=open_planner, when="has_game"),
         Group(
             Select(
                 Format("{item[1]}"),

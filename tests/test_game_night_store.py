@@ -299,7 +299,7 @@ class GameNightStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(upgraded[:8], history)
         self.assertEqual(
             [(row["version"], row["name"]) for row in upgraded[8:]],
-            [(9, "009_game_nights.sql"), (10, "010_owner_transfers.sql")],
+            [(9, "009_game_nights.sql"), (10, "010_owner_transfers.sql"), (11, "011_game_responses.sql")],
         )
         self.assertEqual(await self.db.account(100), account)
         self.assertEqual(await self.db.family("9"), family)

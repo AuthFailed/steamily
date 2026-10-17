@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 from bot.dialogs.games import game_getter
 from bot.family import Family
+from bot.i18n import LANGUAGES, t
 from bot.inline import card_text
 
 
@@ -26,19 +27,145 @@ class InlineSharingCardTest(unittest.TestCase):
 
 
 class SharingCardTest(unittest.IsolatedAsyncioTestCase):
+    async def test_opinion_rendering_uses_current_consent_membership_and_response_revision(self):
+        family = Family("9")
+        family.snapshot = {
+            "members": ["alice", "bob"],
+            "names": {"alice": "Alice", "bob": "Bob <name>"},
+            "apps": [{"appid": 620, "name": "Portal 2", "owners": ["alice"]}],
+        }
+        viewer = {
+            "telegram_id": 1,
+            "steam_id": "alice",
+            "family_id": "9",
+            "country": "US",
+            "status": "approved",
+            "refresh_token": b"token",
+            "game_response_version": "viewer",
+        }
+        voter = {
+            **viewer,
+            "telegram_id": 2,
+            "steam_id": "bob",
+            "game_response_version": "vote",
+            "publish_telegram": True,
+            "tg_username": "bob_tg",
+            "tg_name": "Bob",
+        }
+        manager = SimpleNamespace(dialog_data={"appid": 620}, middleware_data={"account": viewer, "family": family})
+        row = {
+            "telegram_id": 2,
+            "steam_id": "bob",
+            "appid": 620,
+            "response": "recommend",
+            "named": True,
+            "game_response_version": "vote",
+        }
+        for change in (
+            "none",
+            "optout",
+            "revision",
+            "blocked",
+            "deleted",
+            "departed",
+            "viewer_deleted",
+            "viewer_blocked",
+        ):
+            with self.subTest(change=change):
+                family.snapshot["members"] = ["alice", "bob"]
+
+                async def accounts(_, change=change):
+                    current = dict(voter)
+                    if change == "optout":
+                        current["publish_telegram"] = False
+                    elif change == "revision":
+                        current["game_response_version"] = "cleared"
+                    elif change == "blocked":
+                        current["status"] = "blocked"
+                    elif change == "departed":
+                        family.snapshot["members"] = ["alice"]
+                    reader = dict(viewer)
+                    if change == "viewer_deleted":
+                        return [current]
+                    if change == "viewer_blocked":
+                        reader["status"] = "blocked"
+                    return [reader] if change == "deleted" else [reader, current]
+
+                db = SimpleNamespace(
+                    game_responses=AsyncMock(return_value=[row]),
+                    game_marks=AsyncMock(return_value={}),
+                    family_accounts=AsyncMock(side_effect=accounts),
+                )
+                data = await game_getter(manager, family, db, "en")
+                if change.startswith("viewer_"):
+                    self.assertEqual(data["details"], t("en", "response_unavailable"))
+                    self.assertEqual(data["response_items"], [])
+                    continue
+                visible = change in ("none", "optout")
+                self.assertIn(f"Recommend: {int(visible)}", data["details"])
+                self.assertEqual("Bob &lt;name&gt;" in data["details"], visible)
+                self.assertEqual("bob_tg" in data["details"], change == "none")
+
+    async def test_opinion_buttons_fit_telegram_limit_in_both_languages(self):
+        family = Family("9")
+        family.snapshot = {
+            "members": ["alice"],
+            "names": {"alice": "Alice"},
+            "apps": [{"appid": 4294967295, "name": "Game", "owners": ["alice"]}],
+        }
+        viewer = {
+            "telegram_id": 1,
+            "steam_id": "alice",
+            "family_id": "9",
+            "country": "US",
+            "status": "approved",
+            "refresh_token": b"token",
+            "game_response_version": "d27386c5-6418-457c-8aa0-b94c46a42285",
+        }
+        manager = SimpleNamespace(
+            dialog_data={"appid": 4294967295}, middleware_data={"account": viewer, "family": family}
+        )
+        db = SimpleNamespace(
+            game_responses=AsyncMock(return_value=[]),
+            game_marks=AsyncMock(return_value={}),
+            family_accounts=AsyncMock(return_value=[viewer]),
+        )
+        for lang in LANGUAGES:
+            data = await game_getter(manager, family, db, lang)
+            self.assertIn(t(lang, "response_privacy"), data["details"])
+            self.assertEqual(len(data["response_items"]), 5)
+            for item, _ in data["response_items"]:
+                self.assertLessEqual(len(f"12345678:vote:{item}".encode()), 64)
+
     async def card(self, reason, viewer="alice", lang="en", info=None):
         family = Family("9")
         if info is not None:
             family.stores["US"] = {"apps": {"620": info}}
         family.snapshot = {
+            "members": ["alice", "bob", "carol"],
             "apps": [{"appid": 620, "name": "Portal 2", "owners": ["alice", "bob"], "exclude_reason": reason}],
             "names": {"alice": "Alice", "bob": "Bob"},
         }
         manager = SimpleNamespace(
             dialog_data={"appid": 620},
-            middleware_data={"family": family, "account": {"telegram_id": 1, "country": "US", "steam_id": viewer}},
+            middleware_data={
+                "family": family,
+                "account": {
+                    "country": "US",
+                    "steam_id": viewer,
+                    "telegram_id": 1,
+                    "family_id": "9",
+                    "game_response_version": "version",
+                    "status": "approved",
+                    "refresh_token": b"token",
+                },
+            },
         )
-        db = SimpleNamespace(family_accounts=AsyncMock(return_value=[]), game_marks=AsyncMock(return_value={}))
+        db = SimpleNamespace(
+            family_accounts=AsyncMock(return_value=[manager.middleware_data["account"]]),
+            game_responses=AsyncMock(return_value=[]),
+            game_marks=AsyncMock(return_value={}),
+        )
         return (await game_getter(manager, family, db, lang))["details"]
 
     async def test_card_distinguishes_known_modes_from_missing_and_legacy_details(self):

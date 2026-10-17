@@ -59,7 +59,11 @@ class RecordedSharingTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sorted(app["appid"] for app in query(self.family.apps, {}, players=players)), expected)
 
     async def test_cards_separate_ownership_sharing_and_unknown_live_availability(self):
-        db = SimpleNamespace(family_accounts=AsyncMock(return_value=[]), game_marks=AsyncMock(return_value={}))
+        db = SimpleNamespace(
+            family_accounts=AsyncMock(return_value=[]),
+            game_responses=AsyncMock(return_value=[]),
+            game_marks=AsyncMock(return_value={}),
+        )
         cases = [
             (202, "a", 1, 0, "own copy"),
             (202, "b", 1, 0, "unavailable through family sharing"),
@@ -72,9 +76,18 @@ class RecordedSharingTest(unittest.IsolatedAsyncioTestCase):
                     dialog_data={"appid": appid},
                     middleware_data={
                         "family": self.family,
-                        "account": {"telegram_id": 1, "country": "US", "steam_id": viewer},
+                        "account": {
+                            "country": "US",
+                            "steam_id": viewer,
+                            "telegram_id": 1,
+                            "family_id": "9",
+                            "game_response_version": "version",
+                            "status": "approved",
+                            "refresh_token": b"token",
+                        },
                     },
                 )
+                db.family_accounts.return_value = [manager.middleware_data["account"]]
                 details = (await game_getter(manager, self.family, db, "en"))["details"]
                 self.assertIn(f"Owned copies: {owned}", details)
                 self.assertIn(f"Shareable copies: {shareable}", details)

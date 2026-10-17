@@ -251,7 +251,7 @@ class OwnerTransferDbTest(unittest.IsolatedAsyncioTestCase):
             DROP TRIGGER IF EXISTS invalidate_owner_transfer ON families;
             DROP FUNCTION IF EXISTS invalidate_owner_transfer();
             DROP TABLE IF EXISTS owner_transfers;
-            DELETE FROM schema_migrations WHERE version = 10;
+            DELETE FROM schema_migrations WHERE version >= 10;
         """)
         async with self.db.pool.acquire() as connection:
             await migrate(connection)
