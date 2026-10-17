@@ -802,6 +802,72 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Games: <b>6</b>", self.last().text)  # 3, 6, ..., 18 have two copies
         self.assertIn("needs 2+ copies", self.last().text)
 
+    async def test_specific_modes_keep_hosted_sessions_with_one_copy(self):
+        self.families.stores["US"]["apps"]["1"].update(
+            play_mode="multiplayer",
+            categories={"supported_player_categoryids": [38, 36, 39], "feature_categoryids": [44]},
+        )
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        self.assertIn("unknown metadata", self.last().text)
+        await client.click(self.last(), Btn("Local co-op/split-screen"))
+        await client.click(self.last(), Btn("🤝 Players: 1"))
+        await client.click(self.last(), Btn("⬜ Alice"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("⬜ Multiplayer only", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        self.assertIn("one accessible host copy", self.last().text)
+        await client.click(self.last(), Btn("Game 01 · \\$1.00"))
+        self.assertIn("Online co-op: supported", self.last().text)
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("Filters"))
+        for mode in ("Online co-op", "Online PvP"):
+            await client.click(self.last(), Btn(mode))
+            await client.click(self.last(), Btn("◀️ Back"))
+            self.assertIn("Games: <b>0</b>", self.last().text)
+            self.assertIn("needs 2+ copies", self.last().text)
+            await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Remote Play Together"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("♻️ Reset filters"))
+        self.assertIn("• Any session mode", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>20</b>", self.last().text)
+
+    async def test_any_mode_and_multiplayer_restore_separate_copy_rules(self):
+        self.families.stores["US"]["apps"]["1"].update(play_mode=None, categories={"feature_categoryids": [44]})
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("🤝 Players: 1"))
+        await client.click(self.last(), Btn("⬜ Alice"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("Remote Play Together"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("⬜ Multiplayer only"))
+        self.assertIn("• Any session mode", self.buttons())
+        self.assertIn("Remote Play Together", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>6</b>", self.last().text)
+        self.assertIn("needs 2+ copies", self.last().text)
+
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Remote Play Together"))
+        await client.click(self.last(), Btn("Any session mode"))
+        self.assertIn("⬜ Multiplayer only", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>6</b>", self.last().text)
+        self.assertIn("needs 2+ copies", self.last().text)
+
     async def open_bot_members(self, client):
         await client.send("/start")
         self.assertNotIn("Admin", self.buttons(client.chat.id))  # merged into family management

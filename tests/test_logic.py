@@ -224,6 +224,19 @@ class SteamParsingTest(unittest.TestCase):
         self.assertEqual(parse_store_item({"is_free": True})["price"], 0)
         self.assertIsNone(parse_store_item({})["price"])
 
+    def test_store_categories_preserve_missing_fields_and_explicit_empty_lists(self):
+        for categories in (
+            None,
+            {},
+            {"supported_player_categoryids": []},
+            {"feature_categoryids": []},
+            {"supported_player_categoryids": [2, 38, 39], "feature_categoryids": [44], "controller_categoryids": [28]},
+        ):
+            with self.subTest(categories=categories):
+                parsed = parse_store_item({} if categories is None else {"categories": categories})
+                self.assertIn("categories", parsed)
+                self.assertEqual(parsed["categories"], categories)
+
     def test_play_mode_requires_supported_player_categories(self):
         for categories, expected in (
             ([1], "multiplayer"),

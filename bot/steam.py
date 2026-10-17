@@ -334,6 +334,7 @@ def parse_store_item(item: dict) -> dict:
         "price": 0 if item.get("is_free") else (int(cents) if cents is not None else None),
         "price_text": "Free" if item.get("is_free") else option.get("formatted_final_price"),
         "tags": [t["tagid"] for t in tags[:TOP_TAGS]],
+        "categories": item.get("categories"),
         "play_mode": "multiplayer"
         if categories & MULTIPLAYER_CATEGORIES
         else ("singleplayer" if 2 in categories else None),
@@ -344,11 +345,13 @@ async def update_store_cache(http: aiohttp.ClientSession, cache: dict, appids: l
     """Refreshes stale store details (price, tags, categories) in place; returns True if anything changed."""
     apps = cache.setdefault("apps", {})
     now = time.time()
-    # Legacy multiplayer=False did not distinguish single-player from missing metadata.
+    # Refresh legacy records once to retain exact categories and distinguish unknown play modes.
     stale = [
         a
         for a in appids
-        if "play_mode" not in apps.get(str(a), {}) or now - apps[str(a)].get("fetched", 0) > STORE_MAX_AGE
+        if "play_mode" not in apps.get(str(a), {})
+        or "categories" not in apps.get(str(a), {})
+        or now - apps[str(a)].get("fetched", 0) > STORE_MAX_AGE
     ]
     for start in range(0, len(stale), STORE_BATCH):
         request = {

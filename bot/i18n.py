@@ -257,6 +257,21 @@ TEXTS = {
         "budget_region_changed": "Store region changed. Set a new maximum price in the current currency.",
         "sum_multiplayer": "👥 Confirmed multiplayer only (unknown modes excluded)",
         "sum_players": "🤝 {names} (needs {n}+ copies)",
+        "sum_players_hosted": "🤝 {names} (one accessible host copy)",
+        "mode_any": "Any session mode",
+        "mode_online_coop": "Online co-op",
+        "mode_online_pvp": "Online PvP",
+        "mode_local_coop": "Local co-op/split-screen",
+        "mode_remote_play": "Remote Play Together",
+        "mode_status_true": "supported",
+        "mode_status_false": "not listed",
+        "mode_status_none": "unknown",
+        "online_copy_rule": "🌐 Online: one owned or shareable copy per player.",
+        "local_copy_rule": "🏠 Local: one accessible host copy; everyone plays on the host's device.",
+        "remote_copy_rule": "📡 Remote Play Together: one accessible host copy; guests join the host's stream "
+        "without owning the game.",
+        "host_copy_rule": "For an excluded game, a selected player must own the host copy.",
+        "session_limits": "Check the game's player limit and input requirements on Steam.",
         "btn_filters": "Filters",
         "btn_sort": "Sorting",
         "btn_clear_search": "✖️ Clear search",
@@ -268,7 +283,8 @@ TEXTS = {
         "filters_title": "Filters",
         "filters_desc": (
             "Use the buttons below to filter the family library.\n"
-            "Multiplayer only excludes games whose mode is unknown."
+            "Mode filters require confirmed support; unknown metadata is excluded.\n"
+            "Choose a specific session mode to apply its copy rules."
         ),
         "multiplayer_on": "✅ Multiplayer only",
         "multiplayer_off": "⬜ Multiplayer only",
@@ -280,8 +296,12 @@ TEXTS = {
         "genre_desc": "Pick a genre. The number shows how many family games have it.",
         "btn_any_genre": "Any genre",
         "players_title": "Players",
-        "players_desc": "Pick who is going to play. Everyone needs an owned or shareable copy. "
-        "Excluded games require each player to own a copy. Availability right now is not checked.",
+        "players_desc": (
+            "Pick who is going to play. Online/default searches need an owned or shareable copy per person; "
+            "excluded games require each player to own one. Local/Remote Play filters need one accessible host copy; "
+            "for excluded games, a selected player must own it. "
+            "Player limits, inputs and current availability are not checked."
+        ),
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "This game is no longer in the family library.",
@@ -620,6 +640,21 @@ TEXTS = {
         "budget_region_changed": "Регион магазина изменился. Задайте максимальную цену заново в текущей валюте.",
         "sum_multiplayer": "👥 Только подтверждённый мультиплеер (неизвестные режимы исключены)",
         "sum_players": "🤝 {names} (нужно копий: {n}+)",
+        "sum_players_hosted": "🤝 {names} (одна доступная копия у ведущего)",
+        "mode_any": "Любой режим сеанса",
+        "mode_online_coop": "Онлайн-кооператив",
+        "mode_online_pvp": "Онлайн-PvP",
+        "mode_local_coop": "Локальный кооператив/разделённый экран",
+        "mode_remote_play": "Remote Play Together",
+        "mode_status_true": "поддерживается",
+        "mode_status_false": "не указан",
+        "mode_status_none": "неизвестно",
+        "online_copy_rule": "🌐 Онлайн: каждому нужна своя копия или копия с семейным доступом.",
+        "local_copy_rule": "🏠 Локально: нужна одна доступная копия у ведущего; все играют на его устройстве.",
+        "remote_copy_rule": "📡 Remote Play Together: нужна одна доступная копия у ведущего; гости подключаются "
+        "к трансляции ведущего без своей копии игры.",
+        "host_copy_rule": "Если семейный доступ исключён, копией должен владеть один из выбранных игроков.",
+        "session_limits": "Проверьте лимит игроков и требования к устройствам ввода в Steam.",
         "btn_filters": "Фильтры",
         "btn_sort": "Сортировка",
         "btn_clear_search": "✖️ Сбросить поиск",
@@ -631,7 +666,8 @@ TEXTS = {
         "filters_title": "Фильтры",
         "filters_desc": (
             "Используй кнопки ниже, чтобы отфильтровать семейную библиотеку.\n"
-            "Фильтр «Только мультиплеер» исключает игры с неизвестным режимом."
+            "Фильтры режимов требуют подтверждённой поддержки; неизвестные данные исключаются.\n"
+            "Выберите конкретный режим сеанса, чтобы применить его требования к копиям."
         ),
         "multiplayer_on": "✅ Только мультиплеер",
         "multiplayer_off": "⬜ Только мультиплеер",
@@ -643,8 +679,10 @@ TEXTS = {
         "genre_desc": "Выберите жанр. Число показывает, сколько игр семьи в этом жанре.",
         "btn_any_genre": "Любой жанр",
         "players_title": "Игроки",
-        "players_desc": "Выберите, кто будет играть. Каждому нужна собственная копия или копия с семейным доступом. "
-        "Исключённой из доступа игрой должен владеть каждый игрок. Наличие свободных копий сейчас не проверяется.",
+        "players_desc": "Выберите, кто будет играть. Онлайн и без конкретного режима каждому нужна своя копия "
+        "или копия с семейным доступом; исключённой игрой должен владеть каждый. Локально и через Remote Play "
+        "достаточно одной доступной копии у ведущего; исключённой копией должен владеть один из выбранных игроков. "
+        "Лимит игроков, устройства ввода и наличие свободных копий сейчас не проверяются.",
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "Этой игры больше нет в библиотеке семьи.",
