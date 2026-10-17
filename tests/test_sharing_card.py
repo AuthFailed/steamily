@@ -4,6 +4,25 @@ from unittest.mock import AsyncMock
 
 from bot.dialogs.games import game_getter
 from bot.family import Family
+from bot.inline import card_text
+
+
+class InlineSharingCardTest(unittest.TestCase):
+    def test_family_cards_distinguish_owned_shareable_and_available_copies(self):
+        for reason, shareable in ((0, 2), (1, 0), (999, 0)):
+            with self.subTest(reason=reason):
+                text = card_text("en", "Game", "", None, ["Alice", "Bob"], "https://store/", reason)
+                self.assertIn("Owned copies: 2", text)
+                self.assertIn(f"Shareable copies: {shareable}", text)
+                self.assertIn("Available now: unknown", text)
+                self.assertNotIn("Your access:", text)
+
+    def test_store_only_card_does_not_imply_family_copy_availability(self):
+        text = card_text("en", "Game", "", None, [], "https://store/", 0)
+        self.assertIn("Nobody in the family has it", text)
+        self.assertNotIn("Owned copies:", text)
+        self.assertNotIn("Shareable copies:", text)
+        self.assertNotIn("Available now:", text)
 
 
 class SharingCardTest(unittest.IsolatedAsyncioTestCase):
