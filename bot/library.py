@@ -53,6 +53,22 @@ def shareable_copies(app: dict) -> int:
     return len(app["owners"]) if app.get("exclude_reason", 0) == 0 else 0
 
 
+def copy_plan(app: dict, players: list[str]) -> dict:
+    """Estimate separate-copy capacity from the snapshot, without checking live availability."""
+    selected, owners = set(players), set(app["owners"])
+    owned = len(selected & owners)
+    reason = app.get("exclude_reason")
+    borrowable = None if reason is None else (len(owners) - owned if reason == 0 else 0)
+    eligible = owned + borrowable if borrowable is not None else (owned if owned == len(selected) else None)
+    return {
+        "players": len(selected),
+        "owned": owned,
+        "borrowable": borrowable,
+        "eligible": eligible,
+        "additional": max(0, len(selected) - eligible) if eligible is not None else None,
+    }
+
+
 def query(
     apps: list[dict],
     store: dict,

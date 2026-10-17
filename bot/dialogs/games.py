@@ -23,7 +23,7 @@ from aiogram_dialog.widgets.text import Format
 
 from ..family import DEFAULT_COUNTRY, Family, accounts_by_steam, person_link
 from ..i18n import Tr, sharing_warning, t
-from ..library import SORTS, currency, parse_budget, query, shareable_copies, tag_counts
+from ..library import SORTS, copy_plan, currency, parse_budget, query, shareable_copies, tag_counts
 from ..states import Games
 from ..ui import BLUE, Header, back_home, home, look
 
@@ -187,6 +187,44 @@ async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: s
         "game": escape(game["name"]),
         "details": "\n".join(line for line in lines if line),
         "store_url": f"https://store.steampowered.com/app/{appid}/",
+    }
+
+
+async def open_planner(callback: CallbackQuery, button: Button, manager: DialogManager):
+    players = manager.find("plan_players")
+    await players.reset_checked()
+    members = manager.middleware_data["family"].members
+    for player in manager.find("players").get_checked():
+        if player in members:
+            await players.set_checked(player, True)
+    await manager.switch_to(Games.planner)
+
+
+async def planner_getter(dialog_manager: DialogManager, family: Family, lang: str, **kwargs):
+    game = next((a for a in family.apps if a["appid"] == dialog_manager.dialog_data["appid"]), None)
+    if game is None:
+        return {"game": "—", "details": t(lang, "game_gone"), "members": [], "has_game": False}
+    players = [p for p in dialog_manager.find("plan_players").get_checked() if p in family.members]
+    plan = copy_plan(game, players)
+    values = {key: t(lang, "planner_unknown") if value is None else value for key, value in plan.items()}
+    info = viewer_store(dialog_manager).get("apps", {}).get(str(game["appid"]), {})
+    price = info.get("price_text") if info.get("price") is not None else None
+    reason = game.get("exclude_reason")
+    lines = [
+        t(lang, "planner_summary", **values) if players else t(lang, "planner_pick_players"),
+        t(lang, "planner_owned", **values),
+        t(lang, "planner_borrowable", **values),
+        t(lang, "planner_eligibility_unknown") if reason is None else sharing_warning(lang, reason),
+        t(lang, "planner_price", price=escape(price or t(lang, "price_unknown"))),
+        t(lang, "planner_price_note"),
+        t(lang, "availability_unknown"),
+        f"\nhttps://store.steampowered.com/app/{game['appid']}/",
+    ]
+    return {
+        "game": escape(game["name"]),
+        "details": "\n".join(line for line in lines if line),
+        "members": sorted(((m, family.name(m)) for m in family.members), key=lambda m: m[1].lower()),
+        "has_game": True,
     }
 
 
@@ -435,9 +473,27 @@ games_dialog = Dialog(
         Header("library", "game"),
         # The card also links owner profiles; the preview should still show the game.
         LinkPreview(url=Format("{store_url}"), prefer_large_media=True, when="store_url"),
+        Button(Tr("btn_plan_copies"), id="plan_copies", on_click=open_planner, when="store_url"),
         back_to_list(),
         getter=game_getter,
         state=Games.game,
+    ),
+    Window(
+        Header("library", "planner"),
+        Group(
+            Multiselect(
+                Format("✅ {item[1]}"),
+                Format("⬜ {item[1]}"),
+                id="plan_players",
+                items="members",
+                item_id_getter=lambda m: m[0],
+            ),
+            width=2,
+            when="has_game",
+        ),
+        back_home(SwitchTo(Tr("btn_back"), id="back_game", state=Games.game)),
+        getter=planner_getter,
+        state=Games.planner,
     ),
     on_start=on_start,
 )
