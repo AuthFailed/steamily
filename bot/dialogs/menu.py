@@ -18,7 +18,7 @@ from ..family import Family, SessionRevocationFailed, alert_settings, role
 from ..i18n import LANGUAGES, Tr, language_of, t
 from ..library import ALERTS
 from ..login import LoginRejected
-from ..states import FamilyView, Games, Menu
+from ..states import FamilyView, Games, Menu, Ownership
 from ..ui import GREEN, RED, Header, back_home, look, premium
 from . import require_owner
 
@@ -51,10 +51,11 @@ async def on_language(callback: CallbackQuery, widget, manager: DialogManager, l
     await manager.switch_to(Menu.settings if manager.middleware_data["has_language"] else Menu.main)
 
 
-async def main_getter(account, family: Family | None, lang: str, **kwargs):
+async def main_getter(account, family: Family | None, db, lang: str, **kwargs):
     user_role = role(account)
     allowed = user_role in ("member", "owner")
     loaded = allowed and family.snapshot is not None
+    transfer = await db.owner_transfer(account["family_id"]) if user_role == "member" else None
     return {
         "status": t(lang, STATUS_KEYS[user_role]) if user_role in STATUS_KEYS else "",
         "loaded": loaded,
@@ -63,6 +64,7 @@ async def main_getter(account, family: Family | None, lang: str, **kwargs):
         "games": len(family.apps) if loaded else 0,
         "members": len(family.members) if loaded else 0,
         "is_owner": user_role == "owner",
+        "ownership_invited": transfer is not None and transfer["target_id"] == account["telegram_id"],
         "has_account": account is not None,
         "needs_login": account is None or account["refresh_token"] is None,
         "relogin": account is not None and account["refresh_token"] is None,
@@ -224,9 +226,9 @@ async def logout_getter(account, db, family: Family | None, **kwargs):
             a
             for a in await db.family_accounts(account["family_id"])
             if a["telegram_id"] != account["telegram_id"]
-            and a["status"] != "blocked"
+            and a["status"] == "approved"
             and family is not None
-            and a["steam_id"] in family.members
+            and (family.snapshot is None or a["steam_id"] in family.members)
             and a["refresh_token"]
         ]
     return {
@@ -289,6 +291,13 @@ menu_dialog = Dialog(
         Start(Tr("btn_library"), id="library", state=Games.list, when="loaded", style=look("library", GREEN)),
         Button(Tr("btn_login"), id="login", on_click=on_login, when="needs_login", style=look("login", GREEN)),
         Start(Tr("btn_family"), id="family", state=FamilyView.info, when="loaded", style=look("family")),
+        Start(
+            Tr("btn_ownership_invitation"),
+            id="ownership_invitation",
+            state=Ownership.invitation,
+            when="ownership_invited",
+            style=look("admin"),
+        ),
         SwitchTo(Tr("btn_settings"), id="settings", state=Menu.settings, style=look("settings")),
         SwitchTo(Tr("btn_about"), id="about", state=Menu.about),
         getter=main_getter,
@@ -342,6 +351,13 @@ menu_dialog = Dialog(
             state=Menu.group_alerts,
             when="is_owner",
             style=look("notifications"),
+        ),
+        Start(
+            Tr("btn_ownership"),
+            id="ownership",
+            state=Ownership.manage,
+            when="is_owner",
+            style=look("admin"),
         ),
         SwitchTo(Tr("btn_language"), id="to_language", state=Menu.language, style=look("language")),
         SwitchTo(Tr("btn_logout"), id="logout", state=Menu.logout, style=look("logout", RED)),

@@ -31,6 +31,11 @@ class Admin(StatesGroup):
     member = State()
 
 
+class Ownership(StatesGroup):
+    manage = State()
+    invitation = State()
+
+
 class FamilyView(StatesGroup):
     info = State()
     stats = State()

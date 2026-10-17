@@ -195,6 +195,7 @@ class Families:
                 )
                 if on_registered:
                     on_registered()
+                registered = await self.db.account(telegram_id)
                 self.auths.pop(telegram_id, None)
                 self.auth_generations.pop(telegram_id, None)
                 self.read_backoff.pop(family_id, None)
@@ -205,6 +206,11 @@ class Families:
         family = self.get(family_id)
         async with family.lock:
             await self._reconcile_accounts(family_id, snapshot["members"])
+            if account and account["family_id"] == family_id and account["steam_id"] == steam_id and registered:
+                # Only an explicit fresh Steam login can recover ownership without an approved successor.
+                await self.db.claim_initial_owner(
+                    family_id, telegram_id, expected_generation=registered["token_generation"]
+                )
             family.snapshot = snapshot
             self._checked(family_id)
         refresh_ids = [family_id]
@@ -224,6 +230,36 @@ class Families:
         await self.db.update_family(family_id, owner_telegram_id=telegram_id)
         if telegram_id is not None:
             await self.db.set_status(telegram_id, "approved")
+
+    async def create_owner_transfer(self, family_id: str, owner_id: int, target_id: int):
+        family = self.get(family_id)
+        async with family.lock:
+            actor = await self.db.account(owner_id)
+            if role(actor) != "owner" or actor["family_id"] != family_id:
+                return None
+            try:
+                snapshot = await self._fetch(family_id)
+            except (aiohttp.ClientError, TimeoutError, OSError, RuntimeError):
+                return None
+            if snapshot is None or snapshot["family_id"] != family_id:
+                return None
+            family.snapshot = snapshot
+            return await self.db.create_owner_transfer(family_id, owner_id, target_id, snapshot["members"])
+
+    async def accept_owner_transfer(self, family_id: str, target_id: int, transfer_id: str):
+        family = self.get(family_id)
+        async with family.lock:
+            invitation = await self.db.owner_transfer(family_id)
+            if invitation is None or invitation["id"] != transfer_id or invitation["target_id"] != target_id:
+                return None
+            try:
+                snapshot = await self._fetch(family_id)
+            except (aiohttp.ClientError, TimeoutError, OSError, RuntimeError):
+                return None
+            if snapshot is None or snapshot["family_id"] != family_id:
+                return None
+            family.snapshot = snapshot
+            return await self.db.accept_owner_transfer(family_id, target_id, transfer_id, snapshot["members"])
 
     async def leave(self, telegram_id: int) -> int | None:
         """Revoke this Steam session before deleting its account and handing over its bot role."""
@@ -254,14 +290,13 @@ class Families:
                         a
                         for a in await self.db.family_accounts(account["family_id"])
                         if a["telegram_id"] != telegram_id
-                        and a["status"] != "blocked"
+                        and a["status"] == "approved"
                         and a["refresh_token"]
                         and (a["steam_id"] in family.members if family.snapshot else a["status"] == "approved")
                     ]
-                    approved = [a for a in others if a["status"] == "approved"]
                     if others:
-                        new_owner = random.choice(approved or others)["telegram_id"]
-                    await self.make_owner(account["family_id"], new_owner)
+                        new_owner = random.choice(others)["telegram_id"]
+                    new_owner = await self.db.handover_owner(account["family_id"], telegram_id, new_owner)
                 await self.db.delete_user(telegram_id)
                 await self._forget(account or cached_account, telegram_id)
                 return new_owner

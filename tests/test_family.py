@@ -184,6 +184,7 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             await self.families.register(2, "refresh", BOB)
             await self.families.register(3, "refresh", "76561198000000003")
         await self.db.set_language(1, "ru")
+        await self.db.set_status(2, "approved")
         await self.db.set_status(3, "blocked")  # blocked members never inherit
 
         self.assertEqual(await self.families.leave(1), 2)
@@ -529,11 +530,11 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("9", self.families.presence)
         self.assertNotIn("9", self.families.last_family_check)
         account = await self.db.account(1)
-        self.assertEqual((account["family_id"], account["status"]), ("other", "approved"))
+        self.assertEqual((account["family_id"], account["status"]), ("other", "pending"))
         self.assertEqual(self.db.refresh_token(account), "new-login")
         self.assertIsNotNone(await self.db.family("other"))
         self.assertEqual(self.families.items["other"].snapshot, target)
-        self.assertIn(1, self.families.auths)
+        self.assertIsNone((await self.db.family("other"))["owner_telegram_id"])
 
     async def test_changed_steam_identity_cannot_keep_ownership(self):
         current = {**snapshot([]), "members": [ALICE, BOB, "76561198000000003"]}
@@ -737,15 +738,15 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
             await self.families.register(1, "alice", ALICE)
             await self.families.register(2, "bob", BOB)
         selected, resume = asyncio.Event(), asyncio.Event()
-        make_owner = self.families.make_owner
+        handover_owner = self.db.handover_owner
 
         async def paused_handover(*args):
             selected.set()
             await resume.wait()
-            await make_owner(*args)
+            return await handover_owner(*args)
 
         with (
-            patch.object(self.families, "make_owner", paused_handover),
+            patch.object(self.db, "handover_owner", paused_handover),
             patch("bot.family.fetch_family_snapshot", AsyncMock(side_effect=NoFamily("Bob left every family"))),
         ):
             logout = asyncio.create_task(self.families.leave(1))
@@ -768,15 +769,15 @@ class FamiliesTest(unittest.IsolatedAsyncioTestCase):
         with patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)):
             await self.families.register(3, "carol", carol)
         selected, resume = asyncio.Event(), asyncio.Event()
-        make_owner = self.families.make_owner
+        handover_owner = self.db.handover_owner
 
         async def paused_handover(*args):
             selected.set()
             await resume.wait()
-            await make_owner(*args)
+            return await handover_owner(*args)
 
         with (
-            patch.object(self.families, "make_owner", paused_handover),
+            patch.object(self.db, "handover_owner", paused_handover),
             patch("bot.family.fetch_family_snapshot", AsyncMock(return_value=target)),
         ):
             logout = asyncio.create_task(self.families.leave(1))

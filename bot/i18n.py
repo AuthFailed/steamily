@@ -97,10 +97,34 @@ TEXTS = {
         "publication_unavailable": "Could not verify your account and current family. Reopen Settings and try again.",
         "btn_requests_on": "New member alerts: on",
         "btn_requests_off": "New member alerts: off",
-        "logout_owner_handover": "👑 You own this family in the bot. After you log out, a random other family member "
-        "registered in the bot becomes the owner, and they will be told.",
-        "logout_owner_alone": "👑 You own this family in the bot and nobody else from it is registered: the family "
-        "will have no owner until someone registers.",
+        "btn_ownership": "Bot ownership",
+        "btn_ownership_invitation": "Ownership invitation",
+        "ownership_title": "Bot ownership",
+        "ownership_desc": "Transfer control in the bot after the selected member accepts within 24 hours. "
+        "This does not change your Steam family or its adult/child roles.",
+        "ownership_pending": "Waiting for <b>{target}</b> to accept.\nExpires: {expires}.",
+        "ownership_empty": "No other approved family members with an active Steam login are available.",
+        "ownership_invitation": "<b>{requester}</b> invites you to become the bot owner. "
+        "Accept only if you want to manage bot access and family settings.\nExpires: {expires}.",
+        "btn_cancel_ownership": "Cancel invitation",
+        "btn_accept_ownership": "Accept bot ownership",
+        "ownership_requested": "<b>{requester}</b> invited <b>{target}</b> to become the bot owner. "
+        "The invitation lasts 24 hours. The recipient can accept from the main menu → Ownership invitation. "
+        "Steam family membership and adult/child roles stay the same.",
+        "ownership_sent": "Ownership invitation sent",
+        "ownership_cancelled": "<b>{requester}</b> cancelled the bot ownership invitation for <b>{target}</b>.",
+        "ownership_cancelled_short": "Ownership invitation cancelled",
+        "ownership_completed": "<b>{target}</b> accepted bot ownership from <b>{requester}</b>. "
+        "The previous owner remains an approved member. Steam family membership and adult/child roles stay the same.",
+        "ownership_completed_short": "Bot ownership transferred",
+        "ownership_unavailable": "This invitation is unavailable or your current family could not be verified. "
+        "Reopen the menu and try again.",
+        "logout_owner_handover": "👑 You own this family in the bot. After you log out, a random approved family "
+        "member with an active Steam login becomes the owner and is notified. "
+        "Pending and blocked accounts are never promoted.",
+        "logout_owner_alone": "👑 You own this family in the bot and no approved successor is available. "
+        "Ownership stays vacant; pending and blocked accounts are never promoted automatically. "
+        "A fresh Steam login by a family member can recover ownership.",
         "new_owner": "👑 You are now the owner of the <b>{name}</b> family in the bot: the previous owner logged out.",
         "family_info": "<b>{name}</b> · {count} of {size}\n{members_list}",
         "role_child": "child",
@@ -460,10 +484,34 @@ TEXTS = {
         "publication_unavailable": "Не удалось проверить ваш аккаунт и текущую семью. Откройте Настройки заново.",
         "btn_requests_on": "Уведомления о новых участниках: вкл",
         "btn_requests_off": "Уведомления о новых участниках: выкл",
-        "logout_owner_handover": "👑 Вы владелец этой семьи в боте. После выхода владельцем станет случайный другой "
-        "участник семьи, зарегистрированный в боте, и мы его об этом уведомим.",
-        "logout_owner_alone": "👑 Вы владелец этой семьи в боте, и больше никто из неё не зарегистрирован: у семьи не "
-        "будет владельца, пока кто-нибудь не зарегистрируется.",
+        "btn_ownership": "Владелец бота",
+        "btn_ownership_invitation": "Приглашение стать владельцем",
+        "ownership_title": "Владелец бота",
+        "ownership_desc": "Передача управления ботом после согласия выбранного участника в течение 24 часов. "
+        "Это не меняет состав семьи Steam и роли взрослого или ребёнка.",
+        "ownership_pending": "Ожидаем согласия <b>{target}</b>.\nСрок: {expires}.",
+        "ownership_empty": "Нет других одобренных участников семьи с действующим входом в Steam.",
+        "ownership_invitation": "<b>{requester}</b> предлагает вам стать владельцем бота. "
+        "Примите, если хотите управлять доступом к боту и настройками семьи.\nСрок: {expires}.",
+        "btn_cancel_ownership": "Отменить приглашение",
+        "btn_accept_ownership": "Принять владение ботом",
+        "ownership_requested": "<b>{requester}</b> предлагает <b>{target}</b> принять роль владельца бота. "
+        "Приглашение действует 24 часа. Получатель может принять его в главном меню → Приглашение стать владельцем. "
+        "Состав семьи Steam и роли взрослого или ребёнка не меняются.",
+        "ownership_sent": "Приглашение стать владельцем отправлено",
+        "ownership_cancelled": "<b>{requester}</b> отменил приглашение <b>{target}</b> стать владельцем бота.",
+        "ownership_cancelled_short": "Приглашение стать владельцем отменено",
+        "ownership_completed": "<b>{target}</b> принял роль владельца бота от <b>{requester}</b>. "
+        "Прежний владелец остаётся одобренным участником. Состав семьи Steam и роли взрослого или ребёнка не меняются.",
+        "ownership_completed_short": "Владение ботом передано",
+        "ownership_unavailable": "Приглашение недоступно или не удалось проверить текущую семью. "
+        "Откройте меню заново и попробуйте ещё раз.",
+        "logout_owner_handover": "👑 Вы владелец этой семьи в боте. После выхода владельцем станет случайный "
+        "одобренный участник с действующим входом в Steam, и мы его уведомим. "
+        "Ожидающие и заблокированные аккаунты владельцами не назначаются.",
+        "logout_owner_alone": "👑 Вы владелец этой семьи в боте, и доступного одобренного преемника нет. "
+        "Владелец останется не назначен; ожидающие и заблокированные аккаунты не повышаются автоматически. "
+        "Участник семьи сможет восстановить владение через новый вход в Steam.",
         "new_owner": "👑 Теперь вы владелец семьи <b>{name}</b> в боте: прежний владелец вышел.",
         "family_info": "<b>{name}</b> · {count} из {size}\n{members_list}",
         "role_child": "ребёнок",

@@ -108,6 +108,26 @@ to make that decision.
 
 `POLL_INTERVAL_SECONDS` defaults to **1800** and must be at least **300**. Presence checks run every **300 seconds** when enabled. Temporary Steam failures share a family backoff starting at 60 seconds and increasing to one hour. Successful reads reset it. After upgrading, change an older `.env` value below 300 before starting the bot.
 
+## Bot ownership
+
+The bot owner can open **Settings → Bot ownership** and select another approved,
+signed-in member of the same Steam family. The recipient sees who requested the
+handover under **Main menu → Ownership invitation** and must accept within 24 hours.
+Until acceptance, the current owner keeps control and can cancel the invitation.
+Both participants receive confirmation of creation, cancellation or completion.
+
+Acceptance checks the current accounts and fetches Steam family membership again.
+The ownership change is atomic; repeated or old acceptance buttons cannot repeat
+it. Logout, a new login, a change of owner or loss of account approval invalidates
+the invitation. Bot ownership is independent of Steam adult/child roles: a transfer
+does not change the Steam family or its Steam permissions.
+Changing either participant's publication preferences also invalidates the invitation.
+
+On owner logout, only an approved, signed-in current member can inherit control.
+Pending and blocked accounts are never promoted automatically. If no approved
+successor remains, the bot has no owner until a member completes a fresh Steam
+login and passes the family check; blocked accounts cannot recover ownership.
+
 ## Logout and revocation
 
 **Settings → Log out** revokes only the selected Steam refresh token before deleting its local account data. It does not deauthorize every device. If Steam revocation fails, the bot keeps the local login so the user can retry. Users can also remove the Steamily session from **Steam Guard → Authorized devices**.

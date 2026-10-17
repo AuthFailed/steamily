@@ -62,6 +62,7 @@ class Db:
     async def _delete_personal_data(
         self, connection: asyncpg.Connection, telegram_id: int, family_id: str | None
     ) -> None:
+        await connection.execute("DELETE FROM owner_transfers WHERE owner_id = $1 OR target_id = $1", telegram_id)
         await connection.execute("DELETE FROM telegram_users WHERE telegram_id = $1", telegram_id)
         await connection.execute("DELETE FROM fsm WHERE split_part(key, ':', 3) = $1", str(telegram_id))
         if family_id is not None:
@@ -492,7 +493,9 @@ class Db:
             name,
         )
 
-    async def claim_initial_owner(self, family_id: str, telegram_id: int) -> None:
+    async def claim_initial_owner(
+        self, family_id: str, telegram_id: int, *, expected_generation: int | None = None
+    ) -> None:
         async with self.pool.acquire() as connection, connection.transaction():
             family = await connection.fetchrow(
                 "SELECT owner_telegram_id FROM families WHERE family_id = $1 FOR UPDATE", family_id
@@ -500,11 +503,15 @@ class Db:
             if family is None or family["owner_telegram_id"] is not None:
                 return
             status = await connection.fetchval(
-                "SELECT status FROM accounts WHERE telegram_id = $1 AND family_id = $2 FOR UPDATE",
+                "SELECT status FROM accounts WHERE telegram_id = $1 AND family_id = $2 "
+                "AND ($3::bigint IS NULL OR (token_generation = $3 AND refresh_token IS NOT NULL)) FOR UPDATE",
                 telegram_id,
                 family_id,
+                expected_generation,
             )
             if status is None:
+                if expected_generation is not None:
+                    return
                 raise RuntimeError("Initial owner account is no longer registered in this family")
             if status == "blocked":
                 return
@@ -515,6 +522,149 @@ class Db:
             )
             if status != "approved":
                 await connection.execute("UPDATE accounts SET status = 'approved' WHERE telegram_id = $1", telegram_id)
+
+    async def handover_owner(self, family_id: str, owner_id: int, target_id: int | None) -> int | None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            family = await connection.fetchrow(
+                "SELECT owner_telegram_id FROM families WHERE family_id = $1 FOR UPDATE", family_id
+            )
+            if family is None or family["owner_telegram_id"] != owner_id:
+                return None
+            target = await connection.fetchval(
+                "SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND family_id = $2 "
+                "AND status = 'approved' AND refresh_token IS NOT NULL FOR UPDATE",
+                target_id,
+                family_id,
+            )
+            await connection.execute(
+                "UPDATE families SET owner_telegram_id = $2 WHERE family_id = $1", family_id, target
+            )
+            return target
+
+    async def create_owner_transfer(
+        self, family_id: str, owner_id: int, target_id: int, members: list[str]
+    ) -> asyncpg.Record | None:
+        if owner_id == target_id:
+            return None
+        async with self.pool.acquire() as connection, connection.transaction():
+            family = await connection.fetchrow(
+                "SELECT owner_telegram_id FROM families WHERE family_id = $1 FOR UPDATE", family_id
+            )
+            if family is None or family["owner_telegram_id"] != owner_id:
+                return None
+            accounts = await connection.fetch(
+                "SELECT * FROM accounts WHERE telegram_id = ANY($1::bigint[]) ORDER BY telegram_id FOR UPDATE",
+                [owner_id, target_id],
+            )
+            if len(accounts) != 2 or any(
+                account["family_id"] != family_id
+                or account["status"] != "approved"
+                or account["refresh_token"] is None
+                or account["steam_id"] not in members
+                for account in accounts
+            ):
+                return None
+            owner = next(account for account in accounts if account["telegram_id"] == owner_id)
+            target = next(account for account in accounts if account["telegram_id"] == target_id)
+            # shortcut: privacy changes also invalidate invites; use an approval version if this becomes disruptive.
+            await connection.execute("DELETE FROM owner_transfers WHERE family_id = $1", family_id)
+            return await connection.fetchrow(
+                """
+                INSERT INTO owner_transfers
+                    (family_id, owner_id, target_id, owner_steam_id, target_steam_id,
+                     owner_generation, target_generation, owner_publication_version, target_publication_version)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *
+                """,
+                family_id,
+                owner_id,
+                target_id,
+                owner["steam_id"],
+                target["steam_id"],
+                owner["token_generation"],
+                target["token_generation"],
+                owner["publication_version"],
+                target["publication_version"],
+            )
+
+    async def _active_owner_transfer(self, connection, family_id: str) -> asyncpg.Record | None:
+        return await connection.fetchrow(
+            """
+            SELECT t.* FROM owner_transfers t JOIN families f USING (family_id)
+            JOIN accounts owner ON owner.telegram_id = t.owner_id
+            JOIN accounts target ON target.telegram_id = t.target_id
+            WHERE t.family_id = $1 AND t.expires_at > clock_timestamp() AND f.owner_telegram_id = t.owner_id
+                AND owner.family_id = t.family_id AND target.family_id = t.family_id
+                AND owner.steam_id = t.owner_steam_id AND target.steam_id = t.target_steam_id
+                AND owner.token_generation = t.owner_generation AND target.token_generation = t.target_generation
+                AND owner.publication_version = t.owner_publication_version
+                AND target.publication_version = t.target_publication_version
+                AND owner.status = 'approved' AND target.status = 'approved'
+                AND owner.refresh_token IS NOT NULL AND target.refresh_token IS NOT NULL
+            """,
+            family_id,
+        )
+
+    async def owner_transfer(self, family_id: str) -> asyncpg.Record | None:
+        return await self._active_owner_transfer(self.pool, family_id)
+
+    async def cancel_owner_transfer(self, family_id: str, owner_id: int, transfer_id: str) -> asyncpg.Record | None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            owner = await connection.fetchval(
+                "SELECT owner_telegram_id FROM families WHERE family_id = $1 FOR UPDATE", family_id
+            )
+            if owner != owner_id:
+                return None
+            account = await connection.fetchval(
+                "SELECT telegram_id FROM accounts WHERE telegram_id = $1 AND family_id = $2 "
+                "AND status = 'approved' FOR UPDATE",
+                owner_id,
+                family_id,
+            )
+            if account is None:
+                return None
+            return await connection.fetchrow(
+                "DELETE FROM owner_transfers WHERE family_id = $1 AND owner_id = $2 AND id = $3 RETURNING *",
+                family_id,
+                owner_id,
+                transfer_id,
+            )
+
+    async def accept_owner_transfer(
+        self, family_id: str, target_id: int, transfer_id: str, members: list[str]
+    ) -> asyncpg.Record | None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            await connection.fetchval("SELECT family_id FROM families WHERE family_id = $1 FOR UPDATE", family_id)
+            invitation = await connection.fetchrow(
+                "SELECT * FROM owner_transfers WHERE family_id = $1 AND target_id = $2 AND id = $3",
+                family_id,
+                target_id,
+                transfer_id,
+            )
+            if invitation is None:
+                return None
+            # Lock accounts before consuming the invitation, matching logout's lock order.
+            await connection.fetch(
+                "SELECT telegram_id FROM accounts WHERE telegram_id = ANY($1::bigint[]) "
+                "ORDER BY telegram_id FOR UPDATE",
+                [invitation["owner_id"], target_id],
+            )
+            current = await self._active_owner_transfer(connection, family_id)
+            if (
+                current is None
+                or current["id"] != transfer_id
+                or any(current[field] not in members for field in ("owner_steam_id", "target_steam_id"))
+            ):
+                return None
+            changed = await connection.fetchval(
+                "UPDATE families SET owner_telegram_id = $3 WHERE family_id = $1 AND owner_telegram_id = $2 "
+                "AND EXISTS (SELECT 1 FROM owner_transfers WHERE family_id = $1 AND id = $4 "
+                "AND expires_at > clock_timestamp()) RETURNING owner_telegram_id",
+                family_id,
+                current["owner_id"],
+                target_id,
+                transfer_id,
+            )
+            return current if changed is not None else None
 
     async def revoke_membership(
         self,
@@ -580,8 +730,8 @@ class Db:
             accounts = await connection.fetch(
                 """
                 SELECT telegram_id, status FROM accounts
-                WHERE family_id = $1 AND steam_id = ANY($2::text[]) AND status <> 'blocked'
-                ORDER BY (status = 'approved') DESC, created_at, telegram_id FOR UPDATE
+                WHERE family_id = $1 AND steam_id = ANY($2::text[]) AND status = 'approved'
+                ORDER BY created_at, telegram_id FOR UPDATE
                 """,
                 family_id,
                 members,
@@ -594,10 +744,6 @@ class Db:
                 ),
                 accounts[0] if accounts else None,
             )
-            if owner is not None and owner["status"] != "approved":
-                await connection.execute(
-                    "UPDATE accounts SET status = 'approved' WHERE telegram_id = $1", owner["telegram_id"]
-                )
             owner_id = owner["telegram_id"] if owner is not None else None
             if owner_id != family["owner_telegram_id"]:
                 await connection.execute(
