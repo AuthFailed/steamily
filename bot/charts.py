@@ -45,7 +45,8 @@ def bars(title: str, items: list[tuple[str, float]], unit: str = "", *, director
     figure, axes = _figure(title, max(3.0, 0.6 * len(items) + 1.5))
     labels = [label if len(label) <= 32 else label[:31] + "…" for label, _ in items][::-1]
     values = [value for _, value in items][::-1]
-    shown = axes.barh(labels, values, color=[COLORS[i % len(COLORS)] for i in range(len(values))][::-1])
+    shown = axes.barh(range(len(values)), values, color=[COLORS[i % len(COLORS)] for i in range(len(values))][::-1])
+    axes.set_yticks(range(len(labels)), labels)
     axes.bar_label(
         shown,
         labels=[f"{v:,.0f}{unit}".replace(",", " ") if v >= 10 else f"{v:g}{unit}" for v in values],

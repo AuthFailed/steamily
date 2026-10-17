@@ -3,7 +3,7 @@ from html import escape
 from aiogram.enums import ContentType
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Data, Dialog, DialogManager, Window
-from aiogram_dialog.widgets.input import MessageInput
+from aiogram_dialog.widgets.input import MessageInput, TextInput
 from aiogram_dialog.widgets.kbd import (
     Button,
     Checkbox,
@@ -13,7 +13,6 @@ from aiogram_dialog.widgets.kbd import (
     Multiselect,
     NextPage,
     PrevPage,
-    Radio,
     Row,
     ScrollingGroup,
     Select,
@@ -22,9 +21,9 @@ from aiogram_dialog.widgets.kbd import (
 from aiogram_dialog.widgets.link_preview import LinkPreview
 from aiogram_dialog.widgets.text import Format
 
-from ..family import Family, accounts_by_steam, person_link
+from ..family import DEFAULT_COUNTRY, Family, accounts_by_steam, person_link
 from ..i18n import Tr, sharing_warning, t
-from ..library import PRICES, SORTS, query, shareable_copies, tag_counts
+from ..library import SORTS, currency, parse_budget, query, shareable_copies, tag_counts
 from ..states import Games
 from ..ui import BLUE, Header, back_home, home, look
 
@@ -34,20 +33,29 @@ BLANK = "\u2800"  # Telegram needs some button text; this shows an empty button 
 
 
 async def on_start(start_data: Data, manager: DialogManager):
-    manager.dialog_data.update(sort="name", desc=False)
+    manager.dialog_data.update(sort="name", desc=False, price="any", budget_changed=False)
     if isinstance(start_data, dict) and start_data.get("owners"):  # "games we both have" from a member card
         manager.dialog_data["owners"] = start_data["owners"]
-    await manager.find("price").set_checked("any")
     await manager.find("players").set_checked(manager.middleware_data["account"]["steam_id"], True)
 
 
 def viewer_store(manager: DialogManager) -> dict:
     """Store data in the currency of the Steam account looking at the list."""
-    return manager.middleware_data["family"].store(manager.middleware_data["account"]["country"])
+    country = manager.middleware_data["account"]["country"] or DEFAULT_COUNTRY
+    return manager.middleware_data["family"].stores.get(country, {})
 
 
 async def reset_page(event, widget, manager: DialogManager, *args):
     await manager.find(SCROLL).set_page(0)
+
+
+def current_price(manager: DialogManager) -> str | int:
+    price = manager.dialog_data.get("price", "any")
+    country = manager.middleware_data["account"]["country"] or DEFAULT_COUNTRY
+    if isinstance(price, int) and manager.dialog_data.get("price_country") != country:
+        manager.dialog_data.update(price="any", budget_changed=True)
+        return "any"
+    return price
 
 
 def current_filters(manager: DialogManager) -> dict:
@@ -56,11 +64,23 @@ def current_filters(manager: DialogManager) -> dict:
         "tag": manager.dialog_data.get("tag"),
         "sort": manager.dialog_data.get("sort", "name"),
         "desc": manager.dialog_data.get("desc", False),
-        "price": manager.find("price").get_checked() or "any",
+        "price": current_price(manager),
         "multiplayer": manager.find("multiplayer").is_checked(),
         "players": manager.find("players").get_checked(),
         "owners": manager.dialog_data.get("owners", []),
     }
+
+
+def price_label(manager: DialogManager, store: dict, lang: str) -> str:
+    price = current_price(manager)
+    if isinstance(price, int):
+        return t(
+            lang,
+            "price_max",
+            amount=f"{price // 100}.{price % 100:02}",
+            currency=escape(manager.dialog_data.get("price_currency") or currency(store)),
+        )
+    return t(lang, "price_" + price)
 
 
 def filter_summary(manager: DialogManager, family: Family, store: dict, lang: str) -> str:
@@ -71,7 +91,7 @@ def filter_summary(manager: DialogManager, family: Family, store: dict, lang: st
     if filters["tag"]:
         lines.append(f"🏷 {escape(store.get('tag_names', {}).get(filters['tag'], '?'))}")
     if filters["price"] != "any":
-        lines.append(f"💲 {t(lang, 'price_' + filters['price'])}")
+        lines.append(f"💲 {price_label(manager, store, lang)}")
     if filters["multiplayer"]:
         lines.append(t(lang, "sum_multiplayer"))
     if len(filters["players"]) > 1:
@@ -106,6 +126,7 @@ async def list_getter(dialog_manager: DialogManager, family: Family, lang: str, 
         "paged": pages > 1,
         "summary": filter_summary(dialog_manager, family, store, lang),
         "has_search": bool(dialog_manager.dialog_data.get("search")),
+        "budget_changed": dialog_manager.dialog_data.get("budget_changed", False),
     }
 
 
@@ -189,12 +210,51 @@ async def any_genre(callback: CallbackQuery, button: Button, manager: DialogMana
 
 async def filters_getter(dialog_manager: DialogManager, lang: str, **kwargs):
     tag = dialog_manager.dialog_data.get("tag")
-    names = viewer_store(dialog_manager).get("tag_names", {})
+    store = viewer_store(dialog_manager)
+    names = store.get("tag_names", {})
+    sign = currency(store)
+    price = current_price(dialog_manager)
     return {
-        "prices": [(key, t(lang, "price_" + key)) for key in PRICES],
+        "prices": [(key, ("• " if price == key else "") + t(lang, "price_" + key)) for key in ("any", "free")],
+        "budget": "• " + price_label(dialog_manager, store, lang)
+        if isinstance(price, int)
+        else t(lang, "btn_budget", currency=sign),
+        "currency": escape(sign),
+        "currency_known": sign != "¤",
+        "currency_unknown": sign == "¤",
+        "budget_error": dialog_manager.dialog_data.get("budget_error", False),
+        "budget_changed": dialog_manager.dialog_data.get("budget_changed", False),
         "genre": names.get(tag, "?") if tag else t(lang, "genre_any"),
         "player_count": len(dialog_manager.find("players").get_checked()),
     }
+
+
+async def on_price(callback: CallbackQuery, widget, manager: DialogManager, price: str):
+    manager.dialog_data.update(price=price, budget_changed=False)
+    await reset_page(callback, widget, manager)
+
+
+async def open_budget(callback: CallbackQuery, button: Button, manager: DialogManager):
+    manager.dialog_data.pop("budget_error", None)
+    manager.dialog_data.update(
+        budget_country=manager.middleware_data["account"]["country"] or DEFAULT_COUNTRY, budget_changed=False
+    )
+    await manager.switch_to(Games.budget)
+
+
+async def on_budget_error(message: Message, widget, manager: DialogManager, error: ValueError):
+    manager.dialog_data["budget_error"] = True
+
+
+async def on_budget(message: Message, widget, manager: DialogManager, price: int):
+    sign = currency(viewer_store(manager))
+    country = manager.middleware_data["account"]["country"] or DEFAULT_COUNTRY
+    if manager.dialog_data.get("budget_country") != country:
+        manager.dialog_data["budget_changed"] = True
+    elif sign != "¤":
+        manager.dialog_data.update(price=price, price_currency=sign, price_country=country, budget_changed=False)
+        await reset_page(message, widget, manager)
+    await manager.switch_to(Games.filters)
 
 
 async def sort_getter(dialog_manager: DialogManager, lang: str, **kwargs):
@@ -245,6 +305,7 @@ games_dialog = Dialog(
     Window(
         Header("library", "library"),
         Tr("library_stats"),
+        Tr("budget_region_changed", when="budget_changed"),
         ScrollingGroup(
             Select(
                 Format("{item[label]}"),
@@ -299,17 +360,20 @@ games_dialog = Dialog(
     ),
     Window(
         Header("filters", "filters"),
+        Tr("budget_unknown_prices"),
+        Tr("budget_currency_unknown", when="currency_unknown"),
+        Tr("budget_region_changed", when="budget_changed"),
         Group(
-            Radio(
-                Format("• {item[1]}"),
+            Select(
                 Format("{item[1]}"),
                 id="price",
                 items="prices",
                 item_id_getter=lambda p: p[0],
-                on_state_changed=reset_page,
+                on_click=on_price,
             ),
-            width=5,
+            width=2,
         ),
+        Button(Format("{budget}"), id="budget", on_click=open_budget, when="currency_known"),
         Checkbox(Tr("multiplayer_on"), Tr("multiplayer_off"), id="multiplayer", on_state_changed=reset_page),
         SwitchTo(Tr("btn_genre"), id="genre", state=Games.genre),
         SwitchTo(Tr("btn_players"), id="players_btn", state=Games.players),
@@ -317,6 +381,14 @@ games_dialog = Dialog(
         back_to_list(),
         getter=filters_getter,
         state=Games.filters,
+    ),
+    Window(
+        Header("filters", "budget"),
+        Tr("budget_invalid", when="budget_error"),
+        TextInput(id="budget_input", type_factory=parse_budget, on_success=on_budget, on_error=on_budget_error),
+        back_to_filters(),
+        getter=filters_getter,
+        state=Games.budget,
     ),
     Window(
         Header("sort", "sort"),
