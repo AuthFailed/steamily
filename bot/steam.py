@@ -85,6 +85,7 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
         ]
     except (aiohttp.ClientError, RuntimeError):
         pass
+    snapshot["fetched_at"] = time.time()
     return snapshot
 
 

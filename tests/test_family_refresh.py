@@ -123,7 +123,11 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
             {
                 "members": [ALICE],
                 "ownership": {"620": [ALICE]},
-                "observed": {"members": [ALICE], "apps": [{"appid": 620, "name": "Portal 2"}]},
+                "observed": {
+                    "members": [ALICE],
+                    "names": {ALICE: "Alice"},
+                    "apps": [{"appid": 620, "name": "Portal 2", "owners": [ALICE]}],
+                },
             },
         )
 
