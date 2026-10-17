@@ -1,7 +1,11 @@
 """The family section: who is in it, stats with charts, member cards and the owner's Steam family actions."""
 
 import asyncio
+import hashlib
+import json
 import logging
+import secrets
+import time
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
@@ -22,10 +26,12 @@ from ..family import Families, Family, accounts_by_steam, person_link, publicati
 from ..i18n import Tr, t
 from ..states import Admin, FamilyView, Games
 from ..steam import (
+    NoFamily,
     PurchaseRequestUnavailable,
     SteamActionError,
     cancel_invite,
     decline_purchase,
+    fetch_family_snapshot,
     invite_member,
     purchase_requests,
     remove_member,
@@ -34,7 +40,7 @@ from ..steam import (
 )
 from ..steam_auth import TokenRejected
 from ..ui import BLUE, GREEN, RED, Header, back_home, look
-from . import current_owner, require_owner
+from . import current_owner, deny_action, require_owner
 
 log = logging.getLogger(__name__)
 # Previews only for store pages: profile links would show a big avatar card.
@@ -337,8 +343,112 @@ async def on_cancel_invite(callback: CallbackQuery, widget, manager: DialogManag
     await act(manager, cancel_invite, steam_id)
 
 
-async def on_remove(callback: CallbackQuery, button: Button, manager: DialogManager):
-    await act(manager, remove_member, manager.dialog_data["member"])
+def removal_preview(snapshot: dict, steam_id: str) -> dict:
+    library_state = {
+        "family_id": snapshot["family_id"],
+        "members": sorted(snapshot["members"]),
+        "roles": snapshot.get("roles", {}),
+        "apps": sorted(snapshot["apps"], key=lambda app: app["appid"]),
+    }
+    return {
+        "steam_id": steam_id,
+        "name": snapshot.get("names", {}).get(steam_id, steam_id),
+        "fetched_at": snapshot.get("fetched_at"),
+        "available": steam_id in snapshot["members"],
+        "rows": library.removal_impact(snapshot["apps"], steam_id),
+        "fingerprint": hashlib.sha256(json.dumps(library_state, sort_keys=True).encode()).hexdigest(),
+        "revision": secrets.token_hex(8),
+    }
+
+
+async def open_removal(callback: CallbackQuery, button: Button, manager: DialogManager):
+    manager.dialog_data["removal_preview"] = removal_preview(
+        manager.middleware_data["family"].snapshot, manager.dialog_data["member"]
+    )
+    manager.dialog_data.update(removal_page=0, removal_expanded=False, removal_changed=False, removal_error="")
+
+
+async def removal_getter(dialog_manager: DialogManager, family: Family, account, lang: str, **kwargs):
+    data = dialog_manager.dialog_data
+    if "removal_preview" not in data:
+        data["removal_preview"] = removal_preview(family.snapshot, data["member"])
+    preview = data["removal_preview"]
+    rows = preview["rows"]
+    page = data.get("removal_page", 0)
+    fetched_at = preview["fetched_at"]
+    return {
+        "member_name": escape(preview["name"]),
+        "steam_id": preview["steam_id"],
+        "lost": sum(row["after"] == 0 for row in rows),
+        "reduced": sum(row["after"] > 0 for row in rows),
+        "age": t(lang, "removal_age", seconds=max(0, int(time.time() - fetched_at)))
+        if fetched_at is not None
+        else t(lang, "removal_age_unknown"),
+        "impact_rows": "\n".join(
+            f"• {escape(row['name'][:120])} · {row['before']} → {row['after']}"
+            for row in rows[page * 5 : (page + 1) * 5]
+        ),
+        "has_rows": bool(rows),
+        "expanded": data.get("removal_expanded", False),
+        "previous_page": page > 0,
+        "next_page": (page + 1) * 5 < len(rows),
+        "changed": data.get("removal_changed", False),
+        "removal_error": data.get("removal_error", ""),
+        "available": preview["available"],
+        "confirmation": [preview["revision"]]
+        if preview["available"] and role(account) == "owner" and preview["steam_id"] != account["steam_id"]
+        else [],
+    }
+
+
+async def toggle_removal_games(callback: CallbackQuery, button: Button, manager: DialogManager):
+    manager.dialog_data["removal_expanded"] = not manager.dialog_data.get("removal_expanded", False)
+
+
+async def removal_page(callback: CallbackQuery, button: Button, manager: DialogManager):
+    data = manager.dialog_data
+    last = max(0, (len(data["removal_preview"]["rows"]) - 1) // 5)
+    data["removal_page"] = min(
+        last, max(0, data.get("removal_page", 0) + (-1 if button.widget_id == "removal_prev" else 1))
+    )
+
+
+async def on_remove(callback: CallbackQuery, widget, manager: DialogManager, revision: str):
+    account = await require_owner(manager)
+    if account is None:
+        return
+    preview = manager.dialog_data.get("removal_preview")
+    if not preview or revision != preview["revision"] or preview["steam_id"] != manager.dialog_data["member"]:
+        return
+    families: Families = manager.middleware_data["families"]
+    family: Family = manager.middleware_data["family"]
+    lang = manager.middleware_data["lang"]
+    try:
+        snapshot = await fetch_family_snapshot(families.http, await families.owner_token(account))
+    except TokenRejected:
+        await families._reject_token(account)
+        manager.dialog_data["removal_error"] = t(lang, "relogin")
+        return
+    except NoFamily:
+        await deny_action(manager)
+        return
+    except Exception as error:
+        log.warning("Removal preview refresh failed (%s)", type(error).__name__)
+        manager.dialog_data["removal_error"] = t(lang, "removal_refresh_failed")
+        return
+    if snapshot["family_id"] != family.family_id or account["steam_id"] not in snapshot["members"]:
+        await deny_action(manager)
+        return
+    if await require_owner(manager) is None:
+        return
+    updated = removal_preview(snapshot, preview["steam_id"])
+    manager.dialog_data["removal_error"] = ""
+    if updated["fingerprint"] != preview["fingerprint"]:
+        manager.dialog_data.update(removal_preview=updated, removal_changed=True, removal_page=0)
+        return
+    if not updated["available"] or preview["steam_id"] == account["steam_id"]:
+        return
+    await act(manager, remove_member, preview["steam_id"])
 
 
 async def on_rename(message: Message, widget, manager: DialogManager, name: str):
@@ -491,7 +601,12 @@ family_dialog = Dialog(
         NO_PREVIEW,
         Button(Tr("btn_common_games"), id="common", on_click=common_games, when="not_me", style=look("library", GREEN)),
         SwitchTo(
-            Tr("btn_remove_member"), id="remove", state=FamilyView.remove, when="can_remove", style=look("remove", RED)
+            Tr("btn_remove_member"),
+            id="remove",
+            state=FamilyView.remove,
+            on_click=open_removal,
+            when="can_remove",
+            style=look("remove", RED),
         ),
         back_to(FamilyView.members, "back_members"),
         getter=member_getter,
@@ -499,9 +614,34 @@ family_dialog = Dialog(
     ),
     Window(
         Header("remove", "remove_member"),
-        Button(Tr("btn_remove_member_yes"), id="remove_yes", on_click=on_remove, style=look("remove", RED)),
+        Tr("removal_summary"),
+        Tr("removal_changed", when="changed"),
+        Tr("removal_departed", when=~F["available"]),
+        Format("{removal_error}", when="removal_error"),
+        Format("{impact_rows}", when="expanded"),
+        Row(
+            Button(Format("‹"), id="removal_prev", on_click=removal_page, when="previous_page"),
+            Button(Format("›"), id="removal_next", on_click=removal_page, when="next_page"),
+            when="expanded",
+        ),
+        Button(
+            Tr("btn_removal_expand"),
+            id="removal_expand",
+            on_click=toggle_removal_games,
+            when=F["has_rows"] & ~F["expanded"],
+        ),
+        Button(Tr("btn_removal_collapse"), id="removal_collapse", on_click=toggle_removal_games, when="expanded"),
+        NO_PREVIEW,
+        Select(
+            Tr("btn_remove_member_yes"),
+            id="remove_yes",
+            items="confirmation",
+            item_id_getter=lambda revision: revision,
+            on_click=on_remove,
+            style=look("remove", RED),
+        ),
         back_to(FamilyView.member, "back_member"),
-        getter=member_getter,
+        getter=removal_getter,
         state=FamilyView.remove,
     ),
     Window(

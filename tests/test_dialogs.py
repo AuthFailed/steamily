@@ -3,9 +3,11 @@
 import asyncio
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import datetime
 from itertools import count
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiogram.exceptions import TelegramForbiddenError
@@ -33,6 +35,7 @@ from aiogram_dialog.test_tools.memory_storage import JsonMemoryStorage
 
 from bot.__main__ import AccountMiddleware, create_dispatcher
 from bot.db import PgStorage, SteamAlreadyLinked
+from bot.dialogs.family import removal_getter
 from bot.family import Families
 from bot.login import qr_png
 from bot.steam import SteamActionError
@@ -1868,6 +1871,167 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("◀️ Back"))
         self.assertIn("Waiting for the family owner", self.last().text)
 
+    async def open_removal_preview(self):
+        self.families.owner_token = AsyncMock(return_value="token")
+        self.families.member_stats = AsyncMock(return_value={})
+        client = self.client(OWNER)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family"))
+        await client.click(self.last(), Btn("Members"))
+        await client.click(self.last(), Btn("Bob"))
+        await client.click(self.last(), Btn("Remove from family"))
+        return client
+
+    async def test_removal_preview_counts_shareable_losses_and_cancels_without_steam_changes(self):
+        family = self.families.get(FAMILY)
+        family.snapshot["fetched_at"] = 1_700_000_000
+        family.snapshot["apps"] = [
+            {"appid": 1, "name": "Lost <game>", "owners": [BOB]},
+            {"appid": 2, "name": "Shared game", "owners": [ALICE, BOB]},
+            {"appid": 3, "name": "Excluded", "owners": [BOB], "exclude_reason": 1},
+        ]
+        original = deepcopy(family.snapshot)
+        with (
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+            patch("bot.dialogs.family.fetch_family_snapshot", AsyncMock(), create=True) as fetch,
+            patch("time.time", return_value=1_700_000_120),
+        ):
+            client = await self.open_removal_preview()
+            text = self.last().text
+            self.assertIn("Remove Bob?", text)
+            self.assertIn(BOB, text)
+            self.assertIn("Titles lost completely: <b>1</b>", text)
+            self.assertIn("Titles with fewer copies: <b>1</b>", text)
+            self.assertIn("120 s", text)
+            self.assertIn("cooldown", text)
+            self.assertIn("does not guarantee future availability", text)
+            await client.click(self.last(), Btn("Show affected games"))
+            self.assertIn("Lost &lt;game&gt; · 1 → 0", self.last().text)
+            self.assertIn("Shared game · 2 → 1", self.last().text)
+            self.assertNotIn("Excluded", self.last().text)
+            await client.click(self.last(), Btn("◀️ Back"))
+        remove.assert_not_awaited()
+        fetch.assert_not_awaited()
+        self.assertEqual(family.snapshot, original)
+
+    async def test_changed_removal_snapshot_requires_review_and_rejects_old_confirmation(self):
+        client = await self.open_removal_preview()
+        old_card = self.last()
+        snapshot = deepcopy(self.families.get(FAMILY).snapshot)
+        snapshot["apps"].append({"appid": 100, "name": "New game", "owners": [BOB]})
+        with (
+            patch("bot.dialogs.family.fetch_family_snapshot", AsyncMock(return_value=snapshot)),
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+        ):
+            await client.click(old_card, Btn("Yes, remove"))
+            self.assertIn("Review the updated preview", self.last().text)
+            self.assertIn("Titles lost completely: <b>1</b>", self.last().text)
+            remove.assert_not_awaited()
+            await client.click(old_card, Btn("Yes, remove"))
+            remove.assert_not_awaited()
+            await client.click(self.last(), Btn("Yes, remove"))
+        remove.assert_awaited_once_with(None, "token", FAMILY, BOB)
+
+    async def test_membership_change_requires_review_even_when_loss_totals_are_unchanged(self):
+        client = await self.open_removal_preview()
+        snapshot = deepcopy(self.families.get(FAMILY).snapshot)
+        snapshot["members"].remove(CAROL)
+        with (
+            patch("bot.dialogs.family.fetch_family_snapshot", AsyncMock(return_value=snapshot)),
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+        ):
+            await client.click(self.last(), Btn("Yes, remove"))
+            self.assertIn("Review the updated preview", self.last().text)
+            remove.assert_not_awaited()
+            await client.click(self.last(), Btn("Yes, remove"))
+        remove.assert_awaited_once()
+
+    async def test_removal_preview_disables_confirmation_for_departed_target(self):
+        client = await self.open_removal_preview()
+        snapshot = deepcopy(self.families.get(FAMILY).snapshot)
+        snapshot["members"].remove(BOB)
+        with (
+            patch("bot.dialogs.family.fetch_family_snapshot", AsyncMock(return_value=snapshot)),
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+        ):
+            await client.click(self.last(), Btn("Yes, remove"))
+        self.assertIn("no longer in this family", self.last().text)
+        self.assertNotIn("Yes, remove", self.buttons())
+        remove.assert_not_awaited()
+
+    async def test_removal_read_failure_keeps_preview_and_never_removes(self):
+        client = await self.open_removal_preview()
+        with (
+            patch("bot.dialogs.family.fetch_family_snapshot", AsyncMock(side_effect=TimeoutError)),
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+        ):
+            await client.click(self.last(), Btn("Yes, remove"))
+        self.assertIn("Could not refresh the preview", self.last().text)
+        self.assertIn("Yes, remove", self.buttons())
+        remove.assert_not_awaited()
+
+    async def test_removal_confirmation_rechecks_owner_before_reading_steam(self):
+        client = await self.open_removal_preview()
+        card = self.last()
+        await self.families.make_owner(FAMILY, FRIEND)
+        with (
+            patch("bot.dialogs.family.fetch_family_snapshot", AsyncMock()) as fetch,
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+            patch.object(CallbackQuery, "answer", AsyncMock()),
+        ):
+            await client.click(card, Btn("Yes, remove"))
+        fetch.assert_not_awaited()
+        remove.assert_not_awaited()
+        self.assertIn("Family library", self.buttons())
+
+    async def test_removal_games_paginate_and_bound_replayed_navigation(self):
+        family = self.families.get(FAMILY)
+        family.snapshot["apps"] = [{"appid": i, "name": f"Lost {i:02}", "owners": [BOB]} for i in range(12)]
+        client = await self.open_removal_preview()
+        self.assertIn("unknown (older snapshot)", self.last().text)
+        await client.click(self.last(), Btn("Show affected games"))
+        first = self.last()
+        self.assertIn("Lost 00 · 1 → 0", first.text)
+        self.assertNotIn("Lost 05", first.text)
+        await client.click(first, Btn("›"))
+        middle = self.last()
+        self.assertIn("Lost 05 · 1 → 0", middle.text)
+        await client.click(middle, Btn("›"))
+        self.assertIn("Lost 10 · 1 → 0", self.last().text)
+        self.assertNotIn("›", self.buttons())
+        await client.click(middle, Btn("›"))
+        self.assertIn("Lost 10 · 1 → 0", self.last().text)
+        await client.click(self.last(), Btn("‹"))
+        await client.click(self.last(), Btn("‹"))
+        await client.click(middle, Btn("‹"))
+        self.assertIn("Lost 00 · 1 → 0", self.last().text)
+        await client.click(self.last(), Btn("Hide games"))
+        self.assertNotIn("Lost 00", self.last().text)
+
+    async def test_legacy_saved_removal_screen_builds_a_reviewable_preview(self):
+        manager = SimpleNamespace(dialog_data={"member": BOB})
+        data = await removal_getter(manager, self.families.get(FAMILY), await self.db.account(OWNER), "en")
+        self.assertEqual((data["member_name"], data["lost"], data["reduced"]), ("Bob", 0, 6))
+        self.assertEqual(len(data["confirmation"]), 1)
+
+    async def test_removal_denies_owner_revoked_during_fresh_snapshot_read(self):
+        client = await self.open_removal_preview()
+
+        async def changed_snapshot(*args):
+            snapshot = deepcopy(self.families.get(FAMILY).snapshot)
+            snapshot["apps"] = []
+            await self.families.make_owner(FAMILY, FRIEND)
+            return snapshot
+
+        with (
+            patch("bot.dialogs.family.fetch_family_snapshot", side_effect=changed_snapshot),
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+            patch.object(CallbackQuery, "answer", AsyncMock()),
+        ):
+            await client.click(self.last(), Btn("Yes, remove"))
+        remove.assert_not_awaited()
+        self.assertIn("Family library", self.buttons())
+
     async def test_owner_manages_the_steam_family(self):
         self.families.owner_token = AsyncMock(return_value="token")
         self.families.member_stats = AsyncMock(return_value={})
@@ -1905,7 +2069,13 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         invite.assert_awaited_once_with(None, "token", FAMILY, "76561198000000042", 2)
         self.assertIn("❌ Steam refused: No free spots", self.last().text)
 
-        with patch("bot.dialogs.family.remove_member", AsyncMock()) as remove:
+        with (
+            patch("bot.dialogs.family.remove_member", AsyncMock()) as remove,
+            patch(
+                "bot.dialogs.family.fetch_family_snapshot",
+                AsyncMock(return_value=deepcopy(self.families.get(FAMILY).snapshot)),
+            ),
+        ):
             await client.click(self.last(), Btn("◀️ Back"))
             await client.click(self.last(), Btn("Members"))
             await client.click(self.last(), Btn("Bob"))

@@ -24,6 +24,7 @@ from .dialogs.family import family_dialog
 from .dialogs.games import games_dialog
 from .dialogs.menu import menu_dialog
 from .family import PRESENCE_INTERVAL, Families, role
+from .game_night import router as game_night_router
 from .health import STATUS_PATH, Health
 from .i18n import DEFAULT, t
 from .inline import router as inline_router
@@ -52,7 +53,7 @@ class GroupMigrationMiddleware(BaseMiddleware):
 
 
 class AccountMiddleware(BaseMiddleware):
-    """Loads the sender's account and family. In groups only /link gets through."""
+    """Loads the sender's account and family for private dialogs and group commands."""
 
     async def __call__(self, handler, event, data: dict):
         # Messages, button presses, and aiogram-dialog's own background updates (which carry .chat).
@@ -65,7 +66,11 @@ class AccountMiddleware(BaseMiddleware):
         if chat is None or source.from_user is None:
             return None
         private = chat.type == "private" or isinstance(source, DialogUpdateEvent) and chat.id == source.from_user.id
-        if not private and not (isinstance(source, Message) and (source.text or "").startswith("/link")):
+        command = (source.text or "").split(maxsplit=1) if isinstance(source, Message) else []
+        group_action = bool(command and command[0].split("@")[0] in {"/link", "/gamenight"}) or (
+            isinstance(source, CallbackQuery) and (source.data or "").startswith("gn:")
+        )
+        if not private and not group_action:
             return None
         language = await data["db"].language(source.from_user.id)
         data["has_language"] = language is not None
@@ -106,6 +111,8 @@ class AccessMiddleware(BaseMiddleware):
     """Recheck access before processing an existing dialog or one of its stale buttons."""
 
     async def __call__(self, handler, event, data: dict):
+        if get_flag(data, "game_night"):
+            return await handler(event, data)
         manager: DialogManager = data["dialog_manager"]
         account = data["account"]
         family_id = account["family_id"] if account else None
@@ -211,7 +218,7 @@ async def background_dialog_failed(event: ErrorEvent):
 def create_dispatcher(db: Db, families: Families, logins: Logins, storage=None, **dialog_options) -> Dispatcher:
     dp = Dispatcher(storage=storage or PgStorage(db), db=db, families=families, logins=logins)
     dp.message.outer_middleware(GroupMigrationMiddleware())
-    dp.include_routers(router, inline_router, menu_dialog, games_dialog, family_dialog, admin_dialog)
+    dp.include_routers(router, game_night_router, inline_router, menu_dialog, games_dialog, family_dialog, admin_dialog)
     setup_dialogs(dp, **dialog_options)
     for observer in (dp.message, dp.callback_query, dp.observers[DIALOG_EVENT_NAME]):
         observer.outer_middleware(AccountMiddleware())

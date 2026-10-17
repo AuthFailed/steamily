@@ -51,6 +51,7 @@ class RecordedSteamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             snapshot,
             {
+                "fetched_at": 2_000_000_000.0,
                 "family_id": "42",
                 "name": "Recorded family",
                 "members": MEMBERS,
