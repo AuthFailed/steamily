@@ -103,6 +103,10 @@ class SteamActionError(RuntimeError):
     pass
 
 
+class PurchaseRequestUnavailable(SteamActionError):
+    pass
+
+
 # Changes to the Steam family itself. They run on the acting user's own Steam account.
 async def invite_member(http, access_token: str, family_id: str, steam_id: str, role: int) -> dict:
     return await post_json(
@@ -149,6 +153,9 @@ async def purchase_requests(http, access_token: str, family_id: str) -> list[dic
 
 
 async def decline_purchase(http, access_token: str, family_id: str, request_id: str) -> None:
+    requests = await purchase_requests(http, access_token, family_id)
+    if not any(str(request["request_id"]) == request_id for request in requests):
+        raise PurchaseRequestUnavailable("This purchase request is no longer open")
     await post_json(
         http,
         "IFamilyGroupsService/RespondToRequestedPurchase/v1",
@@ -321,13 +328,15 @@ def parse_store_item(item: dict) -> dict:
     option = item.get("best_purchase_option") or {}
     cents = option.get("final_price_in_cents")
     tags = sorted(item.get("tags", []), key=lambda t: -t.get("weight", 0))
-    categories = set(item.get("categories", {}).get("supported_player_categoryids", []))
+    categories = set((item.get("categories") or {}).get("supported_player_categoryids") or [])
     return {
         "fetched": time.time(),
         "price": 0 if item.get("is_free") else (int(cents) if cents is not None else None),
         "price_text": "Free" if item.get("is_free") else option.get("formatted_final_price"),
         "tags": [t["tagid"] for t in tags[:TOP_TAGS]],
-        "multiplayer": bool(categories & MULTIPLAYER_CATEGORIES),
+        "play_mode": "multiplayer"
+        if categories & MULTIPLAYER_CATEGORIES
+        else ("singleplayer" if 2 in categories else None),
     }
 
 
@@ -335,7 +344,12 @@ async def update_store_cache(http: aiohttp.ClientSession, cache: dict, appids: l
     """Refreshes stale store details (price, tags, categories) in place; returns True if anything changed."""
     apps = cache.setdefault("apps", {})
     now = time.time()
-    stale = [a for a in appids if now - apps.get(str(a), {}).get("fetched", 0) > STORE_MAX_AGE]
+    # Legacy multiplayer=False did not distinguish single-player from missing metadata.
+    stale = [
+        a
+        for a in appids
+        if "play_mode" not in apps.get(str(a), {}) or now - apps[str(a)].get("fetched", 0) > STORE_MAX_AGE
+    ]
     for start in range(0, len(stale), STORE_BATCH):
         request = {
             "ids": [{"appid": a} for a in stale[start : start + STORE_BATCH]],

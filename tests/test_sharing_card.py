@@ -26,8 +26,10 @@ class InlineSharingCardTest(unittest.TestCase):
 
 
 class SharingCardTest(unittest.IsolatedAsyncioTestCase):
-    async def card(self, reason, viewer="alice", lang="en"):
+    async def card(self, reason, viewer="alice", lang="en", info=None):
         family = Family("9")
+        if info is not None:
+            family.stores["US"] = {"apps": {"620": info}}
         family.snapshot = {
             "apps": [{"appid": 620, "name": "Portal 2", "owners": ["alice", "bob"], "exclude_reason": reason}],
             "names": {"alice": "Alice", "bob": "Bob"},
@@ -38,6 +40,26 @@ class SharingCardTest(unittest.IsolatedAsyncioTestCase):
         )
         db = SimpleNamespace(family_accounts=AsyncMock(return_value=[]))
         return (await game_getter(manager, family, db, lang))["details"]
+
+    async def test_card_distinguishes_known_modes_from_missing_and_legacy_details(self):
+        for info, mode in (
+            (None, "❔ Mode unavailable"),
+            ({}, "❔ Mode unavailable"),
+            ({"multiplayer": False}, "❔ Mode unavailable"),
+            ({"play_mode": None}, "❔ Mode unavailable"),
+            ({"play_mode": "singleplayer"}, "👤 Single-player"),
+            ({"play_mode": "multiplayer"}, "👥 Multiplayer"),
+        ):
+            with self.subTest(info=info):
+                details = await self.card(0, info=info)
+                self.assertIn(mode, details.splitlines())
+                for other in {"❔ Mode unavailable", "👤 Single-player", "👥 Multiplayer"} - {mode}:
+                    self.assertNotIn(other, details)
+
+    async def test_russian_card_shows_unknown_mode(self):
+        details = await self.card(0, lang="ru")
+        self.assertIn("❔ Режим игры неизвестен", details)
+        self.assertNotIn("👤 Одиночная", details)
 
     async def test_excluded_card_keeps_ownership_separate_from_sharing_and_availability(self):
         details = await self.card(1)

@@ -9,8 +9,15 @@ from .i18n import t
 
 # Sort fields and their direction when first picked: descending (True) or ascending.
 SORTS = {"name": False, "price": False, "copies": True, "added": True}
-PRICES = ["any", "free", "lt5", "5to20", "gt20"]
-PRICE_RANGES = {"free": (0, 0), "lt5": (1, 499), "5to20": (500, 2000), "gt20": (2001, None)}
+
+
+def parse_budget(text: str) -> int:
+    """Parse local currency units into Steam's integer hundredths without rounding."""
+    text = text.strip().replace(",", ".")
+    if not re.fullmatch(r"[0-9]{1,12}(?:\.[0-9]{1,2})?", text):
+        raise ValueError("Invalid budget")
+    whole, _, fraction = text.partition(".")
+    return int(whole) * 100 + int(fraction.ljust(2, "0"))
 
 
 def reconcile(previous: dict | None, snapshot: dict) -> tuple[list[dict], dict]:
@@ -52,7 +59,7 @@ def query(
     *,
     search: str = "",
     tag: str | None = None,
-    price: str = "any",
+    price: str | int = "any",
     multiplayer: bool = False,
     players: list[str] = (),
     owners: list[str] = (),
@@ -62,7 +69,7 @@ def query(
     """Filter by ownership/sharing eligibility and copy capacity; live availability is not known."""
     details = store.get("apps", {})
     words = search.lower().split()
-    low, high = PRICE_RANGES.get(price, (None, None))
+    high = 0 if price == "free" else price if isinstance(price, int) else None
     result = []
     for app in apps:
         info = details.get(str(app["appid"]), {})
@@ -70,7 +77,7 @@ def query(
             continue
         if tag and int(tag) not in info.get("tags", []):
             continue
-        if multiplayer and not info.get("multiplayer"):
+        if multiplayer and info.get("play_mode") != "multiplayer":
             continue
         if len(app["owners"]) < len(players):
             continue
@@ -78,9 +85,9 @@ def query(
             continue
         if not set(owners) <= set(app["owners"]):  # "games we both have"
             continue
-        if low is not None:
+        if high is not None:
             cents = info.get("price")
-            if cents is None or cents < low or (high is not None and cents > high):
+            if cents is None or not 0 <= cents <= high:
                 continue
         result.append(app)
 
