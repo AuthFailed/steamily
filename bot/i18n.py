@@ -104,7 +104,22 @@ TEXTS = {
         "logout_owner_alone": "👑 You own this family in the bot and nobody else from it is registered: the family "
         "will have no owner until someone registers.",
         "new_owner": "👑 You are now the owner of the <b>{name}</b> family in the bot: the previous owner logged out.",
-        "family_info": "<b>{name}</b> · {count} of {size}\n{members_list}",
+        "family_info": "<b>{name}</b> · members: {count}\n{members_list}",
+        "btn_slots": "Slots and cooldowns",
+        "slots_title": "Slots and cooldowns",
+        "slots_desc": "Read-only data as of the update below. Dates use Steam's explicit remaining timers, in UTC.",
+        "slots_unknown": "unknown",
+        "slots_clear": "no active cooldown reported",
+        "slots_until": "until {when}",
+        "slots_updated": "Last successful update: {checked}",
+        "slots_occupied": "Total slots: {capacity}\n<b>Occupied: {count}</b>\n{members}",
+        "slots_free": "Empty, unreserved slots: {free}\nAvailable for new members without an override: {available}\n"
+        "Cooldown overrides: {overrides}",
+        "slots_invited": "<b>Invited / reserved: {count}</b>\n{invites}",
+        "slots_family_cooldown": "<b>Family slot cooldown: inviting new members</b>\n{cooldown}",
+        "slots_member_cooldowns": "<b>Member restrictions: joining another family</b>\n{restrictions}",
+        "slots_limits": "Steam supplies one shared slot timer; individual slot IDs and further dates are unknown. "
+        "Invitations reserve places. Past dates need a fresh Steam update.",
         "role_child": "child",
         "btn_stats": "📊 Stats",
         "btn_members_list": "Members",
@@ -270,6 +285,21 @@ TEXTS = {
         "budget_region_changed": "Store region changed. Set a new maximum price in the current currency.",
         "sum_multiplayer": "👥 Confirmed multiplayer only (unknown modes excluded)",
         "sum_players": "🤝 {names} (needs {n}+ copies)",
+        "sum_players_hosted": "🤝 {names} (one accessible host copy)",
+        "mode_any": "Any session mode",
+        "mode_online_coop": "Online co-op",
+        "mode_online_pvp": "Online PvP",
+        "mode_local_coop": "Local co-op/split-screen",
+        "mode_remote_play": "Remote Play Together",
+        "mode_status_true": "supported",
+        "mode_status_false": "not listed",
+        "mode_status_none": "unknown",
+        "online_copy_rule": "🌐 Online: one owned or shareable copy per player.",
+        "local_copy_rule": "🏠 Local: one accessible host copy; everyone plays on the host's device.",
+        "remote_copy_rule": "📡 Remote Play Together: one accessible host copy; guests join the host's stream "
+        "without owning the game.",
+        "host_copy_rule": "For an excluded game, a selected player must own the host copy.",
+        "session_limits": "Check the game's player limit and input requirements on Steam.",
         "btn_filters": "Filters",
         "btn_sort": "Sorting",
         "btn_clear_search": "✖️ Clear search",
@@ -281,7 +311,8 @@ TEXTS = {
         "filters_title": "Filters",
         "filters_desc": (
             "Use the buttons below to filter the family library.\n"
-            "Multiplayer only excludes games whose mode is unknown."
+            "Mode filters require confirmed support; unknown metadata is excluded.\n"
+            "Choose a specific session mode to apply its copy rules."
         ),
         "multiplayer_on": "✅ Multiplayer only",
         "multiplayer_off": "⬜ Multiplayer only",
@@ -293,8 +324,12 @@ TEXTS = {
         "genre_desc": "Pick a genre. The number shows how many family games have it.",
         "btn_any_genre": "Any genre",
         "players_title": "Players",
-        "players_desc": "Pick who is going to play. Everyone needs an owned or shareable copy. "
-        "Excluded games require each player to own a copy. Availability right now is not checked.",
+        "players_desc": (
+            "Pick who is going to play. Online/default searches need an owned or shareable copy per person; "
+            "excluded games require each player to own one. Local/Remote Play filters need one accessible host copy; "
+            "for excluded games, a selected player must own it. "
+            "Player limits, inputs and current availability are not checked."
+        ),
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "This game is no longer in the family library.",
@@ -533,7 +568,22 @@ TEXTS = {
         "logout_owner_alone": "👑 Вы владелец этой семьи в боте, и больше никто из неё не зарегистрирован: у семьи не "
         "будет владельца, пока кто-нибудь не зарегистрируется.",
         "new_owner": "👑 Теперь вы владелец семьи <b>{name}</b> в боте: прежний владелец вышел.",
-        "family_info": "<b>{name}</b> · {count} из {size}\n{members_list}",
+        "family_info": "<b>{name}</b> · участников: {count}\n{members_list}",
+        "btn_slots": "Места и cooldown",
+        "slots_title": "Места и cooldown",
+        "slots_desc": "Данные на момент обновления ниже, только для просмотра. Даты — из явных таймеров Steam, в UTC.",
+        "slots_unknown": "неизвестно",
+        "slots_clear": "активный cooldown не указан",
+        "slots_until": "до {when}",
+        "slots_updated": "Последнее успешное обновление: {checked}",
+        "slots_occupied": "Всего мест: {capacity}\n<b>Занято: {count}</b>\n{members}",
+        "slots_free": "Пустых мест без брони: {free}\nДоступно новым участникам без обхода cooldown: {available}\n"
+        "Обходов cooldown: {overrides}",
+        "slots_invited": "<b>Приглашены / забронировано: {count}</b>\n{invites}",
+        "slots_family_cooldown": "<b>Cooldown места семьи: новые приглашения</b>\n{cooldown}",
+        "slots_member_cooldowns": "<b>Ограничения участников: переход в другую семью</b>\n{restrictions}",
+        "slots_limits": "Steam передаёт один общий таймер мест; идентификаторы отдельных мест "
+        "и дальнейшие даты неизвестны. Приглашения резервируют места. Прошедшие даты требуют обновления Steam.",
         "role_child": "ребёнок",
         "btn_stats": "📊 Статистика",
         "btn_members_list": "Участники",
@@ -700,6 +750,21 @@ TEXTS = {
         "budget_region_changed": "Регион магазина изменился. Задайте максимальную цену заново в текущей валюте.",
         "sum_multiplayer": "👥 Только подтверждённый мультиплеер (неизвестные режимы исключены)",
         "sum_players": "🤝 {names} (нужно копий: {n}+)",
+        "sum_players_hosted": "🤝 {names} (одна доступная копия у ведущего)",
+        "mode_any": "Любой режим сеанса",
+        "mode_online_coop": "Онлайн-кооператив",
+        "mode_online_pvp": "Онлайн-PvP",
+        "mode_local_coop": "Локальный кооператив/разделённый экран",
+        "mode_remote_play": "Remote Play Together",
+        "mode_status_true": "поддерживается",
+        "mode_status_false": "не указан",
+        "mode_status_none": "неизвестно",
+        "online_copy_rule": "🌐 Онлайн: каждому нужна своя копия или копия с семейным доступом.",
+        "local_copy_rule": "🏠 Локально: нужна одна доступная копия у ведущего; все играют на его устройстве.",
+        "remote_copy_rule": "📡 Remote Play Together: нужна одна доступная копия у ведущего; гости подключаются "
+        "к трансляции ведущего без своей копии игры.",
+        "host_copy_rule": "Если семейный доступ исключён, копией должен владеть один из выбранных игроков.",
+        "session_limits": "Проверьте лимит игроков и требования к устройствам ввода в Steam.",
         "btn_filters": "Фильтры",
         "btn_sort": "Сортировка",
         "btn_clear_search": "✖️ Сбросить поиск",
@@ -711,7 +776,8 @@ TEXTS = {
         "filters_title": "Фильтры",
         "filters_desc": (
             "Используй кнопки ниже, чтобы отфильтровать семейную библиотеку.\n"
-            "Фильтр «Только мультиплеер» исключает игры с неизвестным режимом."
+            "Фильтры режимов требуют подтверждённой поддержки; неизвестные данные исключаются.\n"
+            "Выберите конкретный режим сеанса, чтобы применить его требования к копиям."
         ),
         "multiplayer_on": "✅ Только мультиплеер",
         "multiplayer_off": "⬜ Только мультиплеер",
@@ -723,8 +789,10 @@ TEXTS = {
         "genre_desc": "Выберите жанр. Число показывает, сколько игр семьи в этом жанре.",
         "btn_any_genre": "Любой жанр",
         "players_title": "Игроки",
-        "players_desc": "Выберите, кто будет играть. Каждому нужна собственная копия или копия с семейным доступом. "
-        "Исключённой из доступа игрой должен владеть каждый игрок. Наличие свободных копий сейчас не проверяется.",
+        "players_desc": "Выберите, кто будет играть. Онлайн и без конкретного режима каждому нужна своя копия "
+        "или копия с семейным доступом; исключённой игрой должен владеть каждый. Локально и через Remote Play "
+        "достаточно одной доступной копии у ведущего; исключённой копией должен владеть один из выбранных игроков. "
+        "Лимит игроков, устройства ввода и наличие свободных копий сейчас не проверяются.",
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "Этой игры больше нет в библиотеке семьи.",

@@ -44,6 +44,7 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
             "include_family_group_response": "true",
         },
     )
+    family_checked_at = time.time()
     response = family.get("response", {})
     if response.get("is_not_member_of_any_group") is True:
         raise NoFamily("This Steam account is not joined to a Steam Family")
@@ -72,7 +73,7 @@ async def fetch_family_snapshot(http: aiohttp.ClientSession, access_token: str) 
         )
     except (aiohttp.ClientError, RuntimeError):
         players = {}
-    snapshot = parse_snapshot(family, library, players)
+    snapshot = parse_snapshot(family, library, players, family_checked_at=family_checked_at)
     try:  # who played which borrowed game, for stats; optional
         playtime = await post_json(
             http,
@@ -212,7 +213,7 @@ async def fetch_user_country(http: aiohttp.ClientSession, access_token: str, ste
         return None
 
 
-def parse_snapshot(family: dict, library: dict, players: dict) -> dict:
+def parse_snapshot(family: dict, library: dict, players: dict, *, family_checked_at: float | None = None) -> dict:
     response = family.get("response", {})
     if response.get("is_not_member_of_any_group") is True:
         raise NoFamily("This Steam account is not joined to a Steam Family")
@@ -233,6 +234,17 @@ def parse_snapshot(family: dict, library: dict, players: dict) -> dict:
         "joined": {str(m["steamid"]): m.get("time_joined") for m in members},
         "roles": {str(m["steamid"]): m.get("role", 1) for m in members},
         "free_spots": group.get("free_spots", 0),
+        "calendar": {
+            "checked_at": family_checked_at,
+            "member_cooldowns": {
+                str(m["steamid"]): m["cooldown_seconds_remaining"] for m in members if "cooldown_seconds_remaining" in m
+            },
+            **{
+                key: group[key]
+                for key in ("free_spots", "slot_cooldown_remaining_seconds", "slot_cooldown_overrides")
+                if key in group
+            },
+        },
         "pending_invites": [
             {"steamid": str(i["steamid"]), "role": i.get("role", 1)} for i in group.get("pending_invites", [])
         ],
@@ -335,6 +347,7 @@ def parse_store_item(item: dict) -> dict:
         "price": 0 if item.get("is_free") else (int(cents) if cents is not None else None),
         "price_text": "Free" if item.get("is_free") else option.get("formatted_final_price"),
         "tags": [t["tagid"] for t in tags[:TOP_TAGS]],
+        "categories": item.get("categories"),
         "play_mode": "multiplayer"
         if categories & MULTIPLAYER_CATEGORIES
         else ("singleplayer" if 2 in categories else None),
@@ -345,11 +358,13 @@ async def update_store_cache(http: aiohttp.ClientSession, cache: dict, appids: l
     """Refreshes stale store details (price, tags, categories) in place; returns True if anything changed."""
     apps = cache.setdefault("apps", {})
     now = time.time()
-    # Legacy multiplayer=False did not distinguish single-player from missing metadata.
+    # Refresh legacy records once to retain exact categories and distinguish unknown play modes.
     stale = [
         a
         for a in appids
-        if "play_mode" not in apps.get(str(a), {}) or now - apps[str(a)].get("fetched", 0) > STORE_MAX_AGE
+        if "play_mode" not in apps.get(str(a), {})
+        or "categories" not in apps.get(str(a), {})
+        or now - apps[str(a)].get("fetched", 0) > STORE_MAX_AGE
     ]
     for start in range(0, len(stale), STORE_BATCH):
         request = {

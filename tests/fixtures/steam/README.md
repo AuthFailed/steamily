@@ -58,6 +58,22 @@ with an explicitly derived missing-metadata variant; see
 [its provenance and sanitization details](../README.md#recorded-steam-response).
 Its independent member/app mapping is not shared with the newer snapshot files.
 
+## Play-mode category provenance (issue #19)
+
+Public Store feature links (`category2` values) were checked on **2026-10-17**:
+[Portal 2](https://store.steampowered.com/app/620/Portal_2/?l=english) identifies
+`38` as Online Co-op, `39` as Shared/Split Screen Co-op, `24` as Shared/Split
+Screen, and `44` as Remote Play Together.
+[Brawlhalla](https://store.steampowered.com/app/291550/Brawlhalla/?l=english)
+identifies `36` as Online PvP and `37` as Shared/Split Screen PvP.
+
+The recorded Portal 2 response contains `38`, `39`, and `24` under
+`supported_player_categoryids`, and `44` under `feature_categoryids`. The
+recorded Counter-Strike 2 player categories are `[1, 27]`; these do not assert
+exact Online PvP support. Categories `36` and `37` were verified through the
+public Store links, are absent from these recordings, and are covered by
+synthetic tests. No recorded response was changed to add categories.
+
 ## Synthetic examples
 
 Files without `_recorded` in their name were authored from the fields consumed
@@ -70,3 +86,37 @@ construct expected wire messages. It includes QR creation with/without an
 interval, pending approval, QR rotation, approval, legacy token renewal, missing
 access tokens and EResult rejection. Other synthetic JSON files cover optional
 and missing fields in family, library, player, playtime and store responses.
+
+## Calendar response capture
+
+`family_calendar_recorded.json` is a separate authorized read from the bot server
+on **2026-10-17 at 02:04:11 UTC**, using
+`IFamilyGroupsService/GetFamilyGroupForUser/v1` with
+`include_family_group_response=true`. It retains the observed field types,
+`free_spots=1`, `slot_cooldown_remaining_seconds=0`,
+`slot_cooldown_overrides=0`, and all five members' explicit
+`cooldown_seconds_remaining=0`. The response also reported role `1` and zero
+cooldown for the acting account. No pending invitations, former members,
+individual slot IDs or per-slot list were supplied.
+
+Family ID, member Steam IDs, family name and private join timestamps were
+replaced using the existing snapshot fixture mapping. Unused fields were
+dropped; credentials and raw private responses were not written to fixtures.
+The capture did not rotate the session.
+
+Nonzero cooldowns, missing optional fields and invitation scenarios in tests are
+synthetic derivatives, not live observations. The recording establishes the
+returned calendar fields and their zero values; it does not establish a
+one-to-one member/slot mapping or a nonzero cooldown deadline.
+
+The field meanings were also checked against Valve's
+[family-management client](https://store.fastly.steamstatic.com/public/javascript/applications/store/fmgmt.js?contenthash=e2b074ab8d63e815ccd6&l=english&_cdn=fastly)
+on the capture date. It counts total places as members + pending invitations +
+`free_spots`; invitations reserve places. Its new-member invitation flow applies
+`slot_cooldown_remaining_seconds` separately from `free_spots`, with
+`slot_cooldown_overrides` allowing an exception. Thus an empty place can still
+be cooling. Member `cooldown_seconds_remaining` describes joining another family,
+not when a family place becomes available. The UI preserves the one shared slot
+timer without assigning it to invented slot identifiers or inventing later dates.
+Dates add only explicitly supplied seconds to the family response's observation
+time, before the library and optional HTTP requests complete.

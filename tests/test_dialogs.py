@@ -959,6 +959,82 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Games: <b>6</b>", self.last().text)  # 3, 6, ..., 18 have two copies
         self.assertIn("needs 2+ copies", self.last().text)
 
+    async def test_specific_modes_keep_hosted_sessions_with_one_copy(self):
+        await self.db.set_game_status(FRIEND, BOB, FAMILY, 1, "Game 01", "backlog")
+        self.families.stores["US"]["apps"]["1"].update(
+            play_mode="multiplayer",
+            categories={"supported_player_categoryids": [38, 36, 39], "feature_categoryids": [44]},
+        )
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        self.assertIn("unknown metadata", self.last().text)
+        await client.click(self.last(), Btn("Local co-op/split-screen"))
+        await client.click(self.last(), Btn("🤝 Players: 1"))
+        await client.click(self.last(), Btn("⬜ Alice"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("⬜ Multiplayer only", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        self.assertIn("one accessible host copy", self.last().text)
+        await client.click(self.last(), Btn("Game 01 · \\$1.00"))
+        self.assertIn("Online co-op: supported", self.last().text)
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("Filters"))
+        for mode in ("Online co-op", "Online PvP"):
+            await client.click(self.last(), Btn(mode))
+            await client.click(self.last(), Btn("◀️ Back"))
+            self.assertIn("Games: <b>0</b>", self.last().text)
+            self.assertIn("needs 2+ copies", self.last().text)
+            await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Remote Play Together"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Playing"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>0</b>", self.last().text)
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Backlog"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("♻️ Reset filters"))
+        self.assertIn("• Any session mode", self.buttons())
+        self.assertIn("• Any status", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>20</b>", self.last().text)
+
+    async def test_any_mode_and_multiplayer_restore_separate_copy_rules(self):
+        self.families.stores["US"]["apps"]["1"].update(play_mode=None, categories={"feature_categoryids": [44]})
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("🤝 Players: 1"))
+        await client.click(self.last(), Btn("⬜ Alice"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("Remote Play Together"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("⬜ Multiplayer only"))
+        self.assertIn("• Any session mode", self.buttons())
+        self.assertIn("Remote Play Together", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>6</b>", self.last().text)
+        self.assertIn("needs 2+ copies", self.last().text)
+
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Remote Play Together"))
+        await client.click(self.last(), Btn("Any session mode"))
+        self.assertIn("⬜ Multiplayer only", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>6</b>", self.last().text)
+        self.assertIn("needs 2+ copies", self.last().text)
+
     async def test_copy_planner_preserves_library_filters_and_resets_for_each_game(self):
         for app in self.families.get(FAMILY).snapshot["apps"]:
             app["exclude_reason"] = 0
@@ -1973,7 +2049,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
             text,
         )  # Telegram name refreshed from the user's latest message
         self.assertNotIn("tg://user?id=300", text)  # no permission from the pending member
-        self.assertIn("<b>Fam</b> · 3 of 6", text)
+        self.assertIn("<b>Fam</b> · members: 3", text)
         self.assertNotIn("Free spots", text)
         self.assertTrue(shown[-1].link_preview_options.is_disabled)  # no profile picture previews
         self.assertNotIn("Manage family", self.buttons())  # owner only
@@ -2000,6 +2076,28 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("Games we both have"))
         self.assertIn("Games: <b>6</b>", self.last().text)  # 3, 6, ..., 18
         self.assertIn("Everyone has it: Bob, Alice", self.last().text)
+
+    async def test_member_opens_read_only_slots_and_loses_access_after_departure(self):
+        self.families.get(FAMILY).snapshot["calendar"] = {
+            "checked_at": 1_700_000_000,
+            "free_spots": 2,
+            "slot_cooldown_remaining_seconds": 86_400,
+            "member_cooldowns": {ALICE: 0, BOB: 172_800},
+        }
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family"))
+        await client.click(self.last(), Btn("Slots and cooldowns"))
+        self.assertIn("2023-11-15 22:13:20 UTC", self.last().text)
+        self.assertIn("Bob: until 2023-11-16 22:13:20 UTC", self.last().text)
+        self.assertIn("76561198000000009", self.last().text)
+        self.assertEqual(self.buttons(), ["◀️ Back", "Home"])
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Slots and cooldowns", self.buttons())
+        await client.click(self.last(), Btn("Slots and cooldowns"))
+        await self.db.set_status(FRIEND, "pending")
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Waiting for the family owner", self.last().text)
 
     async def open_removal_preview(self):
         self.families.owner_token = AsyncMock(return_value="token")

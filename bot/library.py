@@ -9,6 +9,12 @@ from .i18n import t
 
 # Sort fields and their direction when first picked: descending (True) or ascending.
 SORTS = {"name": False, "price": False, "copies": True, "added": True}
+PLAY_MODES = {
+    "online_coop": ("supported_player_categoryids", {38}),
+    "online_pvp": ("supported_player_categoryids", {36}),
+    "local_coop": ("supported_player_categoryids", {24, 37, 39}),
+    "remote_play": ("feature_categoryids", {44}),
+}
 
 
 def parse_budget(text: str) -> int:
@@ -69,6 +75,15 @@ def copy_plan(app: dict, players: list[str]) -> dict:
     }
 
 
+def play_modes(info: dict) -> dict[str, bool | None]:
+    """Specific Store modes: None means the relevant category collection is missing."""
+    categories = info.get("categories") or {}
+    return {
+        mode: None if categories.get(field) is None else bool(ids.intersection(categories[field]))
+        for mode, (field, ids) in PLAY_MODES.items()
+    }
+
+
 def removal_impact(apps: list[dict], steam_id: str) -> list[dict]:
     """Preview eligible copy losses when a member leaves, without changing the snapshot."""
     affected = []
@@ -94,12 +109,15 @@ def query(
     tag: str | None = None,
     price: str | int = "any",
     multiplayer: bool = False,
+    mode: str | None = None,
     players: list[str] = (),
     owners: list[str] = (),
     sort: str = "name",
     desc: bool = False,
 ) -> list[dict]:
-    """Filter by ownership/sharing eligibility and copy capacity; live availability is not known."""
+    """Filter by Store modes and copy/host eligibility; live availability is not known."""
+    if mode is not None and mode not in PLAY_MODES:
+        return []
     details = store.get("apps", {})
     words = search.lower().split()
     high = 0 if price == "free" else price if isinstance(price, int) else None
@@ -112,10 +130,16 @@ def query(
             continue
         if multiplayer and info.get("play_mode") != "multiplayer":
             continue
-        if len(app["owners"]) < len(players):
+        if mode is not None and play_modes(info)[mode] is not True:
             continue
-        if not shareable_copies(app) and not set(players) <= set(app["owners"]):
-            continue
+        if mode in ("local_coop", "remote_play"):
+            if players and not shareable_copies(app) and not set(players).intersection(app["owners"]):
+                continue
+        else:
+            if len(app["owners"]) < len(players):
+                continue
+            if not shareable_copies(app) and not set(players) <= set(app["owners"]):
+                continue
         if not set(owners) <= set(app["owners"]):  # "games we both have"
             continue
         if high is not None:

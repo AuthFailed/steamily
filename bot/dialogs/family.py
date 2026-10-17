@@ -74,10 +74,64 @@ async def info_getter(dialog_manager: DialogManager, family: Family, account, db
         "name": escape(family.snapshot["name"]),
         "members_list": "\n".join(lines),
         "count": len(family.members),
-        "size": len(family.members) + free,
         "free": free,
         "invites": len(family.snapshot.get("pending_invites", [])),
         "is_owner": role(account) == "owner",
+    }
+
+
+async def slots_getter(family: Family, lang: str, **kwargs):
+    snapshot = family.snapshot or {}
+    calendar = snapshot.get("calendar", {})
+    unknown = t(lang, "slots_unknown")
+    checked_at = calendar.get("checked_at")
+
+    def timestamp(value):
+        if type(value) not in (int, float) or value <= 0:
+            return unknown
+        try:
+            return datetime.fromtimestamp(value, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (ValueError, OverflowError, OSError):
+            return unknown
+
+    def cooldown(seconds):
+        if type(seconds) is not int or not 0 <= seconds <= 2**32 - 1:
+            return unknown
+        if seconds == 0:
+            return t(lang, "slots_clear")
+        if timestamp(checked_at) == unknown:
+            return unknown
+        until = timestamp(checked_at + seconds)
+        return t(lang, "slots_until", when=until) if until != unknown else unknown
+
+    free = calendar.get("free_spots")
+    free = free if type(free) is int and free >= 0 else unknown
+    slot_seconds = calendar.get("slot_cooldown_remaining_seconds")
+    available = unknown
+    if free != unknown and type(slot_seconds) is int and 0 <= slot_seconds <= 2**32 - 1:
+        available = free if slot_seconds == 0 else 0
+    overrides = calendar.get("slot_cooldown_overrides")
+    overrides = overrides if type(overrides) is int and overrides >= 0 else unknown
+    members = "\n".join(f"• {escape(family.name(member))}" for member in family.members)
+    invites = snapshot.get("pending_invites", [])
+    capacity = len(family.members) + len(invites) + free if free != unknown else unknown
+    invite_names = "\n".join(f"• {escape(family.name(invite['steamid']))}" for invite in invites) or "—"
+    member_cooldowns = calendar.get("member_cooldowns", {})
+    restrictions = "\n".join(
+        f"• {escape(family.name(member))}: {cooldown(member_cooldowns.get(member))}" for member in family.members
+    )
+    return {
+        "slots_body": "\n\n".join(
+            (
+                t(lang, "slots_updated", checked=timestamp(checked_at)),
+                t(lang, "slots_occupied", capacity=capacity, count=len(family.members), members=members),
+                t(lang, "slots_free", free=free, available=available, overrides=overrides),
+                t(lang, "slots_invited", count=len(invites), invites=invite_names),
+                t(lang, "slots_family_cooldown", cooldown=cooldown(slot_seconds)),
+                t(lang, "slots_member_cooldowns", restrictions=restrictions),
+                t(lang, "slots_limits"),
+            )
+        )
     }
 
 
@@ -495,10 +549,19 @@ family_dialog = Dialog(
             SwitchTo(Tr("btn_stats"), id="stats", state=FamilyView.stats, style=look(color=BLUE)),
             SwitchTo(Tr("btn_members_list"), id="members", state=FamilyView.members, style=look("family", BLUE)),
         ),
+        SwitchTo(Tr("btn_slots"), id="slots", state=FamilyView.slots),
         SwitchTo(Tr("btn_manage"), id="manage", state=FamilyView.manage, when="is_owner", style=look("admin")),
         Cancel(Tr("btn_back")),
         getter=info_getter,
         state=FamilyView.info,
+    ),
+    Window(
+        Header("family", "slots"),
+        Format("{slots_body}"),
+        NO_PREVIEW,
+        back_to(FamilyView.info, "back_info"),
+        getter=slots_getter,
+        state=FamilyView.slots,
     ),
     Window(
         Header("family", "stats"),

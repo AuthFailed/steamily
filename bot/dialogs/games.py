@@ -23,7 +23,17 @@ from aiogram_dialog.widgets.text import Format
 
 from ..family import DEFAULT_COUNTRY, Family, accounts_by_steam, person_link
 from ..i18n import Tr, sharing_warning, t
-from ..library import SORTS, copy_plan, currency, parse_budget, query, shareable_copies, tag_counts
+from ..library import (
+    PLAY_MODES,
+    SORTS,
+    copy_plan,
+    currency,
+    parse_budget,
+    play_modes,
+    query,
+    shareable_copies,
+    tag_counts,
+)
 from ..states import Games
 from ..ui import BLUE, Header, back_home, home, look
 
@@ -67,6 +77,7 @@ def current_filters(manager: DialogManager) -> dict:
         "desc": manager.dialog_data.get("desc", False),
         "price": current_price(manager),
         "multiplayer": manager.find("multiplayer").is_checked(),
+        "mode": manager.dialog_data.get("mode"),
         "players": manager.find("players").get_checked(),
         "owners": manager.dialog_data.get("owners", []),
     }
@@ -95,9 +106,12 @@ def filter_summary(manager: DialogManager, family: Family, store: dict, lang: st
         lines.append(f"💲 {price_label(manager, store, lang)}")
     if filters["multiplayer"]:
         lines.append(t(lang, "sum_multiplayer"))
+    if filters["mode"]:
+        lines.append(t(lang, "mode_" + filters["mode"]))
     if len(filters["players"]) > 1:
         names = ", ".join(escape(family.name(p)) for p in filters["players"])
-        lines.append(t(lang, "sum_players", names=names, n=len(filters["players"])))
+        key = "sum_players_hosted" if filters["mode"] in ("local_coop", "remote_play") else "sum_players"
+        lines.append(t(lang, key, names=names, n=len(filters["players"])))
     if filters["owners"]:
         lines.append(t(lang, "sum_owners", names=", ".join(escape(family.name(o)) for o in filters["owners"])))
     if status := manager.dialog_data.get("status"):
@@ -215,11 +229,21 @@ async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: s
         if dialog_manager.middleware_data["account"]["steam_id"] in game["owners"]
         else ("borrowed" if shareable else "unavailable")
     )
+    modes = play_modes(info)
     lines = [
         status_text,
         f"💲 {escape(info.get('price_text') or t(lang, 'price_unknown'))}",
         f"🏷 {escape(tags)}" if tags else None,
         t(lang, info.get("play_mode") or "mode_unknown"),
+        *[
+            t(lang, "mode_" + mode) + ": " + t(lang, "mode_status_" + str(supported).lower())
+            for mode, supported in modes.items()
+        ],
+        t(lang, "online_copy_rule") if modes["online_coop"] or modes["online_pvp"] else None,
+        t(lang, "local_copy_rule") if modes["local_coop"] else None,
+        t(lang, "remote_copy_rule") if modes["remote_play"] else None,
+        t(lang, "host_copy_rule") if modes["local_coop"] or modes["remote_play"] else None,
+        t(lang, "session_limits") if any(modes.values()) else None,
         t(lang, "copies_line", n=len(game["owners"]), owners=owners),
         t(lang, "shareable_copies_line", n=shareable),
         t(lang, "access_" + access),
@@ -340,6 +364,10 @@ async def filters_getter(dialog_manager: DialogManager, lang: str, **kwargs):
         "budget_error": dialog_manager.dialog_data.get("budget_error", False),
         "budget_changed": dialog_manager.dialog_data.get("budget_changed", False),
         "genre": names.get(tag, "?") if tag else t(lang, "genre_any"),
+        "modes": [
+            (key, ("• " if dialog_manager.dialog_data.get("mode") == key else "") + t(lang, "mode_" + (key or "any")))
+            for key in (None, *PLAY_MODES)
+        ],
         "player_count": len(dialog_manager.find("players").get_checked()),
         "statuses": [
             (key, ("• " if dialog_manager.dialog_data.get("status", "any") == key else "") + t(lang, "status_" + key))
@@ -361,6 +389,19 @@ async def on_status_filter(callback: CallbackQuery, widget, manager: DialogManag
 async def on_price(callback: CallbackQuery, widget, manager: DialogManager, price: str):
     manager.dialog_data.update(price=price, budget_changed=False)
     await reset_page(callback, widget, manager)
+
+
+async def on_mode(callback: CallbackQuery, widget, manager: DialogManager, mode: str):
+    manager.dialog_data["mode"] = None if mode == "any" else mode
+    if manager.dialog_data["mode"]:
+        await manager.find("multiplayer").set_checked(False)
+    await reset_page(callback, widget, manager)
+
+
+async def on_multiplayer(event, widget, manager: DialogManager, *args):
+    if manager.find("multiplayer").is_checked():
+        manager.dialog_data.pop("mode", None)
+    await reset_page(event, widget, manager)
 
 
 async def open_budget(callback: CallbackQuery, button: Button, manager: DialogManager):
@@ -405,6 +446,7 @@ async def on_sort(callback: CallbackQuery, widget, manager: DialogManager, key: 
 async def reset_filters(callback: CallbackQuery, button: Button, manager: DialogManager):
     manager.dialog_data.pop("tag", None)
     manager.dialog_data.pop("owners", None)
+    manager.dialog_data.pop("mode", None)
     manager.dialog_data.pop("status", None)
     await manager.find("multiplayer").set_checked(False)
     await manager.find("players").reset_checked()
@@ -418,7 +460,7 @@ async def players_getter(family: Family, **kwargs):
 
 async def on_players(event, widget, manager: DialogManager, *args):
     # Playing together means a multiplayer game.
-    if len(manager.find("players").get_checked()) > 1:
+    if len(manager.find("players").get_checked()) > 1 and not manager.dialog_data.get("mode"):
         await manager.find("multiplayer").set_checked(True)
     await reset_page(event, widget, manager)
 
@@ -505,7 +547,17 @@ games_dialog = Dialog(
             width=2,
         ),
         Button(Format("{budget}"), id="budget", on_click=open_budget, when="currency_known"),
-        Checkbox(Tr("multiplayer_on"), Tr("multiplayer_off"), id="multiplayer", on_state_changed=reset_page),
+        Checkbox(Tr("multiplayer_on"), Tr("multiplayer_off"), id="multiplayer", on_state_changed=on_multiplayer),
+        Group(
+            Select(
+                Format("{item[1]}"),
+                id="mode",
+                items="modes",
+                item_id_getter=lambda item: item[0] or "any",
+                on_click=on_mode,
+            ),
+            width=1,
+        ),
         SwitchTo(Tr("btn_genre"), id="genre", state=Games.genre),
         SwitchTo(Tr("btn_players"), id="players_btn", state=Games.players),
         Group(

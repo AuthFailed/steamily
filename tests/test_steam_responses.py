@@ -91,6 +91,7 @@ class SteamResponseParsingTest(unittest.TestCase):
                     "price_text": "$12.34",
                     "tags": [2, 4, 6, 3, 5],
                     "play_mode": "multiplayer",
+                    "categories": {"supported_player_categoryids": [2, 9]},
                 },
             )
             self.assertEqual(parse_store_item(free)["price"], 0)
@@ -288,6 +289,7 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await update_store_cache(self.http, cache, [30, 50], "US"))
             for appid in ("30", "50"):
                 self.assertIsNone(cache["apps"][appid]["play_mode"])
+                self.assertIsNone(cache["apps"][appid]["categories"])
             self.assertFalse(await update_store_cache(self.http, cache, [30, 50], "US"))
         self.assertEqual(len(self.requests), 2)
 
@@ -295,9 +297,9 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
         cache = {
             "tag_names": {"19": "Action"},
             "apps": {
-                "10": {"fetched": 2_000_000_000.0, "play_mode": "multiplayer"},
+                "10": {"fetched": 2_000_000_000.0, "play_mode": "multiplayer", "categories": {}},
                 "20": {"fetched": 2_000_000_000.0, "multiplayer": False},
-                "30": {"fetched": 2_000_000_000.0, "play_mode": None},
+                "30": {"fetched": 2_000_000_000.0, "play_mode": None, "categories": None},
             },
         }
         with patch("bot.steam.time.time", return_value=2_000_000_001.0):
@@ -305,6 +307,27 @@ class SteamResponseHTTPTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cache["apps"]["20"]["play_mode"], "singleplayer")
             self.assertFalse(await update_store_cache(self.http, cache, [10, 20, 30], "US"))
         self.assertEqual(json.loads(self.requests[0][2]["input_json"])["ids"], [{"appid": 20}])
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_store_cache_refreshes_recent_entries_without_categories_once(self):
+        cache = {
+            "tag_names": {"19": "Action"},
+            "apps": {
+                "10": {"fetched": 2_000_000_000.0, "play_mode": "multiplayer"},
+                "20": {
+                    "fetched": 2_000_000_000.0,
+                    "play_mode": "singleplayer",
+                    "categories": {"supported_player_categoryids": []},
+                },
+                "30": {"fetched": 2_000_000_000.0, "play_mode": None, "categories": None},
+                "50": {"fetched": 2_000_000_000.0, "play_mode": None, "categories": {}},
+            },
+        }
+        with patch("bot.steam.time.time", return_value=2_000_000_001.0):
+            self.assertTrue(await update_store_cache(self.http, cache, [10, 20, 30, 50], "US"))
+            self.assertEqual(cache["apps"]["10"]["categories"], {"supported_player_categoryids": [2, 9]})
+            self.assertFalse(await update_store_cache(self.http, cache, [10, 20, 30, 50], "US"))
+        self.assertEqual(json.loads(self.requests[0][2]["input_json"])["ids"], [{"appid": 10}])
         self.assertEqual(len(self.requests), 2)
 
 
