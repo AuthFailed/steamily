@@ -42,7 +42,10 @@ def card_text(
         "",
         f"💲 {escape(price or t(lang, 'price_unknown'))}",
         owners_line,
+        t(lang, "copies_line", n=len(owners), owners="") if owners else None,
+        t(lang, "shareable_copies_line", n=len(owners) if exclude_reason == 0 else 0) if owners else None,
         sharing_warning(lang, exclude_reason) or None,
+        t(lang, "availability_unknown") if owners else None,
         "",
         url,
     ]
