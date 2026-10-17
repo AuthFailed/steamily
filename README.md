@@ -14,7 +14,7 @@ Configure the new bot:
 | `/setinline` | Enable inline mode; use `Search family games` as the placeholder. |
 | `/setjoingroups` | Enable adding the bot to groups for family notifications. |
 | `/setprivacy` | Keep **Enabled**. `/link@YourBotUsername` works with privacy enabled; reading every group message is unnecessary. |
-| `/setcommands` | Paste the two commands below. |
+| `/setcommands` | Paste the commands below. |
 | `/setdescription` | Suggested: `See your Steam Family's shared games, statistics, and change notifications. Open the bot to link your Steam account.` |
 | `/setabouttext` | Suggested: `Your Steam Family in Telegram.` |
 | `/setuserpic` | Upload a picture you own for your instance. |
@@ -22,6 +22,7 @@ Configure the new bot:
 ```text
 start - Open the family menu
 link - Link this group to your family notifications
+gamenight - Propose a game night in the linked group
 ```
 
 These settings are managed in BotFather; the bot does not apply them on startup.
@@ -82,6 +83,36 @@ set -a
 set +a
 python -m bot
 ```
+
+## Organize a game night
+
+An approved family member can propose a session in the linked group:
+
+```text
+/gamenight@YourBotUsername 2099-01-02 19:30 Europe/Moscow 570 730
+```
+
+Replace the example with your future date, local time, explicit IANA timezone
+(or `UTC`), and **2–5 different games from your family library**. Game IDs are
+the numbers in the games' Steam store links. Send `/gamenight@YourBotUsername`
+without arguments for help. For ambiguous or nonexistent times at a daylight-saving
+transition, convert your intended instant to UTC.
+
+Each member can choose one game and independently answer **Going**, **Maybe**, or
+**Cannot attend**. Clicking again replaces the previous response. The creator can
+close the poll after a vote or cancel the event. The most-voted game wins, with
+shortlist order breaking ties; closing fixes that choice and disables the buttons.
+The card shows attendees and required versus eligible copies for each candidate.
+Excluded copies only count for attending owners; missing or unknown sharing data
+is labelled unknown. Copy counts do not reserve licenses or guarantee availability
+now or at the proposed time.
+
+Events and responses survive restarts. Current family membership, approval, saved
+login, linked group, and original event message are checked on every action.
+Unlinking or changing the group invalidates old events even if the same group is
+linked again. Departed or unapproved participants no longer count. A Telegram
+group upgrade requires a new event. No reminders or external calendar entries are
+created.
 
 ## Steam login
 

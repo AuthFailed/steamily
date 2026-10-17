@@ -35,7 +35,8 @@ TEXTS = {
         "both off by default. Only you can enable them. Logout or loss of family access resets them. "
         "Already delivered messages cannot reliably be recalled.\n\n"
         "<b>Retention and deletion</b>\nUse /delete or Settings → Log out to erase your account, token, Telegram "
-        "profile link, preferences, saved dialogs and personal runtime caches, and cancel pending login. "
+        "profile link, preferences, saved dialogs, game-night responses and events you created, "
+        "and personal runtime caches, and cancel pending login. "
         "Your saved Steam session is revoked before deletion. Administrative removal deletes the same bot data "
         "but does not revoke Steam sessions. You need a fresh Steam login to return.\n"
         "Shared family snapshots, seen member/game ownership history, pending alerts and alert settings remain "
@@ -360,6 +361,33 @@ TEXTS = {
         "alerts_playing": "Started / stopped playing",
         "link_denied": "Only the Steam Family owner can link a group. Log in to the bot in a private chat first.",
         "link_done": "✅ New-game alerts for <b>{name}</b> will be posted here.",
+        "gn_title": "🎮 <b>Game night · {state}</b>",
+        "gn_open": "Open",
+        "gn_closed": "Closed",
+        "gn_cancelled": "Cancelled",
+        "gn_chosen": "Chosen game: <b>{game}</b>",
+        "gn_choose": "Vote for a game and choose your attendance below.",
+        "gn_copies": "Required copies: {required} · Eligible copies: {eligible}",
+        "gn_unknown": "unknown",
+        "gn_shortage": "⚠️ Not enough eligible copies for everyone going.",
+        "gn_sharing_unknown": "⚠️ Sharing data is unknown; eligibility cannot be confirmed.",
+        "gn_game_gone": "Game {appid} (no longer in the library)",
+        "gn_going": "Going",
+        "gn_maybe": "Maybe",
+        "gn_cannot": "Cannot attend",
+        "gn_close": "Close poll",
+        "gn_cancel": "Cancel event",
+        "gn_availability": "Copy availability now and at the proposed time is unknown. Copies are not reserved.",
+        "gn_ties": "Most votes wins; ties use shortlist order. Only the creator can close or cancel.",
+        "gn_group_only": "Schedule game nights in your family's linked Telegram group.",
+        "gn_denied": "Action unavailable. Use the linked group and a current approved family login; "
+        "select library games. The event may be closed or cancelled; only its creator can close or cancel it.",
+        "gn_help": "Propose a future time and 2–5 different library games:\n"
+        "<code>/gamenight 2099-01-02 19:30 Europe/Moscow 570 730</code>\n"
+        "Use YYYY-MM-DD HH:MM and an explicit Area/City timezone (or UTC). "
+        "Game IDs are the numbers in the library's Steam store links. "
+        "For repeated or skipped daylight-saving clock times, use UTC. "
+        "Then vote and choose Going, Maybe, or Cannot attend here.",
         "stale": "Menu was refreshed",
         "alert": "🎮 New Steam Family game\n{name}\nAdded by: {owner}\n{url}",
         "alert_online": "🟢 {name} is online",
@@ -395,7 +423,8 @@ TEXTS = {
         "оба выключены по умолчанию. Включить их можете только вы. Выход или потеря доступа к семье "
         "сбрасывает разрешения. Уже отправленные сообщения нельзя надёжно отозвать.\n\n"
         "<b>Срок хранения и удаление</b>\nКоманда /delete или Настройки → Выйти удаляет аккаунт, токен, ссылку "
-        "на Telegram, настройки, диалоги и личные кеши, отменяет незавершённый вход. Сохранённый сеанс Steam "
+        "на Telegram, настройки, диалоги, ответы и созданные вами игровые вечера, личные кеши, "
+        "отменяет незавершённый вход. Сохранённый сеанс Steam "
         "отзывается до удаления. Удаление администратором очищает те же данные бота, но не отзывает сеансы Steam. "
         "Для возвращения нужен новый вход в Steam.\n"
         "Общие снимки семьи, история замеченных участников и владельцев игр, очередь и настройки уведомлений остаются, "
@@ -723,6 +752,35 @@ TEXTS = {
         "alerts_playing": "Запустил / закрыл игру",
         "link_denied": "Привязать группу может только владелец семьи Steam. Сначала войдите в бота в личном чате.",
         "link_done": "✅ Уведомления о новых играх семьи <b>{name}</b> будут приходить сюда.",
+        "gn_title": "🎮 <b>Игровой вечер · {state}</b>",
+        "gn_open": "Голосование открыто",
+        "gn_closed": "Голосование закрыто",
+        "gn_cancelled": "Отменён",
+        "gn_chosen": "Выбранная игра: <b>{game}</b>",
+        "gn_choose": "Проголосуйте за игру и отметьте участие ниже.",
+        "gn_copies": "Требуется копий: {required} · Подходящих копий: {eligible}",
+        "gn_unknown": "неизвестно",
+        "gn_shortage": "⚠️ Подходящих копий не хватает для всех участников.",
+        "gn_sharing_unknown": "⚠️ Данные о семейном доступе неизвестны; право доступа не подтверждено.",
+        "gn_game_gone": "Игра {appid} (больше нет в библиотеке)",
+        "gn_going": "Буду",
+        "gn_maybe": "Возможно",
+        "gn_cannot": "Не смогу",
+        "gn_close": "Закрыть опрос",
+        "gn_cancel": "Отменить вечер",
+        "gn_availability": "Доступность копий сейчас и к началу вечера неизвестна. Копии не бронируются.",
+        "gn_ties": "Побеждает большинство; при равенстве — первая игра в списке. "
+        "Закрыть опрос или отменить вечер может только создатель.",
+        "gn_group_only": "Планируйте игровой вечер в Telegram-группе, привязанной к вашей семье.",
+        "gn_denied": "Действие недоступно. Нужны привязанная группа и действующий вход одобренного участника семьи; "
+        "выбирайте игры из библиотеки. Вечер мог быть закрыт или отменён; "
+        "закрыть или отменить его может только создатель.",
+        "gn_help": "Укажите время в будущем и 2–5 разных игр из библиотеки:\n"
+        "<code>/gamenight 2099-01-02 19:30 Europe/Moscow 570 730</code>\n"
+        "Формат: ГГГГ-ММ-ДД ЧЧ:ММ и явный часовой пояс Area/City (или UTC). "
+        "ID игр — числа в ссылках на магазин Steam в библиотеке. "
+        "Для неоднозначного времени при переводе часов используйте UTC. "
+        "Затем выберите игру и ответьте «Буду», «Возможно» или «Не смогу» здесь.",
         "stale": "Меню обновлено",
         "alert": "🎮 Новая игра в семье Steam\n{name}\nДобавил(а): {owner}\n{url}",
         "alert_online": "🟢 {name} в сети",
