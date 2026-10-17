@@ -1,0 +1,36 @@
+{
+  "response": {
+    "family_groupid": "42",
+    "family_group": {
+      "name": "Recorded family",
+      "free_spots": 1,
+      "members": [
+        {
+          "steamid": "76561198000000001",
+          "role": 1,
+          "time_joined": 1700000000
+        },
+        {
+          "steamid": "76561198000000002",
+          "role": 1,
+          "time_joined": 1700000001
+        },
+        {
+          "steamid": "76561198000000003",
+          "role": 1,
+          "time_joined": 1700000002
+        },
+        {
+          "steamid": "76561198000000004",
+          "role": 1,
+          "time_joined": 1700000003
+        },
+        {
+          "steamid": "76561198000000005",
+          "role": 1,
+          "time_joined": 1700000004
+        }
+      ]
+    }
+  }
+}

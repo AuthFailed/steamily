@@ -1,0 +1,62 @@
+{
+  "response": {
+    "accounts": [
+      {
+        "public_data": {
+          "steamid": "76561198000000003",
+          "persona_name": "Recorded member 03",
+          "profile_url": ""
+        },
+        "private_data": {
+          "time_created": 1600000000,
+          "last_seen_online": 1700000030
+        }
+      },
+      {
+        "public_data": {
+          "steamid": "76561198000000001",
+          "persona_name": "Recorded member 01",
+          "profile_url": "recorded-member-01"
+        },
+        "private_data": {
+          "persona_state": 1,
+          "time_created": 1600000000,
+          "last_seen_online": 1700000030
+        }
+      },
+      {
+        "public_data": {
+          "steamid": "76561198000000005",
+          "persona_name": "Recorded member 05",
+          "profile_url": "recorded-member-05"
+        },
+        "private_data": {
+          "time_created": 1600000000,
+          "last_seen_online": 1700000030
+        }
+      },
+      {
+        "public_data": {
+          "steamid": "76561198000000002",
+          "persona_name": "Recorded member 02",
+          "profile_url": ""
+        },
+        "private_data": {
+          "time_created": 1600000000,
+          "last_seen_online": 1700000030
+        }
+      },
+      {
+        "public_data": {
+          "steamid": "76561198000000004",
+          "persona_name": "Recorded member 04",
+          "profile_url": "recorded-member-04"
+        },
+        "private_data": {
+          "time_created": 1600000000,
+          "last_seen_online": 1700000030
+        }
+      }
+    ]
+  }
+}

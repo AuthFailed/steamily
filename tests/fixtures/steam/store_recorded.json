@@ -1,0 +1,262 @@
+{
+  "response": {
+    "store_items": [
+      {
+        "appid": 620,
+        "name": "Portal 2",
+        "tags": [
+          {
+            "tagid": 4182,
+            "weight": 603
+          },
+          {
+            "tagid": 1625,
+            "weight": 587
+          },
+          {
+            "tagid": 1664,
+            "weight": 586
+          },
+          {
+            "tagid": 3839,
+            "weight": 560
+          },
+          {
+            "tagid": 5923,
+            "weight": 557
+          },
+          {
+            "tagid": 1742,
+            "weight": 555
+          },
+          {
+            "tagid": 5537,
+            "weight": 549
+          },
+          {
+            "tagid": 4136,
+            "weight": 542
+          },
+          {
+            "tagid": 7208,
+            "weight": 538
+          },
+          {
+            "tagid": 5395,
+            "weight": 531
+          },
+          {
+            "tagid": 1685,
+            "weight": 518
+          },
+          {
+            "tagid": 4106,
+            "weight": 517
+          },
+          {
+            "tagid": 19,
+            "weight": 512
+          },
+          {
+            "tagid": 1663,
+            "weight": 512
+          },
+          {
+            "tagid": 3968,
+            "weight": 403
+          },
+          {
+            "tagid": 3942,
+            "weight": 392
+          },
+          {
+            "tagid": 8122,
+            "weight": 386
+          },
+          {
+            "tagid": 5794,
+            "weight": 382
+          },
+          {
+            "tagid": 1719,
+            "weight": 381
+          },
+          {
+            "tagid": 4166,
+            "weight": 378
+          }
+        ],
+        "categories": {
+          "supported_player_categoryids": [
+            2,
+            1,
+            9,
+            38,
+            39,
+            24
+          ],
+          "feature_categoryids": [
+            22,
+            29,
+            13,
+            30,
+            51,
+            67,
+            68,
+            69,
+            70,
+            74,
+            79,
+            23,
+            15,
+            17,
+            14,
+            41,
+            42,
+            43,
+            44,
+            62
+          ],
+          "controller_categoryids": [
+            28,
+            55,
+            56,
+            57,
+            58,
+            59
+          ]
+        },
+        "basic_info": {
+          "short_description": "The \"Perpetual Testing Initiative\" has been expanded to allow you to design co-op puzzles for you and your friends!"
+        },
+        "assets": {
+          "asset_url_format": "steam/apps/620/${FILENAME}?t=1790187113",
+          "small_capsule": "bd23943dcd0280aa2cdc066e2f86d2185cfd4cce/capsule_231x87.jpg"
+        },
+        "best_purchase_option": {
+          "final_price_in_cents": "999",
+          "formatted_final_price": "$9.99"
+        }
+      },
+      {
+        "appid": 730,
+        "name": "Counter-Strike 2",
+        "is_free": true,
+        "tags": [
+          {
+            "tagid": 1663,
+            "weight": 1160
+          },
+          {
+            "tagid": 1774,
+            "weight": 834
+          },
+          {
+            "tagid": 3859,
+            "weight": 795
+          },
+          {
+            "tagid": 3878,
+            "weight": 681
+          },
+          {
+            "tagid": 19,
+            "weight": 603
+          },
+          {
+            "tagid": 5711,
+            "weight": 589
+          },
+          {
+            "tagid": 5055,
+            "weight": 555
+          },
+          {
+            "tagid": 1708,
+            "weight": 526
+          },
+          {
+            "tagid": 3839,
+            "weight": 501
+          },
+          {
+            "tagid": 1775,
+            "weight": 439
+          },
+          {
+            "tagid": 3843,
+            "weight": 431
+          },
+          {
+            "tagid": 1685,
+            "weight": 384
+          },
+          {
+            "tagid": 9,
+            "weight": 382
+          },
+          {
+            "tagid": 4168,
+            "weight": 364
+          },
+          {
+            "tagid": 1678,
+            "weight": 355
+          },
+          {
+            "tagid": 4202,
+            "weight": 330
+          },
+          {
+            "tagid": 4026,
+            "weight": 329
+          },
+          {
+            "tagid": 4175,
+            "weight": 323
+          },
+          {
+            "tagid": 1734,
+            "weight": 321
+          },
+          {
+            "tagid": 1669,
+            "weight": 87
+          }
+        ],
+        "categories": {
+          "supported_player_categoryids": [
+            1,
+            27
+          ],
+          "feature_categoryids": [
+            29,
+            30,
+            51,
+            35,
+            64,
+            66,
+            67,
+            68,
+            69,
+            70,
+            74,
+            8,
+            15,
+            41,
+            42,
+            43,
+            63
+          ]
+        },
+        "basic_info": {
+          "short_description": "For over two decades, Counter-Strike has offered an elite competitive experience, one shaped by millions of players from across the globe. And now the next chapter in the CS story is about to begin. This is Counter-Strike 2."
+        },
+        "assets": {
+          "asset_url_format": "steam/apps/730/${FILENAME}?t=1791824795",
+          "small_capsule": "942c04efaa5bc87afb6f2a97dbf17ac614c8a84d/capsule_231x87.jpg"
+        }
+      }
+    ]
+  }
+}
