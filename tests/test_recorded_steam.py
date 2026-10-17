@@ -46,11 +46,13 @@ class RecordedSteamTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(api_patch.stop)
 
     async def test_recorded_family_players_library_and_playtime_form_one_snapshot(self):
-        snapshot = await fetch_family_snapshot(self.http, "recorded-access")
+        with patch("bot.steam.time.time", return_value=2_000_000_000.0):
+            snapshot = await fetch_family_snapshot(self.http, "recorded-access")
 
         self.assertEqual(
             snapshot,
             {
+                "fetched_at": 2_000_000_000.0,
                 "family_id": "42",
                 "name": "Recorded family",
                 "members": MEMBERS,

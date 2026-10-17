@@ -204,6 +204,7 @@ class SteamParsingTest(unittest.TestCase):
             {"appid": 620, "name": "App 620", "owners": ["1", "2"], "acquired": 5, "exclude_reason": 0},
         )
         self.assertEqual(snapshot["apps"][1]["owners"], [])
+        self.assertNotIn("fetched_at", snapshot)
 
     def test_missing_members_are_an_incomplete_response(self):
         with self.assertRaisesRegex(RuntimeError, "incomplete family response"):
@@ -256,6 +257,24 @@ class SteamParsingTest(unittest.TestCase):
 
 
 class SteamFetchTest(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_timestamp_is_recorded_after_optional_fetch_finishes(self):
+        family = {"response": {"family_groupid": "9", "family_group": {"members": [{"steamid": "1"}]}}}
+        for failed_playtime in (False, True):
+            with self.subTest(failed_playtime=failed_playtime), patch("bot.steam.time.time", return_value=100) as now:
+
+                async def playtime(*args, failed=failed_playtime):
+                    now.return_value = 200
+                    if failed:
+                        raise RuntimeError("Steam HTTP 503")
+                    return {"response": {"entries": []}}
+
+                with (
+                    patch("bot.steam.get_json", AsyncMock(side_effect=[family, {"response": {"apps": []}}, {}])),
+                    patch("bot.steam.post_json", side_effect=playtime),
+                ):
+                    snapshot = await fetch_family_snapshot(None, "access")
+                self.assertEqual(snapshot.get("fetched_at"), 200)
+
     async def test_explicit_no_family_is_confirmed_before_fetching_the_library(self):
         get = AsyncMock(return_value={"response": {"is_not_member_of_any_group": True}})
         with patch("bot.steam.get_json", get), self.assertRaises(NoFamily):

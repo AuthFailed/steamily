@@ -68,6 +68,23 @@ def play_modes(info: dict) -> dict[str, bool | None]:
     }
 
 
+def removal_impact(apps: list[dict], steam_id: str) -> list[dict]:
+    """Preview eligible copy losses when a member leaves, without changing the snapshot."""
+    affected = []
+    for app in apps:
+        before = shareable_copies(app)
+        if before and steam_id in app["owners"]:
+            affected.append(
+                {
+                    "appid": app["appid"],
+                    "name": app["name"],
+                    "before": before,
+                    "after": before - app["owners"].count(steam_id),
+                }
+            )
+    return sorted(affected, key=lambda app: (app["after"] != 0, app["name"].casefold(), app["appid"]))
+
+
 def query(
     apps: list[dict],
     store: dict,
