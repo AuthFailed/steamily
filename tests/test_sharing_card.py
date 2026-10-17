@@ -61,6 +61,30 @@ class SharingCardTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("❔ Режим игры неизвестен", details)
         self.assertNotIn("👤 Одиночная", details)
 
+    async def test_card_explains_specific_modes_and_copy_assumptions(self):
+        info = {
+            "play_mode": "multiplayer",
+            "categories": {"supported_player_categoryids": [1, 38, 36, 39], "feature_categoryids": [44]},
+        }
+        details = await self.card(0, info=info)
+        for label in ("Online co-op", "Online PvP", "Local co-op/split-screen", "Remote Play Together"):
+            self.assertIn(f"{label}: supported", details)
+        self.assertIn("one owned or shareable copy per player", details)
+        self.assertIn("everyone plays on the host's device", details)
+        self.assertIn("guests join the host's stream", details)
+        self.assertIn("player limit and input requirements", details)
+
+    async def test_card_distinguishes_unlisted_modes_from_missing_collections(self):
+        details = await self.card(0, info={"categories": {"supported_player_categoryids": []}})
+        self.assertIn("Online co-op: not listed", details)
+        self.assertIn("Remote Play Together: unknown", details)
+        self.assertNotIn("one owned or shareable copy per player", details)
+
+    async def test_russian_card_explains_remote_hosting(self):
+        details = await self.card(0, lang="ru", info={"categories": {"feature_categoryids": [44]}})
+        self.assertIn("Remote Play Together: поддерживается", details)
+        self.assertIn("трансляции ведущего", details)
+
     async def test_excluded_card_keeps_ownership_separate_from_sharing_and_availability(self):
         details = await self.card(1)
         self.assertIn("Owned copies: 2", details)

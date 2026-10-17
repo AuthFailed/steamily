@@ -7,6 +7,7 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from bot.library import play_modes
 from bot.steam import fetch_family_snapshot, parse_store_item, store_cards
 
 FIXTURES = Path(__file__).parent / "fixtures/steam"
@@ -126,6 +127,32 @@ class RecordedSteamTest(unittest.IsolatedAsyncioTestCase):
                         "price_text": "$9.99",
                         "tags": [4182, 1625, 1664, 3839, 5923],
                         "play_mode": "multiplayer",
+                        "categories": {
+                            "supported_player_categoryids": [2, 1, 9, 38, 39, 24],
+                            "feature_categoryids": [
+                                22,
+                                29,
+                                13,
+                                30,
+                                51,
+                                67,
+                                68,
+                                69,
+                                70,
+                                74,
+                                79,
+                                23,
+                                15,
+                                17,
+                                14,
+                                41,
+                                42,
+                                43,
+                                44,
+                                62,
+                            ],
+                            "controller_categoryids": [28, 55, 56, 57, 58, 59],
+                        },
                     },
                     {
                         "fetched": 2_000_000_000.0,
@@ -133,9 +160,19 @@ class RecordedSteamTest(unittest.IsolatedAsyncioTestCase):
                         "price_text": "Free",
                         "tags": [1663, 1774, 3859, 3878, 19],
                         "play_mode": "multiplayer",
+                        "categories": {
+                            "supported_player_categoryids": [1, 27],
+                            "feature_categoryids": [29, 30, 51, 35, 64, 66, 67, 68, 69, 70, 74, 8, 15, 41, 42, 43, 63],
+                        },
                     },
                 ],
             )
+
+        portal, counter_strike = [play_modes(parse_store_item(item)) for item in items]
+        self.assertEqual(portal, {"online_coop": True, "online_pvp": False, "local_coop": True, "remote_play": True})
+        self.assertEqual(
+            counter_strike, {"online_coop": False, "online_pvp": False, "local_coop": False, "remote_play": False}
+        )
 
         cards = await store_cards(self.http, [620, 730], "en", "US")
 

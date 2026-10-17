@@ -58,6 +58,22 @@ with an explicitly derived missing-metadata variant; see
 [its provenance and sanitization details](../README.md#recorded-steam-response).
 Its independent member/app mapping is not shared with the newer snapshot files.
 
+## Play-mode category provenance (issue #19)
+
+Public Store feature links (`category2` values) were checked on **2026-10-17**:
+[Portal 2](https://store.steampowered.com/app/620/Portal_2/?l=english) identifies
+`38` as Online Co-op, `39` as Shared/Split Screen Co-op, `24` as Shared/Split
+Screen, and `44` as Remote Play Together.
+[Brawlhalla](https://store.steampowered.com/app/291550/Brawlhalla/?l=english)
+identifies `36` as Online PvP and `37` as Shared/Split Screen PvP.
+
+The recorded Portal 2 response contains `38`, `39`, and `24` under
+`supported_player_categoryids`, and `44` under `feature_categoryids`. The
+recorded Counter-Strike 2 player categories are `[1, 27]`; these do not assert
+exact Online PvP support. Categories `36` and `37` were verified through the
+public Store links, are absent from these recordings, and are covered by
+synthetic tests. No recorded response was changed to add categories.
+
 ## Synthetic examples
 
 Files without `_recorded` in their name were authored from the fields consumed
