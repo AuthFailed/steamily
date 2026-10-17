@@ -686,6 +686,27 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("◀️ Back"))
         self.assertIn("Games: <b>19</b>", self.last().text)
 
+    async def test_recommended_and_backlog_filters_combine_without_changing_private_marks(self):
+        for appid, status in ((3, "completed"), (6, "backlog")):
+            await self.db.set_game_status(FRIEND, BOB, FAMILY, appid, f"Game {appid:02}", status)
+            self.assertTrue(await self.db.set_game_response(await self.db.account(FRIEND), appid, "recommend"))
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn(".*Recommended only"))
+        await client.click(self.last(), Btn("Backlog"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        await client.click(self.last(), Btn(r"Game 06.*"))
+        self.assertIn("Personal status: Backlog", self.last().text)
+        self.assertIn("Recommend: 1", self.last().text)
+        await client.click(self.last(), Btn("Clear my response"))
+        self.assertIn("Personal status: Backlog", self.last().text)
+        self.assertEqual((await self.db.game_marks(FRIEND))[6]["status"], "backlog")
+        await client.click(self.last(), Btn("• Backlog"))
+        self.assertEqual([row["appid"] for row in await self.db.game_responses(await self.db.account(FRIEND))], [3])
+
     async def test_stale_opinion_buttons_cannot_restore_departed_or_deleted_votes(self):
         client = self.client(FRIEND)
         family = self.families.get(FAMILY)
@@ -710,6 +731,160 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.families, "_fetch", AsyncMock(return_value=departed)):
             await client.click(old_card, Btn("Recommend with my name"))
         self.assertEqual(await self.db.game_responses(await self.db.account(FRIEND)), [])
+
+    async def test_personal_game_status_can_be_marked_changed_and_cleared(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01 · \$1.00"))
+        self.assertIn("Personal status: Unmarked", self.last().text)
+        self.assertNotIn("Clear status", self.buttons())
+        for label, status in (("Backlog", "backlog"), ("Playing", "playing"), ("Completed", "completed")):
+            await client.click(self.last(), Btn(label))
+            self.assertIn("Personal status: " + label, self.last().text)
+            self.assertIn("• " + label, self.buttons())
+            self.assertEqual(await self.db.game_marks(FRIEND), {1: {"status": status, "name": "Game 01"}})
+        self.assertIn("manual", self.last().text.lower())
+        self.assertIn("private", self.last().text.lower())
+        await client.click(self.last(), Btn("Clear status"))
+        self.assertIn("Personal status: Unmarked", self.last().text)
+        self.assertEqual(await self.db.game_marks(FRIEND), {})
+
+    async def test_personal_status_is_private_and_forged_unknown_games_cannot_be_marked(self):
+        await self.db.set_game_status(OWNER, ALICE, FAMILY, 1, "Game 01", "completed")
+        await self.db.set_game_status(OWNER, ALICE, FAMILY, 999, "Owner's private game", "backlog")
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        game_button = self.button("Game 01 · $1.00")
+        await client.click(self.last(), Btn(r"Game 01 · \$1.00"))
+        self.assertIn("Personal status: Unmarked", self.last().text)
+        mark_button = self.button("Backlog")
+        await client.click(self.last(), Btn("Playing"))
+        self.assertEqual(await self.db.game_marks(FRIEND), {1: {"status": "playing", "name": "Game 01"}})
+        await client.click(self.last(), Btn("◀️ Back"))
+        forged_game = game_button.model_copy(
+            update={"text": "Forged game", "callback_data": game_button.callback_data.rsplit(":", 1)[0] + ":999"}
+        )
+        message = self.last().model_copy(update={"reply_markup": InlineKeyboardMarkup(inline_keyboard=[[forged_game]])})
+        await client.click(message, Btn("Forged game"))
+        self.assertNotIn("Owner's private game", self.last().text)
+        self.assertNotIn("Personal status: Backlog", self.last().text)
+        message = self.last().model_copy(update={"reply_markup": InlineKeyboardMarkup(inline_keyboard=[[mark_button]])})
+        await client.click(message, Btn("Backlog"))
+        self.assertEqual(await self.db.game_marks(FRIEND), {1: {"status": "playing", "name": "Game 01"}})
+        self.assertEqual(
+            await self.db.game_marks(OWNER),
+            {1: {"status": "completed", "name": "Game 01"}, 999: {"status": "backlog", "name": "Owner's private game"}},
+        )
+
+    async def test_personal_status_filter_combines_with_library_filters_and_resets(self):
+        for appid, status in ((3, "backlog"), (6, "playing"), (9, "backlog"), (15, "completed")):
+            await self.db.set_game_status(FRIEND, BOB, FAMILY, appid, f"Game {appid:02}", status)
+        await self.db.set_game_status(OWNER, ALICE, FAMILY, 1, "Game 01", "backlog")
+        self.families.member_stats = AsyncMock(return_value={})
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family"))
+        await client.click(self.last(), Btn("Members"))
+        await client.click(self.last(), Btn("Alice"))
+        await client.click(self.last(), Btn("Games we both have"))
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Backlog"))
+        await client.click(self.last(), Btn(".*Multiplayer only"))
+        await client.click(self.last(), Btn("🤝 Players: 1"))
+        await client.click(self.last(), Btn("⬜ Alice"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        await client.click(self.last(), Btn("🏷 Genre: any"))
+        await client.click(self.last(), Btn(r"Action \(10\)"))
+        await client.click(self.last(), Btn(r"Maximum price \(\$\)"))
+        await client.send("10")
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>2</b>", self.last().text)  # 3 and 9 satisfy every filter
+        self.assertIn("Game 03 ×2 · $3.00", self.buttons())
+        self.assertIn("Game 09 ×2 · $9.00", self.buttons())
+        await client.send("09")
+        self.assertIn("Games: <b>1</b>", self.last().text)
+        self.assertIn("Game 09 ×2 · $9.00", self.buttons())
+        await client.click(self.last(), Btn("✖️ Clear search"))
+        await client.click(self.last(), Btn("Filters"))
+        self.assertIn("• Backlog", self.buttons())
+        await client.click(self.last(), Btn("♻️ Reset filters"))
+        self.assertIn("• Any status", self.buttons())
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>20</b>", self.last().text)
+        self.assertIn("1 / 4", self.buttons())
+
+    async def test_missing_marked_games_are_retained_filterable_and_clearable(self):
+        await self.db.set_game_status(FRIEND, BOB, FAMILY, 1, "Game 01", "backlog")
+        await self.db.set_game_status(FRIEND, BOB, FAMILY, 2, "Game 02", "playing")
+        self.families.get(FAMILY).snapshot["apps"] = self.families.get(FAMILY).snapshot["apps"][2:]
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        self.assertIn("Unavailable marked games (2)", self.buttons())
+        await client.click(self.last(), Btn("Filters"))
+        await client.click(self.last(), Btn("Backlog"))
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertIn("Games: <b>0</b>", self.last().text)
+        self.assertIn("Unavailable marked games (1)", self.buttons())
+        await client.click(self.last(), Btn(r"Unavailable marked games \(1\)"))
+        self.assertIn("Game 01", self.buttons())
+        self.assertNotIn("Game 02", self.buttons())
+        await client.click(self.last(), Btn("Game 01"))
+        self.assertIn("Game 01", self.last().text)
+        self.assertIn("Personal status: Backlog", self.last().text)
+        self.assertIn("no longer", self.last().text.lower())
+        self.assertNotIn("Playing", self.buttons())
+        self.assertNotIn("Completed", self.buttons())
+        await client.click(self.last(), Btn("Clear status"))
+        self.assertEqual(await self.db.game_marks(FRIEND), {2: {"status": "playing", "name": "Game 02"}})
+        await client.click(self.last(), Btn("◀️ Back"))
+        self.assertNotIn("Unavailable marked games", " ".join(self.buttons()))
+
+    async def test_old_game_card_cannot_create_a_mark_after_the_game_leaves(self):
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01 · \$1.00"))
+        card = self.last()
+        self.families.get(FAMILY).snapshot["apps"].pop(0)
+        await client.click(card, Btn("Backlog"))
+        self.assertEqual(await self.db.game_marks(FRIEND), {})
+
+    async def test_pending_member_cannot_change_status_from_an_old_game_card(self):
+        await self.db.set_game_status(FRIEND, BOB, FAMILY, 1, "Game 01", "backlog")
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01 · \$1.00"))
+        card = self.last()
+        await self.db.set_status(FRIEND, "pending")
+        await client.click(card, Btn("Completed"))
+        self.assertEqual(await self.db.game_marks(FRIEND), {})
+        self.assertIn("Waiting for the family owner", self.last().text)
+        await self.db.set_status(FRIEND, "approved")
+        self.assertEqual(await self.db.game_marks(FRIEND), {1: {"status": "backlog", "name": "Game 01"}})
+
+    async def test_inflight_status_callback_cannot_restore_marks_after_logout_and_relogin(self):
+        await self.db.set_game_status(FRIEND, BOB, FAMILY, 1, "Game 01", "backlog")
+        old_generation = (await self.db.account(FRIEND))["token_generation"]
+        client = self.client(FRIEND)
+        await client.send("/start")
+        await client.click(self.last(), Btn("Family library"))
+        await client.click(self.last(), Btn(r"Game 01 · \$1.00"))
+        save_status = self.db.set_game_status
+
+        async def logout_and_relogin_before_save(*args, **kwargs):
+            await self.db.delete_account(FRIEND)
+            await self.db.save_account(FRIEND, BOB, FAMILY, "new-token")
+            await self.db.set_status(FRIEND, "approved")
+            return await save_status(*args, **kwargs)
+
+        with patch.object(self.db, "set_game_status", side_effect=logout_and_relogin_before_save):
+            await client.click(self.last(), Btn("Completed"))
+        self.assertNotEqual((await self.db.account(FRIEND))["token_generation"], old_generation)
+        self.assertEqual(await self.db.game_marks(FRIEND), {})
 
     async def test_library_pagination_search_filters_and_game(self):
         await self.db.set_publication(
@@ -1622,6 +1797,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer.await_args.kwargs["button"].start_parameter, "login")
 
     async def test_settings_language_and_member_logout(self):
+        await self.db.set_game_status(FRIEND, BOB, FAMILY, 1, "Game 01", "backlog")
         client = self.client(FRIEND)
         await client.send("/start")
         self.assertEqual(self.buttons(), ["Family library", "Family", "Settings", "About this bot"])
@@ -1639,6 +1815,7 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         await client.click(self.last(), Btn("Да, выйти"))
         self.assertIsNone(await self.db.account(FRIEND))
         self.assertIsNone(await self.db.language(FRIEND))  # settings removed
+        self.assertEqual(await self.db.game_marks(FRIEND), {})
         self.assertIn("/start", self.last().text)
         await client.send("/start")
         self.assertIn("Choose the bot language", self.last().text)  # starts over

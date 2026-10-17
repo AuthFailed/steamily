@@ -1,10 +1,11 @@
 import asyncio
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 
 import asyncpg
 
-from bot.migrations import migrate
+from bot.migrations import MIGRATIONS, migrate
 from tests.pg import fresh_db, needs_pg
 
 
@@ -68,6 +69,56 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
         current = dict(await self.db.account(10))
         self.assertEqual(current["game_response_version"], revision)
         self.assertEqual((await self.db.game_responses(current))[0]["response"], "recommend")
+
+    async def test_backlog_status_and_family_response_change_independently(self):
+        generation = self.account["token_generation"]
+        self.assertTrue(await self.respond(self.account, 10, "recommend", named=True))
+        for status in ("backlog", "completed"):
+            self.assertTrue(
+                await self.db.set_game_status(10, "1", "9", 10, "Game", status, expected_generation=generation)
+            )
+            self.assertEqual(await self.db.game_marks(10), {10: {"name": "Game", "status": status}})
+            self.assertEqual((await self.db.game_responses(self.account))[0]["response"], "recommend")
+        self.assertTrue(await self.respond(self.account, 10, None))
+        self.assertEqual(await self.db.game_marks(10), {10: {"name": "Game", "status": "completed"}})
+        self.assertTrue(await self.respond(self.account, 10, "together"))
+        self.assertTrue(await self.db.set_game_status(10, "1", "9", 10, "Game", None, expected_generation=generation))
+        self.assertEqual((await self.db.game_responses(self.account))[0]["response"], "together")
+        self.assertEqual(await self.db.game_marks(10), {})
+
+    async def test_version_eight_upgrade_preserves_statuses_and_login(self):
+        async with self.db.pool.acquire() as connection:
+            await connection.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+            with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:8]):
+                await migrate(connection)
+            await connection.execute("INSERT INTO families (family_id, name) VALUES ('9', 'Existing')")
+            await connection.execute(
+                "INSERT INTO accounts (telegram_id, steam_id, family_id, status, refresh_token) "
+                "VALUES (10, '1', '9', 'approved', $1)",
+                self.db.fernet.encrypt(b"existing-token"),
+            )
+            await connection.execute(
+                "INSERT INTO game_statuses (telegram_id, appid, name, status) "
+                "VALUES (10, 10, 'Existing game', 'playing')"
+            )
+            before = dict(await connection.fetchrow("SELECT * FROM accounts"))
+            await migrate(connection)
+            after = dict(await connection.fetchrow("SELECT * FROM accounts"))
+            self.assertTrue(after.pop("game_response_version"))
+            self.assertEqual(after, before)
+            self.assertEqual(
+                [
+                    tuple(row)
+                    for row in await connection.fetch(
+                        "SELECT version, name FROM schema_migrations WHERE version >= 8 ORDER BY version"
+                    )
+                ],
+                [(8, "008_game_statuses.sql"), (9, "009_game_responses.sql")],
+            )
+        self.account = dict(await self.db.account(10))
+        self.assertEqual(self.db.refresh_token(self.account), "existing-token")
+        self.assertTrue(await self.respond(self.account, 10, "recommend"))
+        self.assertEqual(await self.db.game_marks(10), {10: {"name": "Existing game", "status": "playing"}})
 
     async def respond(self, account, appid, response, *, named=False):
         result = await self.db.set_game_response(account, appid, response, named=named)
@@ -196,7 +247,7 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
         await self.respond(self.account, 10, "recommend")
         async with self.db.pool.acquire() as connection:
             await migrate(connection)
-            await connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+            await connection.execute("DELETE FROM schema_migrations WHERE version = 9")
             await migrate(connection)
         self.assertEqual((await self.db.account(10))["status"], "approved")
         self.assertEqual(len(await self.db.game_responses(self.account)), 1)

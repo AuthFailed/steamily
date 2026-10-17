@@ -62,6 +62,7 @@ Send `/privacy` for the in-bot summary. The application stores the following:
 | Encrypted Steam refresh token, token renewal time, temporary access token | Authenticate Steam checks and requested family actions | Until logout or administrative removal; the persisted refresh token is also cleared if Steam rejects it |
 | Language, notification and publication preferences, publication version and Steam store country | Render the bot and local prices, deliver selected alerts, and reject work using withdrawn publication consent | Until logout or administrative removal |
 | Game responses (family, account and game IDs, Recommend / Want to play together / Not interested, named-recommendation choice) and response version | Show family opinion counts, optional named recommendations and the recommended-games filter; reject stale buttons | Responses remain until cleared, logout, administrative removal, loss of approval/session or a Steam account/family change; the opaque response version remains with the account until deletion |
+| Telegram user ID, Steam app ID, saved game name and one personal status (Backlog, Playing or Completed) | Keep your manual game marks and filter your library; marks are private to your bot account, with database access controlled by the host operator | Until cleared, logout (`/delete`), or administrative removal; retained if a game leaves the shared library |
 | Saved dialog state and data, including login/menu state and temporary user input | Keep dialogs working across updates and restarts | Replaced as dialogs change; all of the user's saved dialog rows are deleted on logout or administrative removal |
 | Telegram or Steam IDs selected in another active user's saved family-management dialog | Keep that user's member selection while they navigate | Retained in that viewer's dialog until it is closed or reset, or the viewer logs out; does not restore the selected person's account or credentials |
 | Current family name/ID, members and roles, invitations, profile names/links, online/game presence, shared library and ownership/acquisition data, and playtime supplied by Steam | Show family information and statistics, detect changes, and send alerts | The latest snapshot replaces the previous one; retained while at least one account remains registered for the family |
@@ -77,6 +78,10 @@ history described above, with no fixed expiry while a family has registered
 accounts. It does not archive every old snapshot or sent notification. The
 current Steam snapshot can also contain older acquisition, membership and
 playtime information supplied by Steam.
+
+Personal game marks do not sync with Steam achievements or playtime and are not
+shown to fellow users. Marked games that leave the shared library remain in
+**Unavailable marked games (N)** until you clear them or delete your bot data.
 
 Family information is visible to the family's authorized bot users and can be
 sent to its configured Telegram notification chat. Steam supplies this data for
@@ -108,8 +113,9 @@ service.
 Send `/delete` or open **Settings → Log out**, then confirm. This also works when
 your Steam session has expired or you have only chosen preferences and never
 linked Steam. Logging out deletes the local account and encrypted token, Telegram
-profile reference, preferences, and saved dialog state. It also cancels a pending
-login and invalidates cached credentials and user-specific runtime data.
+profile reference, preferences, personal game marks, and saved dialog state. It
+also cancels a pending login and invalidates cached credentials and user-specific
+runtime data.
 Administrative removal uses the same deletion rules.
 
 If you are the family's bot owner, the confirmation explains how ownership is
@@ -136,7 +142,7 @@ losing bot approval or a Steam session, changing linked account/family, logout a
 administrative deletion remove your responses. Current cards exclude departed
 members; previously delivered messages cannot reliably be recalled.
 
-Any future user-linked backlog marks or transfer requests must follow the
+Any future user-linked transfer requests must follow the
 same logout and administrative-removal rules. They are not exceptions to this
 policy and are not implemented by this document.
 

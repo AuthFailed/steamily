@@ -92,7 +92,9 @@ class SharingCardTest(unittest.IsolatedAsyncioTestCase):
                     return [reader] if change == "deleted" else [reader, current]
 
                 db = SimpleNamespace(
-                    game_responses=AsyncMock(return_value=[row]), family_accounts=AsyncMock(side_effect=accounts)
+                    game_responses=AsyncMock(return_value=[row]),
+                    game_marks=AsyncMock(return_value={}),
+                    family_accounts=AsyncMock(side_effect=accounts),
                 )
                 data = await game_getter(manager, family, db, "en")
                 if change.startswith("viewer_"):
@@ -124,7 +126,9 @@ class SharingCardTest(unittest.IsolatedAsyncioTestCase):
             dialog_data={"appid": 4294967295}, middleware_data={"account": viewer, "family": family}
         )
         db = SimpleNamespace(
-            game_responses=AsyncMock(return_value=[]), family_accounts=AsyncMock(return_value=[viewer])
+            game_responses=AsyncMock(return_value=[]),
+            game_marks=AsyncMock(return_value={}),
+            family_accounts=AsyncMock(return_value=[viewer]),
         )
         for lang in LANGUAGES:
             data = await game_getter(manager, family, db, lang)
@@ -160,6 +164,7 @@ class SharingCardTest(unittest.IsolatedAsyncioTestCase):
         db = SimpleNamespace(
             family_accounts=AsyncMock(return_value=[manager.middleware_data["account"]]),
             game_responses=AsyncMock(return_value=[]),
+            game_marks=AsyncMock(return_value={}),
         )
         return (await game_getter(manager, family, db, lang))["details"]
 
