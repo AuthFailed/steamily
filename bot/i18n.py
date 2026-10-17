@@ -30,12 +30,14 @@ TEXTS = {
         "registration date, country and preferences identify you, control access and show local prices. "
         "The encrypted Steam refresh token lets the bot check Steam and perform requested actions; "
         "the operator holds its decryption key. Your Steam password is not stored. Saved dialogs keep menus "
-        "working after a restart.\n\n"
+        "working after a restart. Personal game marks store a Steam app ID, name and manual progress status; "
+        "other members cannot see them. The instance operator can access the database.\n\n"
         "<b>Publication choices</b>\nSettings has separate permissions for your presence and Telegram identity, "
         "both off by default. Only you can enable them. Logout or loss of family access resets them. "
         "Already delivered messages cannot reliably be recalled.\n\n"
         "<b>Retention and deletion</b>\nUse /delete or Settings → Log out to erase your account, token, Telegram "
-        "profile link, preferences, saved dialogs and personal runtime caches, and cancel pending login. "
+        "profile link, preferences, personal game marks, saved dialogs and personal runtime caches, "
+        "and cancel pending login. "
         "Your saved Steam session is revoked before deletion. Administrative removal deletes the same bot data "
         "but does not revoke Steam sessions. You need a fresh Steam login to return.\n"
         "Shared family snapshots, seen member/game ownership history, pending alerts and alert settings remain "
@@ -300,6 +302,18 @@ TEXTS = {
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "This game is no longer in the family library.",
+        "personal_status": "Personal status: {status}",
+        "status_unmarked": "Unmarked",
+        "status_any": "Any status",
+        "status_backlog": "Backlog",
+        "status_playing": "Playing",
+        "status_completed": "Completed",
+        "status_clear": "Clear status",
+        "status_private": "Private, manually maintained marks; not synced with Steam achievements or all playtime.",
+        "btn_missing_games": "Unavailable marked games ({missing_count})",
+        "missing_games_title": "Unavailable marked games",
+        "missing_games_desc": "These marked games are no longer in your family library. "
+        "Open a card to clear its mark. Only the personal status filter applies here.",
         "price_unknown": "Price unknown",
         "multiplayer": "👥 Multiplayer",
         "singleplayer": "👤 Single-player",
@@ -405,12 +419,15 @@ TEXTS = {
         "дата регистрации, страна и настройки нужны для связи аккаунтов, контроля доступа и местных цен. "
         "Зашифрованный refresh token Steam позволяет проверять Steam и выполнять запрошенные действия; "
         "ключ расшифровки есть у оператора. Пароль Steam не хранится. Сохранённые диалоги восстанавливают "
-        "меню после перезапуска.\n\n"
+        "меню после перезапуска. Личные отметки игр хранят Steam app ID, название и статус прогресса, "
+        "заданный вручную; "
+        "другие участники их не видят. Оператор сервера имеет доступ к базе данных.\n\n"
         "<b>Разрешения на публикацию</b>\nВ настройках отдельно разрешается показ вашего присутствия и Telegram, "
         "оба выключены по умолчанию. Включить их можете только вы. Выход или потеря доступа к семье "
         "сбрасывает разрешения. Уже отправленные сообщения нельзя надёжно отозвать.\n\n"
         "<b>Срок хранения и удаление</b>\nКоманда /delete или Настройки → Выйти удаляет аккаунт, токен, ссылку "
-        "на Telegram, настройки, диалоги и личные кеши, отменяет незавершённый вход. Сохранённый сеанс Steam "
+        "на Telegram, настройки, личные отметки игр, диалоги и личные кеши, отменяет незавершённый вход. "
+        "Сохранённый сеанс Steam "
         "отзывается до удаления. Удаление администратором очищает те же данные бота, но не отзывает сеансы Steam. "
         "Для возвращения нужен новый вход в Steam.\n"
         "Общие снимки семьи, история замеченных участников и владельцев игр, очередь и настройки уведомлений остаются, "
@@ -678,6 +695,19 @@ TEXTS = {
         "game_title": "{game}",
         "game_desc": "{details}",
         "game_gone": "Этой игры больше нет в библиотеке семьи.",
+        "personal_status": "Личный статус: {status}",
+        "status_unmarked": "Без отметки",
+        "status_any": "Любой статус",
+        "status_backlog": "В планах",
+        "status_playing": "Играю",
+        "status_completed": "Пройдено",
+        "status_clear": "Снять отметку",
+        "status_private": "Личные отметки вы меняете вручную; "
+        "они не синхронизируются с достижениями и всем временем в Steam.",
+        "btn_missing_games": "Недоступные отмеченные игры ({missing_count})",
+        "missing_games_title": "Недоступные отмеченные игры",
+        "missing_games_desc": "Этих отмеченных игр больше нет в библиотеке семьи. "
+        "Откройте карточку, чтобы снять отметку. Здесь применяется только фильтр личного статуса.",
         "price_unknown": "Цена неизвестна",
         "multiplayer": "👥 Мультиплеер",
         "singleplayer": "👤 Одиночная",

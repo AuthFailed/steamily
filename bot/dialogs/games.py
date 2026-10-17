@@ -30,6 +30,7 @@ from ..ui import BLUE, Header, back_home, home, look
 PAGE_SIZE = 6
 SCROLL = "games_scroll"
 BLANK = "\u2800"  # Telegram needs some button text; this shows an empty button at the list edges
+STATUSES = ("backlog", "playing", "completed")
 
 
 async def on_start(start_data: Data, manager: DialogManager):
@@ -99,15 +100,39 @@ def filter_summary(manager: DialogManager, family: Family, store: dict, lang: st
         lines.append(t(lang, "sum_players", names=names, n=len(filters["players"])))
     if filters["owners"]:
         lines.append(t(lang, "sum_owners", names=", ".join(escape(family.name(o)) for o in filters["owners"])))
+    if status := manager.dialog_data.get("status"):
+        lines.append(t(lang, "personal_status", status=t(lang, "status_" + status)))
     lines.append(f"↕️ {t(lang, 'sort_' + filters['sort'])} {'↓' if filters['desc'] else '↑'}")
     return "\n".join(lines)
 
 
-async def list_getter(dialog_manager: DialogManager, family: Family, lang: str, **kwargs):
+def filtered_games(manager: DialogManager, family: Family, marks: dict) -> list[dict]:
+    status = manager.dialog_data.get("status")
+    apps = family.apps
+    if status:
+        apps = [app for app in apps if marks.get(app["appid"], {}).get("status") == status]
+    return query(apps, viewer_store(manager), **current_filters(manager))
+
+
+def missing_games(manager: DialogManager, family: Family, marks: dict) -> list[dict]:
+    appids = {app["appid"] for app in family.apps}
+    status = manager.dialog_data.get("status")
+    return sorted(
+        [
+            {"appid": appid, **mark}
+            for appid, mark in marks.items()
+            if appid not in appids and (not status or mark["status"] == status)
+        ],
+        key=lambda game: game["name"].lower(),
+    )
+
+
+async def list_getter(dialog_manager: DialogManager, family: Family, db, lang: str, **kwargs):
     store = viewer_store(dialog_manager)
     details = store.get("apps", {})
+    marks = await db.game_marks(dialog_manager.middleware_data["account"]["telegram_id"])
     games = []
-    for game in query(family.apps, store, **current_filters(dialog_manager)):
+    for game in filtered_games(dialog_manager, family, marks):
         copies = len(game["owners"])
         price = details.get(str(game["appid"]), {}).get("price_text")
         label = game["name"] + (f" ×{copies}" if copies > 1 else "") + (f" · {price}" if price else "")
@@ -127,6 +152,7 @@ async def list_getter(dialog_manager: DialogManager, family: Family, lang: str, 
         "summary": filter_summary(dialog_manager, family, store, lang),
         "has_search": bool(dialog_manager.dialog_data.get("search")),
         "budget_changed": dialog_manager.dialog_data.get("budget_changed", False),
+        "missing_count": len(missing_games(dialog_manager, family, marks)),
     }
 
 
@@ -140,8 +166,9 @@ async def clear_search(callback: CallbackQuery, button: Button, manager: DialogM
     await reset_page(callback, button, manager)
 
 
-async def pages_getter(dialog_manager: DialogManager, family: Family, **kwargs):
-    count = len(query(family.apps, viewer_store(dialog_manager), **current_filters(dialog_manager)))
+async def pages_getter(dialog_manager: DialogManager, family: Family, db, **kwargs):
+    marks = await db.game_marks(dialog_manager.middleware_data["account"]["telegram_id"])
+    count = len(filtered_games(dialog_manager, family, marks))
     return {"page_numbers": list(range(1, max(1, -(-count // PAGE_SIZE)) + 1))}
 
 
@@ -158,8 +185,24 @@ async def on_game(callback: CallbackQuery, widget, manager: DialogManager, appid
 async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: str, **kwargs):
     appid = dialog_manager.dialog_data["appid"]
     game = next((a for a in family.apps if a["appid"] == appid), None)
+    marks = await db.game_marks(dialog_manager.middleware_data["account"]["telegram_id"])
+    mark = marks.get(appid)
+    status = mark["status"] if mark else "unmarked"
+    personal = {
+        "status_choices": [
+            (key, ("• " if key == status else "") + t(lang, "status_" + key))
+            for key in (*STATUSES, "clear")
+            if (key == "clear" and mark) or (key in STATUSES and game)
+        ],
+    }
+    status_text = t(lang, "personal_status", status=t(lang, "status_" + status)) + "\n" + t(lang, "status_private")
     if game is None:
-        return {"game": "—", "details": t(lang, "game_gone")}
+        return {
+            **personal,
+            "game": escape(mark["name"]) if mark else "—",
+            "details": t(lang, "game_gone") + "\n\n" + status_text,
+            "store_url": None,
+        }
     store = viewer_store(dialog_manager)
     info = store.get("apps", {}).get(str(appid), {})
     tag_names = store.get("tag_names", {})
@@ -173,6 +216,7 @@ async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: s
         else ("borrowed" if shareable else "unavailable")
     )
     lines = [
+        status_text,
         f"💲 {escape(info.get('price_text') or t(lang, 'price_unknown'))}",
         f"🏷 {escape(tags)}" if tags else None,
         t(lang, info.get("play_mode") or "mode_unknown"),
@@ -184,10 +228,43 @@ async def game_getter(dialog_manager: DialogManager, family: Family, db, lang: s
         f"\nhttps://store.steampowered.com/app/{appid}/",
     ]
     return {
+        **personal,
         "game": escape(game["name"]),
         "details": "\n".join(line for line in lines if line),
         "store_url": f"https://store.steampowered.com/app/{appid}/",
     }
+
+
+async def on_game_status(callback: CallbackQuery, widget, manager: DialogManager, status: str):
+    if status not in (*STATUSES, "clear"):
+        return
+    db, family = manager.middleware_data["db"], manager.middleware_data["family"]
+    account = manager.middleware_data["account"]
+    appid = manager.dialog_data.get("appid")
+    game = next((app for app in family.apps if app["appid"] == appid), None)
+    if game is None:
+        mark = (await db.game_marks(callback.from_user.id)).get(appid)
+        if status != "clear" or mark is None:
+            await callback.answer(t(manager.middleware_data["lang"], "game_gone"), show_alert=True)
+            return
+        name = mark["name"]
+    else:
+        name = game["name"]
+    await db.set_game_status(
+        callback.from_user.id,
+        account["steam_id"],
+        family.family_id,
+        appid,
+        name,
+        None if status == "clear" else status,
+        expected_generation=account["token_generation"],
+    )
+    await reset_page(callback, widget, manager)
+
+
+async def missing_getter(dialog_manager: DialogManager, family: Family, db, **kwargs):
+    marks = await db.game_marks(dialog_manager.middleware_data["account"]["telegram_id"])
+    return {"missing_games": missing_games(dialog_manager, family, marks)}
 
 
 async def genre_getter(dialog_manager: DialogManager, family: Family, **kwargs):
@@ -226,7 +303,21 @@ async def filters_getter(dialog_manager: DialogManager, lang: str, **kwargs):
         "budget_changed": dialog_manager.dialog_data.get("budget_changed", False),
         "genre": names.get(tag, "?") if tag else t(lang, "genre_any"),
         "player_count": len(dialog_manager.find("players").get_checked()),
+        "statuses": [
+            (key, ("• " if dialog_manager.dialog_data.get("status", "any") == key else "") + t(lang, "status_" + key))
+            for key in ("any", *STATUSES)
+        ],
     }
+
+
+async def on_status_filter(callback: CallbackQuery, widget, manager: DialogManager, status: str):
+    if status not in ("any", *STATUSES):
+        return
+    if status == "any":
+        manager.dialog_data.pop("status", None)
+    else:
+        manager.dialog_data["status"] = status
+    await reset_page(callback, widget, manager)
 
 
 async def on_price(callback: CallbackQuery, widget, manager: DialogManager, price: str):
@@ -276,6 +367,7 @@ async def on_sort(callback: CallbackQuery, widget, manager: DialogManager, key: 
 async def reset_filters(callback: CallbackQuery, button: Button, manager: DialogManager):
     manager.dialog_data.pop("tag", None)
     manager.dialog_data.pop("owners", None)
+    manager.dialog_data.pop("status", None)
     await manager.find("multiplayer").set_checked(False)
     await manager.find("players").reset_checked()
     await on_start(None, manager)
@@ -333,6 +425,7 @@ games_dialog = Dialog(
             SwitchTo(Tr("btn_sort"), id="sorting", state=Games.sort, style=look("sort", BLUE)),
         ),
         Button(Tr("btn_clear_search"), id="clear", on_click=clear_search, when="has_search"),
+        SwitchTo(Tr("btn_missing_games"), id="missing", state=Games.missing, when="missing_count"),
         home(),
         MessageInput(on_search, content_types=[ContentType.TEXT]),
         getter=list_getter,
@@ -377,6 +470,16 @@ games_dialog = Dialog(
         Checkbox(Tr("multiplayer_on"), Tr("multiplayer_off"), id="multiplayer", on_state_changed=reset_page),
         SwitchTo(Tr("btn_genre"), id="genre", state=Games.genre),
         SwitchTo(Tr("btn_players"), id="players_btn", state=Games.players),
+        Group(
+            Select(
+                Format("{item[1]}"),
+                id="status_filter",
+                items="statuses",
+                item_id_getter=lambda item: item[0],
+                on_click=on_status_filter,
+            ),
+            width=2,
+        ),
         Button(Tr("btn_reset_filters"), id="reset", on_click=reset_filters),
         back_to_list(),
         getter=filters_getter,
@@ -432,9 +535,39 @@ games_dialog = Dialog(
         state=Games.players,
     ),
     Window(
+        Header("library", "missing_games"),
+        ScrollingGroup(
+            Select(
+                Format("{item[name]}"),
+                id="missing_game",
+                items="missing_games",
+                item_id_getter=lambda game: game["appid"],
+                type_factory=int,
+                on_click=on_game,
+            ),
+            id="missing_scroll",
+            width=1,
+            height=PAGE_SIZE,
+            hide_on_single_page=True,
+        ),
+        back_to_list(),
+        getter=missing_getter,
+        state=Games.missing,
+    ),
+    Window(
         Header("library", "game"),
         # The card also links owner profiles; the preview should still show the game.
         LinkPreview(url=Format("{store_url}"), prefer_large_media=True, when="store_url"),
+        Group(
+            Select(
+                Format("{item[1]}"),
+                id="game_status",
+                items="status_choices",
+                item_id_getter=lambda item: item[0],
+                on_click=on_game_status,
+            ),
+            width=2,
+        ),
         back_to_list(),
         getter=game_getter,
         state=Games.game,
