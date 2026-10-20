@@ -1,6 +1,6 @@
 [project]
 name = "steam-family-bot"
-version = "1.0.0"
+version = "1.1.0"
 description = "Telegram bot for Steam Families: shared library, stats, alerts and family management"
 requires-python = ">=3.13"
 license = { file = "LICENSE.md" }
