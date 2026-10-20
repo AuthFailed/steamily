@@ -976,6 +976,22 @@ class DbTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.family("9"), before)
         self.assertEqual(await self.db.pending_alerts("9", 100), [])
 
+    async def test_alert_formats_survive_observation_retry_and_restart(self):
+        plain = 'Legacy <Portal> & "family"'
+        linked = '<a href="https://store.steampowered.com/app/620/">Portal 2</a>'
+        await self.db.enqueue_alerts("9", [{"text": plain}, {"text": linked, "parse_mode": "HTML"}])
+        await self.db.observe_family("9", {"members": ["1"]}, "Observed", [{"text": linked, "parse_mode": "HTML"}])
+        original = await self.db.pending_alerts("9", 100)
+        await self.db.defer_alerts("9", -100, 200)
+        await self.db.pool.close()
+        self.db = await Db.connect(TEST_DATABASE_URL, Fernet.generate_key().decode())
+        self.assertEqual(await self.db.pending_alerts("9", 199), [])
+        pending = await self.db.pending_alerts("9", 200)
+        self.assertEqual([row["id"] for row in pending], [row["id"] for row in original])
+        self.assertEqual([row["text"] for row in pending], [plain, linked, linked])
+        self.assertIn("parse_mode", pending[0])
+        self.assertEqual([row["parse_mode"] for row in pending], [None, "HTML", "HTML"])
+
     async def test_pending_publication_envelope_survives_upgrade_and_restart(self):
         await self.db.enqueue_alerts("9", [{"text": "legacy alert"}])
         await self.db.pool.execute("ALTER TABLE pending_alerts DROP COLUMN publication")

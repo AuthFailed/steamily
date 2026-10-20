@@ -49,6 +49,40 @@ class AlertDeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def queued(self):
         return await self.db.pool.fetch("SELECT * FROM pending_alerts ORDER BY id")
 
+    async def test_bundle_retry_after_restart_keeps_one_linked_message_without_previews(self):
+        games = [
+            (22120, "Penumbra: Black Plague"),
+            (22140, "Penumbra: Requiem"),
+            (22180, "Penumbra: Overture"),
+            (239200, "Amnesia: A Machine for Pigs"),
+            (1944430, "Amnesia: The Bunker"),
+        ]
+        self.fetch.return_value = snapshot([{"appid": appid, "name": name, "owners": [ALICE]} for appid, name in games])
+        self.bot.send_message.side_effect = TelegramNetworkError(self.method, "offline")
+
+        await self.families.refresh("9")
+
+        pending = await self.queued()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["parse_mode"], "HTML")
+        for number, (appid, name) in enumerate(games, 1):
+            self.assertIn(
+                f'{number}. <a href="https://store.steampowered.com/app/{appid}/">{name}</a>', pending[0]["text"]
+            )
+        self.bot.send_message.reset_mock(side_effect=True)
+        self.now.return_value = 1061.0
+        restarted = Families(self.db, None, self.bot)
+
+        await restarted.deliver_alerts("9")
+        await self.families.refresh("9")
+
+        self.bot.send_message.assert_awaited_once()
+        sent = self.bot.send_message.await_args
+        self.assertEqual(sent.args, (-100, pending[0]["text"]))
+        self.assertEqual(sent.kwargs["parse_mode"], "HTML")
+        self.assertTrue(sent.kwargs["link_preview_options"].is_disabled)
+        self.assertEqual(await self.queued(), [])
+
     async def test_retryable_failure_keeps_observation_and_retries_once(self):
         self.acquisition()
         self.bot.send_message.side_effect = [TelegramNetworkError(self.method, "offline"), None]

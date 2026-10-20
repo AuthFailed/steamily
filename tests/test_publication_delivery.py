@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import SendMessage
+from aiogram.types import LinkPreviewOptions
 
 from bot.family import Families
 from tests.pg import fresh_db, needs_pg
@@ -129,6 +130,8 @@ class PublicationDeliveryTest(unittest.IsolatedAsyncioTestCase):
             [{"text": "legacy presence", "coalesce_key": f"online:{ALICE}"}, {"text": "ordinary game alert"}],
         )
         await self.families.deliver_alerts("9")
-        self.bot.send_message.assert_awaited_once_with(-100, "ordinary game alert", parse_mode=None)
+        self.bot.send_message.assert_awaited_once_with(
+            -100, "ordinary game alert", parse_mode=None, link_preview_options=LinkPreviewOptions(is_disabled=True)
+        )
         self.fetch.assert_not_awaited()
         self.assertEqual(await self.queued(), [])

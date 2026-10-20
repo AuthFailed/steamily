@@ -97,6 +97,40 @@ class MigrationsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((family["name"], family["alert_retry_at"], family["alert_link_version"]), ("Existing", 0, 0))
         self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM pending_alerts"), 0)
 
+    async def test_alert_format_upgrade_keeps_plain_pending_text_and_retry_literal(self):
+        with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:11]):
+            await migrate(self.connection)
+        text = 'Legacy <Portal> & "family"'
+        await self.connection.execute("""
+            INSERT INTO families (family_id, name, notify_chat, alert_retry_at)
+            VALUES ('9', 'Existing', -100, 200);
+            INSERT INTO accounts (telegram_id, steam_id, family_id) VALUES (10, '1', '9');
+        """)
+        await self.connection.execute(
+            "INSERT INTO pending_alerts (family_id, chat_id, text) VALUES ('9', -100, $1)", text
+        )
+        before = await self.versions()
+        key = Fernet.generate_key().decode()
+        db = await Db.connect(TEST_DATABASE_URL, key)
+        try:
+            self.assertEqual((await self.versions())[:11], before)
+            self.assertEqual(await db.pending_alerts("9", 199), [])
+            pending = (await db.pending_alerts("9", 200))[0]
+            self.assertEqual(pending["text"], text)
+            self.assertIn("parse_mode", pending)
+            self.assertIsNone(pending["parse_mode"])
+            linked = '<a href="https://store.steampowered.com/app/620/">Portal 2</a>'
+            await db.enqueue_alerts("9", [{"text": linked, "parse_mode": "HTML"}])
+        finally:
+            await db.pool.close()
+
+        db = await Db.connect(TEST_DATABASE_URL, key)
+        try:
+            pending = await db.pending_alerts("9", 200)
+            self.assertEqual([(row["text"], row["parse_mode"]) for row in pending], [(text, None), (linked, "HTML")])
+        finally:
+            await db.pool.close()
+
     async def test_version_five_upgrade_defaults_publication_off_and_preserves_consent_on_restart(self):
         with patch("bot.migrations.MIGRATIONS", MIGRATIONS[:5]):
             await migrate(self.connection)

@@ -215,6 +215,11 @@ and database/Steam reachability before restarting. Keep raw logs private: review
 and redact account identifiers and upstream errors before sharing them. Do not
 post `.env`, tokens, database URLs, or raw database rows for diagnosis.
 
+Games added in the same library update are grouped by member into a numbered list
+of clickable Steam store titles. Long lists continue in additional messages;
+link previews are disabled. Removed-game alerts include the previous owners and,
+when there were several, their count, using the last observed library snapshot.
+
 Group alerts use a durable PostgreSQL queue. `notifications.pending_retry` counts
 all nonexpired pending alerts for linked groups; `deferred` is the subset whose
 family retry time is still in the future. These counts survive process restarts.
