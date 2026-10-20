@@ -4,6 +4,7 @@ import difflib
 import re
 import time
 from datetime import UTC, datetime
+from html import escape
 
 from .i18n import t
 
@@ -49,10 +50,50 @@ def reconcile(previous: dict | None, snapshot: dict) -> tuple[list[dict], dict]:
 
 
 def format_notification(event: dict, names: dict, lang: str) -> str:
-    owner = names.get(event["owner"]) or t(lang, "steam_user", steam_id=event["owner"])
-    return t(
-        lang, "alert", name=event["name"], owner=owner, url=f"https://store.steampowered.com/app/{event['appid']}/"
-    )
+    return format_notifications([event], names, lang)[0]
+
+
+def _html_size(text: str) -> int:
+    # Counting serialized HTML in UTF-16 is conservative for Telegram's parsed-text limit.
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _escaped_label(text: str, limit: int) -> str:
+    label = escape(text)
+    if _html_size(label) <= limit:
+        return label
+    parts, size = [], 1  # Reserve the final ellipsis without cutting an HTML entity.
+    for char in text:
+        part = escape(char)
+        size += _html_size(part)
+        if size > limit:
+            break
+        parts.append(part)
+    return "".join(parts) + "…"
+
+
+def _game_link(appid: int, name: str, limit: int = 3000) -> str:
+    return f'<a href="https://store.steampowered.com/app/{escape(str(appid))}/">{_escaped_label(name, limit)}</a>'
+
+
+def format_notifications(events: list[dict], names: dict, lang: str) -> list[str]:
+    """Group one Steam update by owner, keeping complete numbered rows within Telegram's limit."""
+    groups: dict[str, list[dict]] = {}
+    for event in events:
+        groups.setdefault(event["owner"], []).append(event)
+    messages = []
+    for owner, games in groups.items():
+        owner_name = names.get(owner) or t(lang, "steam_user", steam_id=owner)
+        header = t(lang, "alert_added", owner=_escaped_label(owner_name, 200))
+        message = header
+        for number, game in enumerate(games, 1):
+            row = f"{number}. {_game_link(game['appid'], game['name'])}"
+            if message != header and _html_size(f"{message}\n{row}") > 4096:
+                messages.append(message)
+                message = header
+            message += f"\n{row}"
+        messages.append(message)
+    return messages
 
 
 def shareable_copies(app: dict) -> int:
@@ -288,7 +329,16 @@ def family_events(old: dict, new: dict) -> list[dict]:
     events += [{"kind": "members", "type": "left", "steamid": m} for m in old["members"] if m not in new["members"]]
     still_there = {a["appid"] for a in new["apps"]}
     events += [
-        {"kind": "removed", "type": "removed", "appid": a["appid"], "game": a["name"]}
+        {
+            "kind": "removed",
+            "type": "removed",
+            "appid": a["appid"],
+            "game": a["name"],
+            "owners": list(a["owners"]),
+            "owner_names": {
+                owner: old.get("names", {})[owner] for owner in a["owners"] if old.get("names", {}).get(owner)
+            },
+        }
         for a in old["apps"]
         if a["appid"] not in still_there
     ]
@@ -302,6 +352,18 @@ def format_event(event: dict, names: dict, apps: list[dict], lang: str) -> str:
         or next((a["name"] for a in apps if a["appid"] == event.get("appid")), None)
         or f"App {event.get('appid')}"
     )
+    if event["type"] == "removed":
+        owners = list(dict.fromkeys(event.get("owners", [])))
+        old_names = event.get("owner_names", {})
+        owner_names = ", ".join(
+            _escaped_label(old_names.get(owner) or names.get(owner) or t(lang, "steam_user", steam_id=owner), 200)
+            for owner in owners
+        )
+        key = (
+            "alert_removed_owner" if len(owners) == 1 else "alert_removed_owners" if owners else "alert_removed_unknown"
+        )
+        details = t(lang, key, owners=owner_names, count=len(owners))
+        return t(lang, "alert_removed", game=_game_link(event["appid"], game, 2000)) + f"\n{details}"
     return t(lang, f"alert_{event['type']}", name=name, game=game)
 
 

@@ -526,8 +526,8 @@ class Db:
                 )
             await connection.execute(
                 """
-                INSERT INTO pending_alerts (family_id, chat_id, text, coalesce_key, expires_at, publication)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO pending_alerts (family_id, chat_id, text, coalesce_key, expires_at, publication, parse_mode)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
                 family_id,
                 chat_id,
@@ -535,6 +535,7 @@ class Db:
                 alert.get("coalesce_key"),
                 alert.get("expires_at"),
                 alert.get("publication"),
+                alert.get("parse_mode"),
             )
 
     async def observe_family(self, family_id: str, state: dict, name: str, alerts: list[dict]) -> None:

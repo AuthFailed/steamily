@@ -4,6 +4,8 @@ from copy import deepcopy
 from itertools import count
 from unittest.mock import AsyncMock, patch
 
+from aiogram.types import LinkPreviewOptions
+
 from bot.db import Db
 from bot.family import Families
 
@@ -99,6 +101,41 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
     async def finish(self, *tasks):
         await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
 
+    async def test_games_added_together_use_one_linked_message_per_owner_without_previews(self):
+        self.fetch.return_value = snapshot([PORTAL, CS])
+
+        await self.families.refresh("9")
+
+        self.bot.send_message.assert_awaited_once()
+        sent = self.bot.send_message.await_args
+        self.assertIn("Alice", sent.args[1])
+        self.assertIn('1. <a href="https://store.steampowered.com/app/620/">Portal 2</a>', sent.args[1])
+        self.assertIn('2. <a href="https://store.steampowered.com/app/730/">CS2</a>', sent.args[1])
+        self.assertEqual(sent.kwargs["parse_mode"], "HTML")
+        self.assertEqual(sent.kwargs["link_preview_options"], LinkPreviewOptions(is_disabled=True))
+
+        await self.families.refresh("9")
+        self.bot.send_message.assert_awaited_once()
+
+    async def test_removal_includes_names_from_previous_snapshot_after_member_departure(self):
+        self.rows["9"]["alerts"] = {"removed": True}
+        self.rows["9"]["state"]["observed"] = {
+            "members": [ALICE, "bob"],
+            "names": {ALICE: "Alice", "bob": "Bob & Co"},
+            "apps": [{**PORTAL, "owners": ["bob"]}],
+        }
+        self.fetch.return_value = snapshot()
+
+        await self.families.refresh("9")
+
+        matches = [call for call in self.bot.send_message.await_args_list if "Portal 2" in call.args[1]]
+        self.assertEqual(len(matches), 1)
+        removed = matches[0]
+        self.assertIn("Bob &amp; Co", removed.args[1])
+        self.assertIn("no longer", removed.args[1])
+        self.assertEqual(removed.kwargs["parse_mode"], "HTML")
+        self.assertTrue(removed.kwargs["link_preview_options"].is_disabled)
+
     async def test_overlap_during_notification_announces_acquisition_once(self):
         sending, release = asyncio.Event(), asyncio.Event()
 
@@ -115,8 +152,10 @@ class FamilyRefreshTest(unittest.IsolatedAsyncioTestCase):
 
         self.bot.send_message.assert_awaited_once_with(
             -100,
-            "🎮 New Steam Family game\nPortal 2\nAdded by: Alice\nhttps://store.steampowered.com/app/620/",
-            parse_mode=None,
+            "🎮 <b>Alice</b> added to the Steam Family:\n"
+            '1. <a href="https://store.steampowered.com/app/620/">Portal 2</a>',
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         self.assertEqual(
             self.rows["9"]["state"],

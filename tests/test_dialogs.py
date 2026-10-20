@@ -23,6 +23,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQuery,
+    LinkPreviewOptions,
     Message,
     Update,
     User,
@@ -1875,7 +1876,9 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
                 await self.db.update_family(FAMILY, notify_chat=-800)
                 await self.db.enqueue_alerts(FAMILY, [{"text": "Before removal"}])
                 await self.families.deliver_alerts(FAMILY)
-                self.families.bot.send_message.assert_awaited_once_with(-800, "Before removal", parse_mode=None)
+                self.families.bot.send_message.assert_awaited_once_with(
+                    -800, "Before removal", parse_mode=None, link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
                 self.families.bot.reset_mock()
                 await self.db.enqueue_alerts(FAMILY, [{"text": "Pending at removal"}])
                 self.assertEqual(
@@ -1908,7 +1911,9 @@ class DialogFlowTest(unittest.IsolatedAsyncioTestCase):
         row = await self.db.family(FAMILY)
         self.assertEqual(row["notify_chat"], -900)
         await self.families.deliver_alerts(FAMILY)
-        self.families.bot.send_message.assert_awaited_once_with(-900, "New group alert", parse_mode=None)
+        self.families.bot.send_message.assert_awaited_once_with(
+            -900, "New group alert", parse_mode=None, link_preview_options=LinkPreviewOptions(is_disabled=True)
+        )
 
     async def test_empty_inline_query_lists_recent_family_games_without_store_search(self):
         answer = AsyncMock()

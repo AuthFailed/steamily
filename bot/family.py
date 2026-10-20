@@ -18,11 +18,12 @@ from aiogram.exceptions import (
     TelegramNotFound,
     TelegramRetryAfter,
 )
+from aiogram.types import LinkPreviewOptions
 
 from . import charts
 from .db import Db
 from .health import Health
-from .library import ALERTS, family_events, format_event, format_notification, presence_events, reconcile
+from .library import ALERTS, family_events, format_event, format_notifications, presence_events, reconcile
 from .steam import (
     NoFamily,
     fetch_family_snapshot,
@@ -499,14 +500,19 @@ class Families:
             alerts = alert_settings(row)
             pending = []
             if alerts["games"]:
-                for event in events:
-                    pending.append({"text": format_notification(event, snapshot["names"], row["language"])})
+                pending.extend(
+                    {"text": text, "parse_mode": "HTML"}
+                    for text in format_notifications(events, snapshot["names"], row["language"])
+                )
             previous = (row["state"] or {}).get("observed", previous)
             if previous:
                 for event in family_events(previous, snapshot):
                     if alerts[event["kind"]]:
                         pending.append(
-                            {"text": format_event(event, snapshot["names"], snapshot["apps"], row["language"])}
+                            {
+                                "text": format_event(event, snapshot["names"], snapshot["apps"], row["language"]),
+                                "parse_mode": "HTML" if event["type"] == "removed" else None,
+                            }
                         )
             state["observed"] = {
                 "members": snapshot["members"],
@@ -603,7 +609,12 @@ class Families:
                             continue
                     self.health.in_flight += 1
                     try:
-                        await self.bot.send_message(chat_id, text, parse_mode=None)
+                        await self.bot.send_message(
+                            chat_id,
+                            text,
+                            parse_mode=event.get("parse_mode"),
+                            link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        )
                     except Exception:
                         self.health.failed_notifications += 1
                         self.health.last_notification_failure = time.monotonic()

@@ -20,6 +20,7 @@ MIGRATIONS = tuple(
         "009_game_nights.sql",
         "010_owner_transfers.sql",
         "011_game_responses.sql",
+        "012_alert_format.sql",
     )
 )
 

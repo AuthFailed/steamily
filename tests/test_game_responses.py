@@ -146,6 +146,7 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
                     (9, "009_game_nights.sql"),
                     (10, "010_owner_transfers.sql"),
                     (11, "011_game_responses.sql"),
+                    (12, "012_alert_format.sql"),
                 ],
             )
         self.account = dict(await self.db.account(10))
@@ -281,7 +282,7 @@ class GameResponsesTest(unittest.IsolatedAsyncioTestCase):
         await self.respond(self.account, 10, "recommend")
         async with self.db.pool.acquire() as connection:
             await migrate(connection)
-            await connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+            await connection.execute("DELETE FROM schema_migrations WHERE version >= 11")
             await migrate(connection)
         self.assertEqual((await self.db.account(10))["status"], "approved")
         self.assertEqual(len(await self.db.game_responses(self.account)), 1)
